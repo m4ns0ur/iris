@@ -1,0 +1,35 @@
+from pathlib import Path
+
+from iris.executor.models.subtask_creator import ExecutionPlan
+from iris.llm.client import LLMClient
+from iris.planner.models.proposal import Proposal
+from iris.utils.json_utils import extract_json
+
+
+class SubtaskCreator:
+    def __init__(self, model: str = "qwen3:8b"):
+        self.llm = LLMClient(model=model)
+
+    def build(self, proposal: Proposal) -> ExecutionPlan:
+        """
+        Generate ordered microtasks from a Proposal.
+        Each microtask should be executable and produce a working intermediate program.
+        """
+        # Prepare input for LLM
+        prompt_template = Path("iris/executor/prompts/subtask_creator.md").read_text()
+
+        core_features = "\n".join(f"- {f}" for f in proposal.scope.core_features)
+
+        prompt = (
+            prompt_template.replace("__LANGUAGE__", proposal.architecture.language)
+            .replace("__RUNTIME__", proposal.architecture.runtime)
+            .replace("__FRAMEWORK__", proposal.architecture.framework)
+            .replace("__PROJECT_STRUCTURE__", proposal.architecture.project_structure)
+            .replace("__ENTRYPOINT__", proposal.architecture.entrypoint)
+            .replace("__CORE_FEATURES__", core_features)
+        )
+
+        raw_output = self.llm.generate(prompt=prompt, temperature=0.2)
+
+        data = extract_json(raw_output)
+        return ExecutionPlan.model_validate(data)
