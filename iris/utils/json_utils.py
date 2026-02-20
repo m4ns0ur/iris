@@ -14,4 +14,4 @@ def extract_json(text: str) -> dict:
         raise ValueError("No JSON found")
 
     json_str = text[start : end + 1]
-    return json.loads(json_str)
+    return json.loads(json_str)  # type: ignore

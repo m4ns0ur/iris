@@ -3,12 +3,21 @@ from pathlib import Path
 
 from iris.llm.client import LLMClient
 from iris.planner.models.proposal import Proposal
+from iris.utils.enum_repair import EnumRepairEngine
 from iris.utils.json_utils import extract_json
 
 
 class ProposalBuilder:
-    def __init__(self):
+    def __init__(self) -> None:
         self.llm = LLMClient()
+        self.enum_repair = EnumRepairEngine()
+
+        self.enum_repair.register_enum_field(
+            field_path="architecture.runtime",
+            allowed_values={"CLI", "GUI", "WEB", "LIBRARY"},
+            is_list=True,
+            redirect_invalid_to="architecture.framework",
+        )
 
     def _calibrate_confidence(
         self,
@@ -54,6 +63,7 @@ class ProposalBuilder:
         )
 
         data = extract_json(raw_output)
+        data = self.enum_repair.repair(data)
         proposal = Proposal.model_validate(data)
         defaults_used = sum(1 for q in proposal.uncertainties)
         proposal.confidence_score = self._calibrate_confidence(proposal, defaults_used)

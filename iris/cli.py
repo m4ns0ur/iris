@@ -1,7 +1,7 @@
 import json
 
-import typer
 from rich import print
+import typer
 
 from iris.executor.subtask_creator import SubtaskCreator
 from iris.planner.clarification import ClarificationBuilder

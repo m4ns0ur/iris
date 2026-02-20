@@ -15,7 +15,7 @@ def render_markdown(proposal: Proposal) -> str:
 
 ## Architecture
 - Language: {proposal.architecture.language}
-- Runtime: {proposal.architecture.runtime}
+- Runtime: {", ".join(proposal.architecture.runtime)}
 - Framework: {proposal.architecture.framework}
 - Structure: {proposal.architecture.project_structure}
 - Entrypoint: {proposal.architecture.entrypoint}

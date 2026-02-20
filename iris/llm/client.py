@@ -2,9 +2,11 @@ import httpx
 
 
 class LLMClient:
-    def __init__(self, model: str = "qwen3"):
+    def __init__(
+        self, model: str = "Qwen_Qwen3-VL-8B-Instruct-GGUF_Qwen3VL-8B-Instruct-Q4_K_M"
+    ):
         self.model = model
-        self.url = "http://localhost:8000/v1/chat/completions"
+        self.url = "http://localhost:8080/v1/chat/completions"
 
     def generate(
         self,
@@ -36,4 +38,4 @@ class LLMClient:
             response = httpx.post(self.url, json=payload, timeout=120)
             response.raise_for_status()
 
-        return response.json()["choices"][0]["message"]["content"]
+        return str(response.json()["choices"][0]["message"]["content"])

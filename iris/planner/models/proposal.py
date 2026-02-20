@@ -1,14 +1,23 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Architecture(BaseModel):
     language: str
-    runtime: Literal["CLI", "GUI", "Web", "Library"]
+    runtime: list[Literal["CLI", "GUI", "Web", "Library"]]
     framework: str
     project_structure: Literal["single_file", "modular", "package"]
     entrypoint: str
+
+    @field_validator("runtime")
+    @classmethod
+    def validate_runtime(cls: type["Architecture"], v: list[str]) -> list[str]:
+        allowed = {"CLI", "GUI", "Web", "Library"}
+        for r in v:
+            if r not in allowed:
+                raise ValueError(f"Invalid runtime: {r}")
+        return v
 
 
 class Scope(BaseModel):

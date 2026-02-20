@@ -7,8 +7,8 @@ from iris.utils.json_utils import extract_json
 
 
 class SubtaskCreator:
-    def __init__(self, model: str = "qwen3:8b"):
-        self.llm = LLMClient(model=model)
+    def __init__(self) -> None:
+        self.llm = LLMClient()
 
     def build(self, proposal: Proposal) -> ExecutionPlan:
         """
@@ -22,7 +22,7 @@ class SubtaskCreator:
 
         prompt = (
             prompt_template.replace("__LANGUAGE__", proposal.architecture.language)
-            .replace("__RUNTIME__", proposal.architecture.runtime)
+            .replace("__RUNTIME__", ", ".join(proposal.architecture.runtime))
             .replace("__FRAMEWORK__", proposal.architecture.framework)
             .replace("__PROJECT_STRUCTURE__", proposal.architecture.project_structure)
             .replace("__ENTRYPOINT__", proposal.architecture.entrypoint)

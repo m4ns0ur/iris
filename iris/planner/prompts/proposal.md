@@ -22,7 +22,7 @@ Rules:
 
   "architecture": {
     "language": "string",
-    "runtime": "CLI | GUI | Web | Library",
+    "runtime": ["CLI | GUI | Web | Library"]
     "framework": "string",
     "project_structure": "single_file | modular | package",
     "entrypoint": "string"
@@ -69,6 +69,12 @@ Confidence scoring guidelines:
 - 0.7–0.9 if minor scope ambiguities remain.
 - 0.5–0.7 if significant decisions are assumed.
 - Below 0.5 if major unknowns exist.
+
+Runtime guidelines:
+- runtime must be an array. If only one runtime applies, still return it as a single-element array.
+- runtime must be one or more of: "CLI", "GUI", "Web", "Library"
+- Do NOT include technologies such as Wayland, X11, systemd, glibc in runtime. Those belong in "framework" or "core_features".
+- framework: The primary technical platform, toolkit, or system layer used. Examples: pygame, fastapi, react, wayland, custom kernel
 
 Additional rules:
 - Do NOT add extra fields.
