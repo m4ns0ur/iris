@@ -1,15 +1,39 @@
 import json
+from pathlib import Path
 
 from rich import print
 import typer
 
+from iris.executor.loop import Executor
 from iris.executor.subtask_creator import SubtaskCreator
+from iris.llm.client import LLMClient
 from iris.planner.clarification import ClarificationBuilder
 from iris.planner.classifier import Classifier
 from iris.planner.proposal import ProposalBuilder
 from iris.planner.renderer import render_markdown
+from iris.tools.filesystem import FileSystemTool
+from iris.tools.registry import ToolRegistry
+from iris.tools.shell import ShellTool
 
 app = typer.Typer()
+
+
+def build_executor() -> Executor:
+    """
+    Centralized executor construction.
+    Keeps iris immutable.
+    """
+    llm = LLMClient()
+
+    registry = ToolRegistry()
+    registry.register("filesystem", FileSystemTool(root=str(Path.cwd())))
+    registry.register("shell", ShellTool())
+
+    return Executor(
+        llm=llm,
+        tools=registry,
+        max_steps=5,
+    )
 
 
 @app.command()
@@ -18,24 +42,27 @@ def plan(intent: str):
     clarification_builder = ClarificationBuilder()
     proposal_builder = ProposalBuilder()
 
-    # ---- Phase 0: Intent Classification ----
     classification = classifier.build(intent)
 
-    if classification.task_type == "atomic":
-        print("[bold cyan]iris detected an atomic task.[/bold cyan]")
+    # -----------------------------
+    # Atomic / Script → Direct Execution via Executor
+    # -----------------------------
+    if classification.task_type in ("atomic", "script"):
+        print("[bold cyan]iris detected an executable task.[/bold cyan]")
         print(f"[dim]{classification.reasoning}[/dim]\n")
 
-        # For now, just print a minimal execution hint.
-        # Later this can call an AtomicExecutor.
-        print("[yellow]No architectural planning required.[/yellow]")
-        print("You may directly execute this task.\n")
+        executor = build_executor()
+        result = executor.run(intent)
+
+        print("\n[bold green]Execution Result:[/bold green]\n")
+        print(result)
         return
 
-    if classification.task_type == "script":
-        print("[bold cyan]iris detected a small script task.[/bold cyan]")
-        print(f"[dim]{classification.reasoning}[/dim]\n")
-        # For now, treat scripts as lightweight projects.
-        # Later you can create a dedicated ScriptPlanner.
+    # -----------------------------
+    # Architectural → Planning Flow
+    # -----------------------------
+    print("[bold cyan]iris detected an architectural task.[/bold cyan]")
+    print(f"[dim]{classification.reasoning}[/dim]\n")
 
     # ---- Phase 1: Clarification ----
     clarification_set = clarification_builder.build(intent)
@@ -73,6 +100,8 @@ def plan(intent: str):
     # ---- Phase 3: Execution Planning ----
     subtask_creator = SubtaskCreator()
     execution_plan = subtask_creator.build(proposal)
+
+    print("\n[bold]Execution Plan:[/bold]\n")
     print(json.dumps(execution_plan.model_dump(), indent=2))
 
 

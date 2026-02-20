@@ -1,6 +1,6 @@
-from typing import Literal, Union
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from iris.executor.models.tool_call import ToolCall
 
@@ -15,4 +15,7 @@ class ToolAction(BaseModel):
     call: ToolCall
 
 
-AgentResponse = Union[FinalAnswer, ToolAction]
+AgentResponse = Annotated[
+    FinalAnswer | ToolAction,
+    Field(discriminator="type"),
+]

@@ -1,7 +1,10 @@
+import json
 from pathlib import Path
 
+from pydantic import TypeAdapter
+
 from iris.executor.models.agent_step import AgentResponse, FinalAnswer, ToolAction
-from iris.executor.state import ExecutionState
+from iris.executor.models.state import ExecutionState
 from iris.llm.client import LLMClient
 from iris.tools.registry import ToolRegistry
 from iris.utils.json_utils import extract_json
@@ -45,13 +48,31 @@ class Executor:
         """
 
         prompt_template = Path("iris/executor/prompts/executor.md").read_text()
+
+        history_str = ", ".join(state.history) if state.history else "None"
+        tool_results_str = (
+            "\n".join(json.dumps(r.model_dump(), indent=2) for r in state.tool_results)
+            if state.tool_results
+            else "None"
+        )
+
         prompt = (
             prompt_template.replace("__GOAL__", state.user_goal)
-            .replace("__HISTORY__", state.history)
-            .replace("__TOOL_RESULTS__", [r.model_dump() for r in state.tool_results])
+            .replace("__HISTORY__", history_str)
+            .replace("__TOOL_RESULTS__", tool_results_str)
         )
 
         raw_output = self.llm.generate(prompt=prompt, temperature=0.2)
-
         data = extract_json(raw_output)
-        return AgentResponse.model_validate(data)
+
+        if data.get("type") == "tool":
+            call = data.get("call", {})
+            tool_name = call.get("tool")
+
+            # Auto-repair raw shell command
+            if tool_name in ("ls", "pytest", "git", "python"):
+                data["call"]["tool"] = "shell.run"
+                data["call"]["arguments"] = {"command": [tool_name]}
+
+        adapter = TypeAdapter(AgentResponse)
+        return adapter.validate_python(data)
