@@ -11,9 +11,16 @@ class ShellTool(Tool):
 
     ALLOWED_COMMANDS = {
         "ls",
-        "pytest",
-        "python",
-        "pip",
+        "echo",
+        "pwd",
+        "cat",
+        "du",
+        "df",
+        "head",
+        "tail",
+        "find",
+        "ps",
+        "grep",
         "git",
     }
 

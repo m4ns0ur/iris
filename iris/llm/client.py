@@ -1,4 +1,8 @@
+import json
+
 import httpx
+
+from iris.utils.logger import logger
 
 
 class LLMClient:
@@ -31,6 +35,7 @@ class LLMClient:
 
         # Retry once in case of network hiccup
         try:
+            logger.debug(f"LLM Request Payload: {json.dumps(payload, indent=2)}")
             response = httpx.post(self.url, json=payload, timeout=120)
             response.raise_for_status()
         except Exception as e:
@@ -38,4 +43,5 @@ class LLMClient:
             response = httpx.post(self.url, json=payload, timeout=120)
             response.raise_for_status()
 
+        logger.debug(f"LLM Raw Response: {json.dumps(response.json(), indent=2)}")
         return str(response.json()["choices"][0]["message"]["content"])

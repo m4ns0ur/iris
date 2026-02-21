@@ -14,8 +14,22 @@ from iris.planner.renderer import render_markdown
 from iris.tools.filesystem import FileSystemTool
 from iris.tools.registry import ToolRegistry
 from iris.tools.shell import ShellTool
+from iris.utils.logger import logger, set_debug
 
-app = typer.Typer()
+app = typer.Typer(invoke_without_command=True)
+
+
+# Make `plan` the default command if no subcommand is specified
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    intent: str = typer.Argument(None),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logs"),
+):
+    set_debug(debug)
+
+    if intent is not None:
+        ctx.invoke(plan, intent=intent)
 
 
 def build_executor() -> Executor:
@@ -24,10 +38,11 @@ def build_executor() -> Executor:
     Keeps iris immutable.
     """
     llm = LLMClient()
-
     registry = ToolRegistry()
     registry.register("filesystem", FileSystemTool(root=str(Path.cwd())))
     registry.register("shell", ShellTool())
+
+    logger.debug("Executor tools registered: filesystem, shell")
 
     return Executor(
         llm=llm,
@@ -38,11 +53,17 @@ def build_executor() -> Executor:
 
 @app.command()
 def plan(intent: str):
+    """
+    Main iris planning/execution command.
+    """
+    logger.debug(f"Starting plan for intent: {intent}")
+
     classifier = Classifier()
     clarification_builder = ClarificationBuilder()
     proposal_builder = ProposalBuilder()
 
     classification = classifier.build(intent)
+    logger.debug(f"Task classification: {classification.task_type}")
 
     # -----------------------------
     # Atomic / Script → Direct Execution via Executor
@@ -53,6 +74,7 @@ def plan(intent: str):
 
         executor = build_executor()
         result = executor.run(intent)
+        logger.debug(f"Executor result: {result}")
 
         print("\n[bold green]Execution Result:[/bold green]\n")
         print(result)
@@ -66,6 +88,7 @@ def plan(intent: str):
 
     # ---- Phase 1: Clarification ----
     clarification_set = clarification_builder.build(intent)
+    logger.debug(f"Clarifications generated: {clarification_set}")
 
     answers = {}
     defaults_used = 0
@@ -84,6 +107,7 @@ def plan(intent: str):
             else:
                 answers[q.question] = user_input
 
+            logger.debug(f"Answer recorded: {q.question} → {answers[q.question]}")
             print()
 
     # ---- Phase 2: Proposal ----
@@ -93,6 +117,7 @@ def plan(intent: str):
         task_type=classification.task_type,
         defaults_used=defaults_used,
     )
+    logger.debug(f"Proposal generated: {proposal.model_dump()}")
 
     md = render_markdown(proposal)
     print(md)
@@ -100,6 +125,7 @@ def plan(intent: str):
     # ---- Phase 3: Execution Planning ----
     subtask_creator = SubtaskCreator()
     execution_plan = subtask_creator.build(proposal)
+    logger.debug(f"Execution plan: {execution_plan.model_dump()}")
 
     print("\n[bold]Execution Plan:[/bold]\n")
     print(json.dumps(execution_plan.model_dump(), indent=2))
