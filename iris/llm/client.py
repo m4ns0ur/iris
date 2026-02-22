@@ -1,8 +1,6 @@
-import json
-
 import httpx
 
-from iris.utils.logger import logger
+from iris.utils.logger import log_llm_payload, log_llm_response
 
 
 class LLMClient:
@@ -16,7 +14,7 @@ class LLMClient:
         self,
         prompt: str,
         temperature: float = 0.2,
-        max_tokens: int = 2048,
+        # max_tokens: int = 2048,
     ) -> str:
         """
         Generate a completion from llama.cpp server (OpenAI-compatible API)
@@ -29,13 +27,13 @@ class LLMClient:
                 {"role": "user", "content": prompt},
             ],
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            # "max_tokens": max_tokens,
             "response_format": {"type": "json_object"},
         }
 
         # Retry once in case of network hiccup
         try:
-            logger.debug(f"LLM Request Payload: {json.dumps(payload, indent=2)}")
+            log_llm_payload(payload)
             response = httpx.post(self.url, json=payload, timeout=120)
             response.raise_for_status()
         except Exception as e:
@@ -43,5 +41,5 @@ class LLMClient:
             response = httpx.post(self.url, json=payload, timeout=120)
             response.raise_for_status()
 
-        logger.debug(f"LLM Raw Response: {json.dumps(response.json(), indent=2)}")
+        log_llm_response(response.text)
         return str(response.json()["choices"][0]["message"]["content"])

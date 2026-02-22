@@ -1,8 +1,10 @@
+import os
+from pathlib import Path
 import subprocess
 
 from iris.executor.models.tool_call import ToolCall, ToolResult
 from iris.tools.base import Tool
-from iris.utils import logger
+from iris.utils.logger import logger
 
 
 class ShellTool(Tool):
@@ -38,10 +40,10 @@ class ShellTool(Tool):
                 tool=call.tool, success=False, stderr="Unsupported shell operation."
             )
 
-        if not self.workdir.exists():
-            raise ValueError("Workspace does not exist")
-
-        assert self.workdir.is_dir()
+        assert self.workdir and Path(self.workdir).exists(), (
+            "Workspace directory does not exist"
+        )
+        assert Path(self.workdir).is_dir(), "Workspace must be a directory"
 
         try:
             command: list[str] = call.arguments["command"]
@@ -55,6 +57,9 @@ class ShellTool(Tool):
             logger.debug(
                 f"Running shell command in {self.workdir}: {' '.join(command)}"
             )
+
+            env = os.environ.copy()
+            env["PWD"] = str(self.workdir)
 
             result = subprocess.run(
                 command,

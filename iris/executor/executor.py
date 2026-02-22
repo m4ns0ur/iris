@@ -6,9 +6,9 @@ from pydantic import TypeAdapter
 from iris.executor.models.agent_step import AgentResponse, FinalAnswer, ToolAction
 from iris.executor.models.state import ExecutionState
 from iris.llm.client import LLMClient
+from iris.planner.proposal import Proposal
 from iris.tools.registry import ToolRegistry
 from iris.utils.json_utils import extract_json
-from iris.planner.proposal import Proposal
 
 MAX_TOOL_OUTPUT = 4000
 
