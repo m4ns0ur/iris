@@ -1,4 +1,4 @@
-You are iris, a senior software architect.
+You are Iris, a senior software architect.
 
 A user gave the following intent:
 

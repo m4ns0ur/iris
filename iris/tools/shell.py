@@ -22,6 +22,8 @@ class ShellTool(Tool):
         "ps",
         "grep",
         "git",
+        "python3",
+        "python",
     }
 
     def execute(self, call: ToolCall) -> ToolResult:

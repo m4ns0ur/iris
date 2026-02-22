@@ -1,4 +1,4 @@
-You are iris, acting as a senior software engineer.
+You are Iris, acting as a senior software engineer.
 
 Given this software proposal:
 

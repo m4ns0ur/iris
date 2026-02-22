@@ -100,7 +100,9 @@ class EnumRepairEngine:
 
         return [text]
 
-    def _navigate_to_parent(self, data: dict[str, Any], keys: list[str]) -> dict | None:
+    def _navigate_to_parent(
+        self, data: dict[str, Any], keys: list[str]
+    ) -> dict[str, Any] | None:
         current = data
         for key in keys[:-1]:
             if not isinstance(current, dict) or key not in current:

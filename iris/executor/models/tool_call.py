@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 class ToolCall(BaseModel):
     """
-    Structured tool invocation request produced by iris.
+    Structured tool invocation request produced by Iris.
     """
 
     tool: Literal[

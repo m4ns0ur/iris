@@ -1,4 +1,3 @@
-# iris/utils/logger.py
 import logging
 from pathlib import Path
 import sys
@@ -21,6 +20,6 @@ fh.setLevel(logging.DEBUG)
 logger.addHandler(fh)
 
 
-def set_debug(enable: bool):
+def set_debug(enable: bool) -> None:
     logger.setLevel(logging.DEBUG if enable else logging.INFO)
     logger.debug(f"Debug mode enabled: {enable}")

@@ -3,9 +3,9 @@ from iris.planner.models.proposal import Proposal
 
 def render_markdown(proposal: Proposal) -> str:
     if proposal.architecture.project_structure == "single_file":
-        title = "# iris Script Plan"
+        title = "# Iris Script Plan"
     else:
-        title = "# iris Project Proposal"
+        title = "# Iris Project Proposal"
 
     md = f"""
 {title}

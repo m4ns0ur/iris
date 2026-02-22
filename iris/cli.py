@@ -4,7 +4,7 @@ from pathlib import Path
 from rich import print
 import typer
 
-from iris.executor.loop import Executor
+from iris.executor.executor import Executor
 from iris.executor.subtask_creator import SubtaskCreator
 from iris.llm.client import LLMClient
 from iris.planner.clarification import ClarificationBuilder
@@ -32,10 +32,10 @@ def main(
         ctx.invoke(plan, intent=intent)
 
 
-def build_executor() -> Executor:
+def build_executor(max_steps: int = 5) -> Executor:
     """
     Centralized executor construction.
-    Keeps iris immutable.
+    Keeps Iris immutable.
     """
     llm = LLMClient()
     registry = ToolRegistry()
@@ -47,14 +47,14 @@ def build_executor() -> Executor:
     return Executor(
         llm=llm,
         tools=registry,
-        max_steps=5,
+        max_steps=max_steps,
     )
 
 
 @app.command()
 def plan(intent: str):
     """
-    Main iris planning/execution command.
+    Main Iris planning/execution command.
     """
     logger.debug(f"Starting plan for intent: {intent}")
 
@@ -69,7 +69,7 @@ def plan(intent: str):
     # Atomic / Script → Direct Execution via Executor
     # -----------------------------
     if classification.task_type in ("atomic", "script"):
-        print("[bold cyan]iris detected an executable task.[/bold cyan]")
+        print("[bold cyan]Iris detected an executable task.[/bold cyan]")
         print(f"[dim]{classification.reasoning}[/dim]\n")
 
         executor = build_executor()
@@ -83,7 +83,7 @@ def plan(intent: str):
     # -----------------------------
     # Architectural → Planning Flow
     # -----------------------------
-    print("[bold cyan]iris detected an architectural task.[/bold cyan]")
+    print("[bold cyan]Iris detected an architectural task.[/bold cyan]")
     print(f"[dim]{classification.reasoning}[/dim]\n")
 
     # ---- Phase 1: Clarification ----
@@ -94,7 +94,7 @@ def plan(intent: str):
     defaults_used = 0
 
     if clarification_set.questions:
-        print("\n[bold]iris needs clarification:[/bold]\n")
+        print("\n[bold]Iris needs clarification:[/bold]\n")
 
         for i, q in enumerate(clarification_set.questions, 1):
             print(f"{i}. {q.question}")
@@ -129,6 +129,24 @@ def plan(intent: str):
 
     print("\n[bold]Execution Plan:[/bold]\n")
     print(json.dumps(execution_plan.model_dump(), indent=2))
+
+    print("\n[bold cyan]Executing subtasks...[/bold cyan]\n")
+
+    executor = build_executor(max_steps=10)
+
+    for i, task in enumerate(execution_plan.subtasks, 1):
+        print(f"[bold]Step {i}:[/bold] {task.description}")
+        logger.debug(f"Executing subtask: {task}")
+
+        result = executor.run(task.description, shared_context=proposal)
+
+        logger.debug(f"Subtask result: {result}")
+
+        print(f"[green]Result:[/green]\n{result}\n")
+
+        if "Execution stopped" in result:
+            print("[red]Subtask failed. Halting project execution.[/red]")
+            break
 
 
 if __name__ == "__main__":

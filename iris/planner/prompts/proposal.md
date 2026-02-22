@@ -7,7 +7,7 @@ User intent:
 Clarified decisions:
 __CLARIFICATIONS__
 
-You are iris, a senior software architect.
+You are Iris, a senior software architect.
 
 Your task:
 Generate a project proposal in STRICT JSON format.
