@@ -25,24 +25,40 @@ def main(
     ctx: typer.Context,
     intent: str = typer.Argument(None),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logs"),
+    workspace: Path = typer.Option(
+        None,
+        "--workspace",
+        "-w",
+        help="Workspace directory for project execution",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
 ):
     set_debug(debug)
 
+    if workspace is None:
+        workspace = Path.cwd()
+
+    # store in context for later usage
+    ctx.obj = {"workspace": workspace}
+
     if intent is not None:
-        ctx.invoke(plan, intent=intent)
+        plan(ctx, intent)
 
 
-def build_executor(max_steps: int = 5) -> Executor:
+def build_executor(workspace: Path, max_steps: int = 5) -> Executor:
     """
     Centralized executor construction.
-    Keeps Iris immutable.
     """
     llm = LLMClient()
     registry = ToolRegistry()
-    registry.register("filesystem", FileSystemTool(root=str(Path.cwd())))
-    registry.register("shell", ShellTool())
 
-    logger.debug("Executor tools registered: filesystem, shell")
+    registry.register("filesystem", FileSystemTool(root=str(workspace)))
+    registry.register("shell", ShellTool(workdir=str(workspace)))
+
+    logger.debug(f"Executor tools registered with workspace: {workspace}")
 
     return Executor(
         llm=llm,
@@ -52,7 +68,10 @@ def build_executor(max_steps: int = 5) -> Executor:
 
 
 @app.command()
-def plan(intent: str):
+def plan(
+    ctx: typer.Context,
+    intent: str = typer.Argument(...),
+):
     """
     Main Iris planning/execution command.
     """
@@ -132,7 +151,8 @@ def plan(intent: str):
 
     print("\n[bold cyan]Executing subtasks...[/bold cyan]\n")
 
-    executor = build_executor(max_steps=10)
+    workspace: Path = ctx.obj["workspace"]
+    executor = build_executor(workspace, max_steps=20)
 
     for i, task in enumerate(execution_plan.subtasks, 1):
         print(f"[bold]Step {i}:[/bold] {task.description}")

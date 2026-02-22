@@ -12,14 +12,14 @@ class FileSystemTool(Tool):
     def __init__(self, root: str):
         self.root = Path(root).resolve()
 
-    def _resolve(self, relative_path: str) -> Path:
-        path = (self.root / relative_path).resolve()
+    def _resolve(self, path: str) -> Path:
+        candidate = (self.root / path).resolve()
 
         # Prevent path traversal
-        if not str(path).startswith(str(self.root)):
-            raise PermissionError("Path escapes sandbox root.")
+        if not str(candidate).startswith(str(self.root.resolve())):
+            raise ValueError("Access outside workspace is not allowed")
 
-        return path
+        return candidate
 
     def execute(self, call: ToolCall) -> ToolResult:
         try:
