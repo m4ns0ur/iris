@@ -6,30 +6,30 @@ from iris.executor.models.tool_call import ToolCall, ToolResult
 from iris.tools.base import Tool
 from iris.utils.logger import logger
 
+ALLOWED_COMMANDS = {
+    "ls",
+    "echo",
+    "pwd",
+    "cat",
+    "du",
+    "df",
+    "head",
+    "tail",
+    "find",
+    "ps",
+    "grep",
+    "git",
+    "python3",
+    "python",
+    "uv",
+    "mkdir",
+}
+
 
 class ShellTool(Tool):
     """
     Restricted shell execution tool.
     """
-
-    ALLOWED_COMMANDS = {
-        "ls",
-        "echo",
-        "pwd",
-        "cat",
-        "du",
-        "df",
-        "head",
-        "tail",
-        "find",
-        "ps",
-        "grep",
-        "git",
-        "python3",
-        "python",
-        "uv",
-        "mkdir",
-    }
 
     def __init__(self, workdir: str):
         self.workdir = workdir
@@ -51,15 +51,12 @@ class ShellTool(Tool):
             if not command:
                 raise ValueError("Empty command.")
 
-            if command[0] not in self.ALLOWED_COMMANDS:
+            if command[0] not in ALLOWED_COMMANDS:
                 raise PermissionError(f"Command '{command[0]}' not allowed.")
 
             logger.debug(
                 f"Running shell command in {self.workdir}: {' '.join(command)}"
             )
-
-            env = os.environ.copy()
-            env["PWD"] = str(self.workdir)
 
             result = subprocess.run(
                 command,
@@ -67,6 +64,10 @@ class ShellTool(Tool):
                 capture_output=True,
                 text=True,
                 timeout=20,
+            )
+
+            logger.debug(
+                f"Command stdout: {result.stdout}\nCommand stderr: {result.stderr}"
             )
 
             return ToolResult(

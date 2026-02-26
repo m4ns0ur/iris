@@ -52,9 +52,9 @@ class ProposalBuilder:
         prompt_template = Path("iris/planner/prompts/proposal.md").read_text()
 
         prompt = (
-            prompt_template.replace("__TASK_TYPE__", task_type)
-            .replace("__INTENT__", intent)
-            .replace("__CLARIFICATIONS__", json.dumps(clarifications, indent=2))
+            prompt_template.replace("[TASK_TYPE]", task_type)
+            .replace("[INTENT]", intent)
+            .replace("[CLARIFICATIONS]", json.dumps(clarifications, indent=2))
         )
 
         raw_output = self.llm.generate(

@@ -59,14 +59,14 @@ class FileSystemTool(Tool):
         return ToolResult(tool=call.tool, success=True)
 
     def _list(self, call: ToolCall) -> ToolResult:
-        path = self._resolve(call.arguments.get("path", "."))
+        path = self._resolve(call.arguments["path"])
         items = [p.name for p in path.iterdir()]
-        return ToolResult(tool=call.tool, success=True, metadata={"items": items})
+        return ToolResult(tool=call.tool, success=True, stdout="\n".join(items))
 
     def _exists(self, call: ToolCall) -> ToolResult:
         path = self._resolve(call.arguments["path"])
         return ToolResult(
-            tool=call.tool, success=True, metadata={"exists": path.exists()}
+            tool=call.tool, success=True, stdout="path exists" if path.exists() else "path does not exist"
         )
 
     def _mkdir(self, call: ToolCall) -> ToolResult:

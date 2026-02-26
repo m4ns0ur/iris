@@ -1,6 +1,6 @@
 # Iris
 
-**Iris** is a local-first AI agent designed to assist with software development and evolve into a general-purpose autonomous agent — optimized specifically for small open models (~8B parameters) running on local hardware.
+**Iris** is a local-first AI agent designed to assist with software development and evolve into a general-purpose autonomous agent - optimized specifically for small open models (~8B parameters) running on local hardware.
 
 Iris focuses on architectural reliability rather than model size. Instead of depending on massive cloud models, it compensates with structured planning, deterministic state management, and strong tool orchestration.
 
@@ -11,7 +11,7 @@ Build a **privacy-first, local AI agent framework** that:
 * Runs efficiently on consumer hardware
 * Works with small open models
 * Uses strong architectural scaffolding instead of brute-force intelligence
-* Evolves from coding assistant → general autonomous agent
+* Evolves from coding assistant to general autonomous agent
 
 Iris is not a wrapper around an LLM.
 
@@ -173,8 +173,6 @@ cd iris
 # Install dependencies
 uv sync
 ```
-
-(Adjust based on your actual setup.)
 
 ## Usage
 

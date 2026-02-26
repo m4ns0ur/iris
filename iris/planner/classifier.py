@@ -12,7 +12,7 @@ class Classifier:
     def build(self, intent: str) -> Classification:
         prompt_template = Path("iris/planner/prompts/classifier.md").read_text()
 
-        prompt = prompt_template.replace("__INTENT__", intent)
+        prompt = prompt_template.replace("[INTENT]", intent)
 
         raw_output = self.llm.generate(
             prompt=prompt,

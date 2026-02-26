@@ -31,8 +31,10 @@ def set_debug(enable: bool) -> None:
     logger.debug(f"Debug mode enabled: {enable}")
 
 
-def log_llm_payload(payload: dict):
+def log_llm_payload(payload: dict) -> None:
     logger.debug("========== LLM REQUEST ==========")
+
+    console.print(Pretty(payload))
 
     logger.debug(f"Model: {payload.get('model')}")
     logger.debug(f"Temperature: {payload.get('temperature')}")
@@ -60,12 +62,31 @@ def log_llm_payload(payload: dict):
     logger.debug("=================================\n")
 
 
-def log_llm_response(response: str):
+def log_llm_response(response: str) -> None:
     logger.debug("========== LLM RESPONSE ==========")
 
     try:
         parsed = json.loads(response)
         console.print(Pretty(parsed))
+
+        choices = parsed.get("choices", [])
+
+        for i, choice in enumerate(choices):
+            message = choice.get("message", {})
+            role = message.get("role")
+            content = message.get("content")
+
+            logger.debug(f"\nChoice[{i}] role={role}")
+
+            if isinstance(content, str):
+                try:
+                    parsed_content = json.loads(content)
+                    logger.debug("Parsed JSON content:")
+                    console.print(Pretty(parsed_content, expand_all=True))
+                except Exception:
+                    logger.debug(f"Content preview:\n{content}")
+            else:
+                console.print(Pretty(content))
     except Exception:
         logger.debug(response)
 

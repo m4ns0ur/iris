@@ -12,7 +12,7 @@ class ClarificationBuilder:
     def build(self, intent: str) -> ClarificationSet:
         prompt_template = Path("iris/planner/prompts/clarification.md").read_text()
 
-        prompt = prompt_template.replace("__INTENT__", intent)
+        prompt = prompt_template.replace("[INTENT]", intent)
 
         raw_output = self.llm.generate(
             prompt=prompt,

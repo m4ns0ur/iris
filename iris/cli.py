@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import sys
 
 from rich import print
 import typer
@@ -35,7 +36,7 @@ def main(
         dir_okay=True,
         resolve_path=True,
     ),
-):
+) -> None:
     set_debug(debug)
 
     if workspace is None:
@@ -48,7 +49,7 @@ def main(
         plan(ctx, intent)
 
 
-def build_executor(workspace: Path, max_steps: int = 5) -> Executor:
+def build_executor(workspace: Path, task_type: str) -> Executor:
     """
     Centralized executor construction.
     """
@@ -63,7 +64,7 @@ def build_executor(workspace: Path, max_steps: int = 5) -> Executor:
     return Executor(
         llm=llm,
         tools=registry,
-        max_steps=max_steps,
+        task_type=task_type,
     )
 
 
@@ -71,27 +72,27 @@ def build_executor(workspace: Path, max_steps: int = 5) -> Executor:
 def plan(
     ctx: typer.Context,
     intent: str = typer.Argument(...),
-):
+) -> None:
     """
     Main Iris planning/execution command.
     """
     logger.debug(f"Starting plan for intent: {intent}")
 
     classifier = Classifier()
-    clarification_builder = ClarificationBuilder()
-    proposal_builder = ProposalBuilder()
-
     classification = classifier.build(intent)
     logger.debug(f"Task classification: {classification.task_type}")
 
     # -----------------------------
-    # Atomic / Script → Direct Execution via Executor
+    # Atomic -> Direct Execution via Executor
     # -----------------------------
-    if classification.task_type in ("atomic", "script"):
+    if classification.task_type == "atomic":
         print("[bold cyan]Iris detected an executable task.[/bold cyan]")
         print(f"[dim]{classification.reasoning}[/dim]\n")
 
-        executor = build_executor()
+        workspace: Path = ctx.obj["workspace"]
+        executor = build_executor(
+            workspace=workspace, task_type=classification.task_type
+        )
         result = executor.run(intent)
         logger.debug(f"Executor result: {result}")
 
@@ -106,6 +107,7 @@ def plan(
     print(f"[dim]{classification.reasoning}[/dim]\n")
 
     # ---- Phase 1: Clarification ----
+    clarification_builder = ClarificationBuilder()
     clarification_set = clarification_builder.build(intent)
     logger.debug(f"Clarifications generated: {clarification_set}")
 
@@ -130,6 +132,7 @@ def plan(
             print()
 
     # ---- Phase 2: Proposal ----
+    proposal_builder = ProposalBuilder()
     proposal = proposal_builder.build(
         intent=intent,
         clarifications=answers,
@@ -152,7 +155,7 @@ def plan(
     print("\n[bold cyan]Executing subtasks...[/bold cyan]\n")
 
     workspace: Path = ctx.obj["workspace"]
-    executor = build_executor(workspace, max_steps=20)
+    executor = build_executor(workspace=workspace, task_type=classification.task_type)
 
     for i, task in enumerate(execution_plan.subtasks, 1):
         print(f"[bold]Step {i}:[/bold] {task.description}")

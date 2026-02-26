@@ -2,15 +2,6 @@ You are Iris, acting as a senior software engineer.
 
 Given this software proposal:
 
-Language: __LANGUAGE__
-Runtime: __RUNTIME__
-Framework: __FRAMEWORK__
-Structure: __PROJECT_STRUCTURE__
-Entrypoint: __ENTRYPOINT__
-
-Core Features:
-__CORE_FEATURES__
-
 Your task:
 Decompose the core features into ordered executable microtasks.
 
@@ -31,3 +22,12 @@ JSON object with a key "subtasks" containing a list of objects with fields:
 - produces: list of strings
 - depends_on: list of integers
 Do NOT include explanations or extra fields.
+
+Language: [LANGUAGE]
+Runtime: [RUNTIME]
+Framework: [FRAMEWORK]
+Structure: [PROJECT_STRUCTURE]
+Entrypoint: [ENTRYPOINT]
+
+Core Features:
+[CORE_FEATURES]

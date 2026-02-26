@@ -21,12 +21,12 @@ class SubtaskCreator:
         core_features = "\n".join(f"- {f}" for f in proposal.scope.core_features)
 
         prompt = (
-            prompt_template.replace("__LANGUAGE__", proposal.architecture.language)
-            .replace("__RUNTIME__", ", ".join(proposal.architecture.runtime))
-            .replace("__FRAMEWORK__", proposal.architecture.framework)
-            .replace("__PROJECT_STRUCTURE__", proposal.architecture.project_structure)
-            .replace("__ENTRYPOINT__", proposal.architecture.entrypoint)
-            .replace("__CORE_FEATURES__", core_features)
+            prompt_template.replace("[LANGUAGE]", proposal.architecture.language)
+            .replace("[RUNTIME]", ", ".join(proposal.architecture.runtime))
+            .replace("[FRAMEWORK]", proposal.architecture.framework)
+            .replace("[PROJECT_STRUCTURE]", proposal.architecture.project_structure)
+            .replace("[ENTRYPOINT]", proposal.architecture.entrypoint)
+            .replace("[CORE_FEATURES]", core_features)
         )
 
         raw_output = self.llm.generate(prompt=prompt, temperature=0.2)
