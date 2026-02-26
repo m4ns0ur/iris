@@ -14,7 +14,6 @@ class LLMClient:
         self,
         prompt: str,
         temperature: float = 0.2,
-        # max_tokens: int = 2048,
     ) -> str:
         """
         Generate a completion from llama.cpp server (OpenAI-compatible API)
@@ -27,7 +26,6 @@ class LLMClient:
                 {"role": "user", "content": prompt},
             ],
             "temperature": temperature,
-            # "max_tokens": max_tokens,
             "response_format": {"type": "json_object"},
         }
 

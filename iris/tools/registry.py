@@ -7,10 +7,10 @@ class ToolRegistry:
     Central tool dispatcher.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 
-    def register(self, prefix: str, tool: Tool):
+    def register(self, prefix: str, tool: Tool) -> None:
         self._tools[prefix] = tool
 
     def dispatch(self, call: ToolCall) -> ToolResult:

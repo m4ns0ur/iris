@@ -2,6 +2,7 @@ import json
 import logging
 from pathlib import Path
 import sys
+from typing import Any
 
 from rich.console import Console
 from rich.pretty import Pretty
@@ -31,7 +32,7 @@ def set_debug(enable: bool) -> None:
     logger.debug(f"Debug mode enabled: {enable}")
 
 
-def log_llm_payload(payload: dict) -> None:
+def log_llm_payload(payload: dict[str, Any]) -> None:
     logger.debug("========== LLM REQUEST ==========")
 
     console.print(Pretty(payload))

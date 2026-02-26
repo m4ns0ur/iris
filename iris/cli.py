@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-import sys
 
 from rich import print
 import typer
@@ -10,6 +9,7 @@ from iris.executor.subtask_creator import SubtaskCreator
 from iris.llm.client import LLMClient
 from iris.planner.clarification import ClarificationBuilder
 from iris.planner.classifier import Classifier
+from iris.planner.models.clarification import ClarificationSet
 from iris.planner.proposal import ProposalBuilder
 from iris.planner.renderer import render_markdown
 from iris.tools.filesystem import FileSystemTool
@@ -39,11 +39,8 @@ def main(
 ) -> None:
     set_debug(debug)
 
-    if workspace is None:
-        workspace = Path.cwd()
-
     # store in context for later usage
-    ctx.obj = {"workspace": workspace}
+    ctx.obj = {"workspace": workspace or Path.cwd()}
 
     if intent is not None:
         plan(ctx, intent)
@@ -54,7 +51,7 @@ def build_executor(workspace: Path, task_type: str) -> Executor:
     Centralized executor construction.
     """
     llm = LLMClient()
-    registry = ToolRegistry()
+    registry: ToolRegistry = ToolRegistry()
 
     registry.register("filesystem", FileSystemTool(root=str(workspace)))
     registry.register("shell", ShellTool(workdir=str(workspace)))
@@ -107,8 +104,8 @@ def plan(
     print(f"[dim]{classification.reasoning}[/dim]\n")
 
     # ---- Phase 1: Clarification ----
-    clarification_builder = ClarificationBuilder()
-    clarification_set = clarification_builder.build(intent)
+    clarification_builder: ClarificationBuilder = ClarificationBuilder()
+    clarification_set: ClarificationSet = clarification_builder.build(intent)
     logger.debug(f"Clarifications generated: {clarification_set}")
 
     answers = {}
@@ -154,7 +151,6 @@ def plan(
 
     print("\n[bold cyan]Executing subtasks...[/bold cyan]\n")
 
-    workspace: Path = ctx.obj["workspace"]
     executor = build_executor(workspace=workspace, task_type=classification.task_type)
 
     for i, task in enumerate(execution_plan.subtasks, 1):

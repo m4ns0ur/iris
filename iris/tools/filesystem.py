@@ -66,7 +66,9 @@ class FileSystemTool(Tool):
     def _exists(self, call: ToolCall) -> ToolResult:
         path = self._resolve(call.arguments["path"])
         return ToolResult(
-            tool=call.tool, success=True, stdout="path exists" if path.exists() else "path does not exist"
+            tool=call.tool,
+            success=True,
+            stdout="path exists" if path.exists() else "path does not exist",
         )
 
     def _mkdir(self, call: ToolCall) -> ToolResult:

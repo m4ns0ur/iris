@@ -52,7 +52,7 @@ class Proposal(BaseModel):
     scope: Scope
     constraints: Constraints
     execution_strategy: ExecutionStrategy
-    implementation_steps: list[dict]
+    implementation_steps: list[ImplementationStep]
 
     confidence_score: float = Field(ge=0.0, le=1.0)
     uncertainties: list[str]

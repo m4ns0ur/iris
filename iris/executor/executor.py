@@ -5,12 +5,12 @@ from pydantic import TypeAdapter
 
 from iris.executor.models.agent_step import AgentResponse, FinalAnswer, ToolAction
 from iris.executor.models.state import ExecutionState
+from iris.executor.models.tool_call import ToolResult
 from iris.llm.client import LLMClient
-from iris.planner.proposal import Proposal
+from iris.planner.models.proposal import Proposal
 from iris.tools.registry import ToolRegistry
 from iris.tools.shell import ALLOWED_COMMANDS
 from iris.utils.json_utils import extract_json
-from iris.executor.models.tool_call import ToolResult
 
 MAX_TOOL_OUTPUT = 2000
 
@@ -70,7 +70,7 @@ class Executor:
 
         return "Execution stopped: max steps reached."
 
-    def _reason(self, state: ExecutionState) -> AgentResponse:
+    def _reason(self, state: ExecutionState) -> FinalAnswer | ToolAction:
         if self.task_type == "atomic":
             prompt_template = Path(
                 "iris/executor/prompts/atomic_executor.md"
@@ -106,7 +106,7 @@ class Executor:
                 data["call"]["tool"] = "shell.run"
                 data["call"]["arguments"] = {"command": [tool_name]}
 
-        adapter = TypeAdapter(AgentResponse)
+        adapter: TypeAdapter[AgentResponse] = TypeAdapter(AgentResponse)
         return adapter.validate_python(data)
 
     def _update_state_summary(

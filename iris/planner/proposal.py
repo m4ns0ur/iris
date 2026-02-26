@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 from iris.llm.client import LLMClient
 from iris.planner.models.proposal import Proposal
@@ -45,7 +46,7 @@ class ProposalBuilder:
     def build(
         self,
         intent: str,
-        clarifications: dict,
+        clarifications: dict[str, Any],
         task_type: str,
         defaults_used: int = 0,
     ) -> Proposal:

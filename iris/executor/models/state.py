@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from iris.planner.proposal import Proposal
+from iris.planner.models.proposal import Proposal
 
 
 class ExecutionState(BaseModel):

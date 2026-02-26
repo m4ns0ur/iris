@@ -6,7 +6,7 @@ from iris.utils.json_utils import extract_json
 
 
 class ClarificationBuilder:
-    def __init__(self):
+    def __init__(self) -> None:
         self.llm = LLMClient()
 
     def build(self, intent: str) -> ClarificationSet:
