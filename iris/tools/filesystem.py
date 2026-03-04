@@ -29,12 +29,6 @@ class FileSystemTool(Tool):
             if call.tool == "filesystem.write":
                 return self._write(call)
 
-            if call.tool == "filesystem.list":
-                return self._list(call)
-
-            if call.tool == "filesystem.exists":
-                return self._exists(call)
-
             if call.tool == "filesystem.mkdir":
                 return self._mkdir(call)
 
@@ -57,19 +51,6 @@ class FileSystemTool(Tool):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(call.arguments["content"])
         return ToolResult(tool=call.tool, success=True)
-
-    def _list(self, call: ToolCall) -> ToolResult:
-        path = self._resolve(call.arguments["path"])
-        items = [p.name for p in path.iterdir()]
-        return ToolResult(tool=call.tool, success=True, stdout="\n".join(items))
-
-    def _exists(self, call: ToolCall) -> ToolResult:
-        path = self._resolve(call.arguments["path"])
-        return ToolResult(
-            tool=call.tool,
-            success=True,
-            stdout="path exists" if path.exists() else "path does not exist",
-        )
 
     def _mkdir(self, call: ToolCall) -> ToolResult:
         path = self._resolve(call.arguments["path"])

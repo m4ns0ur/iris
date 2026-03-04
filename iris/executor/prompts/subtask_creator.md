@@ -26,7 +26,6 @@ Do NOT include explanations or extra fields.
 Language: [LANGUAGE]
 Runtime: [RUNTIME]
 Framework: [FRAMEWORK]
-Structure: [PROJECT_STRUCTURE]
 Entrypoint: [ENTRYPOINT]
 
 Core Features:

@@ -94,7 +94,7 @@ class Executor:
             .replace("[LAST_TOOL_RESULT]", last_tool_result_str)
         )
 
-        raw_output = self.llm.generate(prompt=prompt, temperature=0.2)
+        raw_output = self.llm.generate(prompt=prompt)
         data = extract_json(raw_output)
 
         # Auto-repair raw shell commands

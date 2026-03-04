@@ -5,7 +5,7 @@ from iris.utils.logger import log_llm_payload, log_llm_response
 
 class LLMClient:
     def __init__(
-        self, model: str = "Qwen_Qwen3-VL-8B-Instruct-GGUF_Qwen3VL-8B-Instruct-Q4_K_M"
+        self, model: str = "unsloth_Qwen3.5-9B-GGUF_Qwen3.5-9B-Q5_K_M"
     ):
         self.model = model
         self.url = "http://localhost:8080/v1/chat/completions"
@@ -25,8 +25,15 @@ class LLMClient:
             "messages": [
                 {"role": "user", "content": prompt},
             ],
+            "max_tokens": 32768,
             "temperature": temperature,
+            # "top_p": 0.8,
+            # "presence_penalty": 1.5,
             "response_format": {"type": "json_object"},
+            # "extra_body": {
+            #     "top_k": 20,
+            #     "chat_template_kwargs": {"enable_thinking": False},
+            # },
         }
 
         # Retry once in case of network hiccup

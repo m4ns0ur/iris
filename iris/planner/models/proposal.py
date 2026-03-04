@@ -1,13 +1,12 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, field_validator
 
 
 class Architecture(BaseModel):
     language: str
     runtime: list[Literal["CLI", "GUI", "Web", "Library"]]
-    framework: str
-    project_structure: Literal["single_file", "modular", "package"]
+    framework: list[str]
     entrypoint: str
 
     @field_validator("runtime")
@@ -26,33 +25,17 @@ class Scope(BaseModel):
     explicitly_excluded: list[str]
 
 
-class Constraints(BaseModel):
-    python_version: str | None = None
-    external_dependencies_allowed: bool = True
-    testing_required: bool = False
-
-
-class ExecutionStrategy(BaseModel):
-    microtask_granularity: Literal["file_level"]
-    max_steps: int
-
-
 class ImplementationStep(BaseModel):
     step: int
     description: str
     produces: list[str]
-    depends_on: list[int]
 
 
 class Proposal(BaseModel):
-    project_type: Literal["new_project", "modify_existing"]
     goal_summary: str
 
     architecture: Architecture
     scope: Scope
-    constraints: Constraints
-    execution_strategy: ExecutionStrategy
     implementation_steps: list[ImplementationStep]
 
-    confidence_score: float = Field(ge=0.0, le=1.0)
     uncertainties: list[str]

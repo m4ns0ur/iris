@@ -23,13 +23,12 @@ class SubtaskCreator:
         prompt = (
             prompt_template.replace("[LANGUAGE]", proposal.architecture.language)
             .replace("[RUNTIME]", ", ".join(proposal.architecture.runtime))
-            .replace("[FRAMEWORK]", proposal.architecture.framework)
-            .replace("[PROJECT_STRUCTURE]", proposal.architecture.project_structure)
+            .replace("[FRAMEWORK]", ", ".join(proposal.architecture.framework))
             .replace("[ENTRYPOINT]", proposal.architecture.entrypoint)
             .replace("[CORE_FEATURES]", core_features)
         )
 
-        raw_output = self.llm.generate(prompt=prompt, temperature=0.2)
+        raw_output = self.llm.generate(prompt=prompt)
 
         data = extract_json(raw_output)
         return ExecutionPlan.model_validate(data)

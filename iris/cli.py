@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import sys
 
 from rich import print
 import typer
@@ -9,9 +10,7 @@ from iris.executor.subtask_creator import SubtaskCreator
 from iris.llm.client import LLMClient
 from iris.planner.clarification import ClarificationBuilder
 from iris.planner.classifier import Classifier
-from iris.planner.models.clarification import ClarificationSet
-from iris.planner.proposal import ProposalBuilder
-from iris.planner.renderer import render_markdown
+from iris.planner.proposal import ProposalBuilder, render_markdown
 from iris.tools.filesystem import FileSystemTool
 from iris.tools.registry import ToolRegistry
 from iris.tools.shell import ShellTool
@@ -98,50 +97,52 @@ def plan(
         return
 
     # -----------------------------
-    # Architectural → Planning Flow
+    # Multi-step/Complex -> Planning Workflow
     # -----------------------------
-    print("[bold cyan]Iris detected an architectural task.[/bold cyan]")
+    print(
+        "[bold cyan]Iris detected a multi-step/complex task. Initiating planning workflow...[/bold cyan]"
+    )
     print(f"[dim]{classification.reasoning}[/dim]\n")
 
-    # ---- Phase 1: Clarification ----
-    clarification_builder: ClarificationBuilder = ClarificationBuilder()
-    clarification_set: ClarificationSet = clarification_builder.build(intent)
-    logger.debug(f"Clarifications generated: {clarification_set}")
-
     answers = {}
-    defaults_used = 0
 
-    if clarification_set.questions:
-        print("\n[bold]Iris needs clarification:[/bold]\n")
+    if classification.task_type == "complex":
+        print(
+            "[yellow]Note: Complex tasks may require multiple iterations of clarification and planning.[/yellow]\n"
+        )
 
-        for i, q in enumerate(clarification_set.questions, 1):
-            print(f"{i}. {q.question}")
-            print(f"   [dim]Recommended: {q.recommended_default}[/dim]")
-            user_input = input("   > ").strip()
+        # ---- Clarification ----
+        clarification_builder = ClarificationBuilder()
+        clarification_set = clarification_builder.build(intent)
+        logger.debug(f"Clarifications generated: {clarification_set}")
 
-            if user_input == "":
-                answers[q.question] = q.recommended_default
-                defaults_used += 1
-            else:
-                answers[q.question] = user_input
+        if clarification_set.questions:
+            print("\n[bold]Iris needs clarification:[/bold]\n")
 
-            logger.debug(f"Answer recorded: {q.question} → {answers[q.question]}")
-            print()
+            for i, q in enumerate(clarification_set.questions, 1):
+                print(f"{i}. {q.question}")
+                print(f"   [dim]Recommended: {q.recommended_default}[/dim]")
+                user_input = input("   > ").strip()
 
-    # ---- Phase 2: Proposal ----
+                if user_input == "":
+                    answers[q.question] = q.recommended_default
+                else:
+                    answers[q.question] = user_input
+
+    # ---- Proposal ----
     proposal_builder = ProposalBuilder()
     proposal = proposal_builder.build(
         intent=intent,
         clarifications=answers,
-        task_type=classification.task_type,
-        defaults_used=defaults_used,
     )
     logger.debug(f"Proposal generated: {proposal.model_dump()}")
 
     md = render_markdown(proposal)
     print(md)
 
-    # ---- Phase 3: Execution Planning ----
+    sys.exit(0)
+
+    # ---- Execution Planning ----
     subtask_creator = SubtaskCreator()
     execution_plan = subtask_creator.build(proposal)
     logger.debug(f"Execution plan: {execution_plan.model_dump()}")

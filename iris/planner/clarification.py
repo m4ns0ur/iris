@@ -16,7 +16,7 @@ class ClarificationBuilder:
 
         raw_output = self.llm.generate(
             prompt=prompt,
-            temperature=0.3,
+            temperature=0.2,
         )
 
         data = extract_json(raw_output)
