@@ -1,4 +1,4 @@
-from pathlib import Path
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from iris.llm.client import LLMClient
 from iris.planner.models.classifier import Classification
@@ -8,11 +8,17 @@ from iris.utils.json_utils import extract_json
 class Classifier:
     def __init__(self, model: str | None = None):
         self.llm = LLMClient()
+        self.env = Environment(
+            loader=FileSystemLoader("iris/prompts"),
+            undefined=StrictUndefined,  # fail if variable missing
+            trim_blocks=True,
+            lstrip_blocks=True,
+            keep_trailing_newline=True,
+        )
 
     def build(self, intent: str) -> Classification:
-        prompt_template = Path("iris/planner/prompts/classifier.md").read_text()
-
-        prompt = prompt_template.replace("[INTENT]", intent)
+        template = self.env.get_template("classifier.md")
+        prompt = template.render(intent=intent)
 
         raw_output = self.llm.generate(
             prompt=prompt,

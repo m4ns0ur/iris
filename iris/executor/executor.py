@@ -1,6 +1,6 @@
 import json
-from pathlib import Path
 
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from pydantic import TypeAdapter
 
 from iris.executor.models.agent_step import AgentResponse, FinalAnswer, ToolAction
@@ -20,18 +20,17 @@ class Executor:
         self,
         llm: LLMClient,
         tools: ToolRegistry,
-        task_type: str,
     ):
         self.llm = llm
         self.tools = tools
-        self.task_type = task_type
-
-        if self.task_type == "atomic":
-            self.max_steps = 5
-        elif self.task_type == "multi_step":
-            self.max_steps = 15
-        else:
-            self.max_steps = 50
+        self.max_steps = 10
+        self.env = Environment(
+            loader=FileSystemLoader("iris/prompts"),
+            undefined=StrictUndefined,  # fail if variable missing
+            trim_blocks=True,
+            lstrip_blocks=True,
+            keep_trailing_newline=True,
+        )
 
     def run(self, intent: str, shared_context: Proposal | None = None) -> str:
         state = ExecutionState(user_intent=intent, shared_context=shared_context)
@@ -71,12 +70,7 @@ class Executor:
         return "Execution stopped: max steps reached."
 
     def _reason(self, state: ExecutionState) -> FinalAnswer | ToolAction:
-        if self.task_type == "atomic":
-            prompt_template = Path(
-                "iris/executor/prompts/atomic_executor.md"
-            ).read_text()
-        else:
-            prompt_template = Path("iris/executor/prompts/executor.md").read_text()
+        template = self.env.get_template("executor.md")
 
         state_summary_str = (
             "\n".join(state.state_summary) if state.state_summary else "None"
@@ -88,10 +82,11 @@ class Executor:
             else "None"
         )
 
-        prompt = (
-            prompt_template.replace("[INTENT]", state.user_intent)
-            .replace("[STATE_SUMMARY]", state_summary_str)
-            .replace("[LAST_TOOL_RESULT]", last_tool_result_str)
+        prompt = template.render(
+            goal_summary=state.shared_context.goal_summary if state.shared_context else "None",
+            intent=state.user_intent,
+            state_summary=state_summary_str,
+            last_tool_result=last_tool_result_str,
         )
 
         raw_output = self.llm.generate(prompt=prompt)
@@ -122,14 +117,12 @@ class Executor:
         if result.success:
             if tool_name == "filesystem.write":
                 state.state_summary.append("File written successfully.")
-            elif tool_name == "filesystem.mkdir":
-                state.state_summary.append("Directory created.")
             elif tool_name == "filesystem.read":
                 state.state_summary.append("File content inspected.")
+            elif tool_name == "filesystem.modify":
+                state.state_summary.append("File content modified.")
             elif tool_name == "shell.run":
                 state.state_summary.append("Shell command executed successfully.")
-            else:
-                state.state_summary.append(f"{tool_name} executed successfully.")
         else:
             state.state_summary.append(
                 f"{tool_name} failed: {result.stderr or 'Unknown error'}"

@@ -4,9 +4,7 @@ from iris.utils.logger import log_llm_payload, log_llm_response
 
 
 class LLMClient:
-    def __init__(
-        self, model: str = "unsloth_Qwen3.5-9B-GGUF_Qwen3.5-9B-Q5_K_M"
-    ):
+    def __init__(self, model: str = "unsloth_Qwen3.5-9B-GGUF_Qwen3.5-9B-Q5_K_M"):
         self.model = model
         self.url = "http://localhost:8080/v1/chat/completions"
 

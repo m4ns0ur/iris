@@ -1,4 +1,4 @@
-from pathlib import Path
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from iris.executor.models.subtask_creator import ExecutionPlan
 from iris.llm.client import LLMClient
@@ -9,23 +9,27 @@ from iris.utils.json_utils import extract_json
 class SubtaskCreator:
     def __init__(self) -> None:
         self.llm = LLMClient()
+        self.env = Environment(
+            loader=FileSystemLoader("iris/prompts"),
+            undefined=StrictUndefined,  # fail if variable missing
+            trim_blocks=True,
+            lstrip_blocks=True,
+            keep_trailing_newline=True,
+        )
 
     def build(self, proposal: Proposal) -> ExecutionPlan:
-        """
-        Generate ordered microtasks from a Proposal.
-        Each microtask should be executable and produce a working intermediate program.
-        """
-        # Prepare input for LLM
-        prompt_template = Path("iris/executor/prompts/subtask_creator.md").read_text()
+        template = self.env.get_template("subtask_creator.md")
 
-        core_features = "\n".join(f"- {f}" for f in proposal.scope.core_features)
+        core_features = list(proposal.scope.core_features)
 
-        prompt = (
-            prompt_template.replace("[LANGUAGE]", proposal.architecture.language)
-            .replace("[RUNTIME]", ", ".join(proposal.architecture.runtime))
-            .replace("[FRAMEWORK]", ", ".join(proposal.architecture.framework))
-            .replace("[ENTRYPOINT]", proposal.architecture.entrypoint)
-            .replace("[CORE_FEATURES]", core_features)
+        prompt = template.render(
+            intent=proposal.goal_summary,
+            language=proposal.architecture.language,
+            runtime=proposal.architecture.runtime,
+            framework=proposal.architecture.framework,
+            entrypoint=proposal.architecture.entrypoint,
+            core_features=core_features,
+            implementation_steps=proposal.implementation_steps,
         )
 
         raw_output = self.llm.generate(prompt=prompt)

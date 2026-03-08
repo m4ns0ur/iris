@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-import sys
 
 from rich import print
 import typer
@@ -45,7 +44,7 @@ def main(
         plan(ctx, intent)
 
 
-def build_executor(workspace: Path, task_type: str) -> Executor:
+def build_executor(workspace: Path) -> Executor:
     """
     Centralized executor construction.
     """
@@ -60,7 +59,6 @@ def build_executor(workspace: Path, task_type: str) -> Executor:
     return Executor(
         llm=llm,
         tools=registry,
-        task_type=task_type,
     )
 
 
@@ -78,6 +76,8 @@ def plan(
     classification = classifier.build(intent)
     logger.debug(f"Task classification: {classification.task_type}")
 
+    workspace: Path = ctx.obj["workspace"]
+
     # -----------------------------
     # Atomic -> Direct Execution via Executor
     # -----------------------------
@@ -85,10 +85,7 @@ def plan(
         print("[bold cyan]Iris detected an executable task.[/bold cyan]")
         print(f"[dim]{classification.reasoning}[/dim]\n")
 
-        workspace: Path = ctx.obj["workspace"]
-        executor = build_executor(
-            workspace=workspace, task_type=classification.task_type
-        )
+        executor = build_executor(workspace=workspace)
         result = executor.run(intent)
         logger.debug(f"Executor result: {result}")
 
@@ -140,8 +137,6 @@ def plan(
     md = render_markdown(proposal)
     print(md)
 
-    sys.exit(0)
-
     # ---- Execution Planning ----
     subtask_creator = SubtaskCreator()
     execution_plan = subtask_creator.build(proposal)
@@ -152,7 +147,7 @@ def plan(
 
     print("\n[bold cyan]Executing subtasks...[/bold cyan]\n")
 
-    executor = build_executor(workspace=workspace, task_type=classification.task_type)
+    executor = build_executor(workspace=workspace)
 
     for i, task in enumerate(execution_plan.subtasks, 1):
         print(f"[bold]Step {i}:[/bold] {task.description}")

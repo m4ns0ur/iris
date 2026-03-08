@@ -11,9 +11,7 @@ class ToolCall(BaseModel):
     tool: Literal[
         "filesystem.read",
         "filesystem.write",
-        "filesystem.list",
-        "filesystem.exists",
-        "filesystem.mkdir",
+        "filesystem.modify",
         "shell.run",
     ]
     arguments: dict[str, Any] = Field(default_factory=dict)

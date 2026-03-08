@@ -29,8 +29,8 @@ class FileSystemTool(Tool):
             if call.tool == "filesystem.write":
                 return self._write(call)
 
-            if call.tool == "filesystem.mkdir":
-                return self._mkdir(call)
+            if call.tool == "filesystem.modify":
+                return self._modify(call)
 
             return ToolResult(
                 tool=call.tool,
@@ -52,7 +52,11 @@ class FileSystemTool(Tool):
         path.write_text(call.arguments["content"])
         return ToolResult(tool=call.tool, success=True)
 
-    def _mkdir(self, call: ToolCall) -> ToolResult:
+    def _modify(self, call: ToolCall) -> ToolResult:
         path = self._resolve(call.arguments["path"])
-        path.mkdir(parents=True, exist_ok=True)
+        old_text = call.arguments["old_text"]
+        new_text = call.arguments["new_text"]
+        content = path.read_text()
+        modified_content = content.replace(old_text, new_text)
+        path.write_text(modified_content)
         return ToolResult(tool=call.tool, success=True)

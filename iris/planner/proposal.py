@@ -1,6 +1,7 @@
 import json
-from pathlib import Path
 from typing import Any
+
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from iris.llm.client import LLMClient
 from iris.planner.models.proposal import Proposal
@@ -10,18 +11,26 @@ from iris.utils.json_utils import extract_json
 class ProposalBuilder:
     def __init__(self) -> None:
         self.llm = LLMClient()
+        self.env = Environment(
+            loader=FileSystemLoader("iris/prompts"),
+            undefined=StrictUndefined,  # fail if variable missing
+            trim_blocks=True,
+            lstrip_blocks=True,
+            keep_trailing_newline=True,
+        )
 
     def build(
         self,
         intent: str,
         clarifications: dict[str, Any],
     ) -> Proposal:
-        prompt_template = Path("iris/planner/prompts/proposal.md").read_text()
+        template = self.env.get_template("proposal.md")
 
-        prompt = prompt_template.replace("[INTENT]", intent).replace(
-            "[CLARIFICATIONS]",
-            json.dumps(clarifications, indent=2) if clarifications else "None",
+        clarifications_str = (
+            json.dumps(clarifications, indent=2) if clarifications else "None"
         )
+
+        prompt = template.render(intent=intent, clarifications=clarifications_str)
 
         raw_output = self.llm.generate(
             prompt=prompt,
