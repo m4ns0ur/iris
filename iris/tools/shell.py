@@ -26,10 +26,6 @@ ALLOWED_COMMANDS = {
 
 
 class ShellTool(Tool):
-    """
-    Restricted shell execution tool.
-    """
-
     def __init__(self, workdir: str):
         self.workdir = workdir
 

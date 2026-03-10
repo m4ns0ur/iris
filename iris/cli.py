@@ -10,6 +10,7 @@ from iris.llm.client import LLMClient
 from iris.planner.clarification import ClarificationBuilder
 from iris.planner.classifier import Classifier
 from iris.planner.proposal import ProposalBuilder, render_markdown
+from iris.tools.code import CodeTool
 from iris.tools.filesystem import FileSystemTool
 from iris.tools.registry import ToolRegistry
 from iris.tools.shell import ShellTool
@@ -45,13 +46,11 @@ def main(
 
 
 def build_executor(workspace: Path) -> Executor:
-    """
-    Centralized executor construction.
-    """
     llm = LLMClient()
     registry: ToolRegistry = ToolRegistry()
 
     registry.register("filesystem", FileSystemTool(root=str(workspace)))
+    registry.register("code", CodeTool(root=str(workspace)))
     registry.register("shell", ShellTool(workdir=str(workspace)))
 
     logger.debug(f"Executor tools registered with workspace: {workspace}")
@@ -67,9 +66,6 @@ def plan(
     ctx: typer.Context,
     intent: str = typer.Argument(...),
 ) -> None:
-    """
-    Main Iris planning/execution command.
-    """
     logger.debug(f"Starting plan for intent: {intent}")
 
     classifier = Classifier()

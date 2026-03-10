@@ -3,10 +3,6 @@ from iris.tools.base import Tool
 
 
 class ToolRegistry:
-    """
-    Central tool dispatcher.
-    """
-
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 

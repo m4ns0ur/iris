@@ -11,6 +11,7 @@ from iris.planner.models.proposal import Proposal
 from iris.tools.registry import ToolRegistry
 from iris.tools.shell import ALLOWED_COMMANDS
 from iris.utils.json_utils import extract_json
+from iris.utils.logger import logger
 
 MAX_TOOL_OUTPUT = 2000
 
@@ -23,7 +24,7 @@ class Executor:
     ):
         self.llm = llm
         self.tools = tools
-        self.max_steps = 10
+        self.max_steps = 50
         self.env = Environment(
             loader=FileSystemLoader("iris/prompts"),
             undefined=StrictUndefined,  # fail if variable missing
@@ -52,6 +53,10 @@ class Executor:
             if isinstance(response, ToolAction):
                 result = self.tools.dispatch(response.call)
 
+                logger.debug(
+                    f"Tool executed: {response.call.tool} with result: {result}"
+                )
+
                 # Truncate noisy outputs
                 if result.stdout and len(result.stdout) > MAX_TOOL_OUTPUT:
                     result.stdout = result.stdout[:MAX_TOOL_OUTPUT] + "\n...[truncated]"
@@ -59,11 +64,7 @@ class Executor:
                 # Update semantic state instead of raw logs
                 self._update_state_summary(state, response, result)
 
-                # Keep ONLY last relevant tool result if needed
-                if not result.success or result.stdout:
-                    state.last_tool_result = result
-                else:
-                    state.last_tool_result = None
+                state.last_tool_result = result
 
                 continue
 
@@ -83,7 +84,9 @@ class Executor:
         )
 
         prompt = template.render(
-            goal_summary=state.shared_context.goal_summary if state.shared_context else "None",
+            goal_summary=state.shared_context.goal_summary
+            if state.shared_context
+            else "None",
             intent=state.user_intent,
             state_summary=state_summary_str,
             last_tool_result=last_tool_result_str,
@@ -93,7 +96,7 @@ class Executor:
         data = extract_json(raw_output)
 
         # Auto-repair raw shell commands
-        if data.get("type") == "tool":
+        if isinstance(data, dict) and data.get("type") == "tool":
             call = data.get("call", {})
             tool_name = call.get("tool")
 
@@ -107,20 +110,50 @@ class Executor:
     def _update_state_summary(
         self, state: ExecutionState, action: ToolAction, result: ToolResult
     ) -> None:
-        """
-        Convert tool events into semantic state.
-        No raw logs.
-        """
-
         tool_name = action.call.tool
 
         if result.success:
-            if tool_name == "filesystem.write":
-                state.state_summary.append("File written successfully.")
-            elif tool_name == "filesystem.read":
-                state.state_summary.append("File content inspected.")
-            elif tool_name == "filesystem.modify":
-                state.state_summary.append("File content modified.")
+            if tool_name == "filesystem.find":
+                if result.stdout:
+                    state.state_summary.append(
+                        f"Found {len(result.stdout)} files matching criteria."
+                    )
+            elif tool_name == "filesystem.grep":
+                if result.stdout:
+                    state.state_summary.append(
+                        f"Found {len(result.stdout)} lines matching criteria."
+                    )
+            elif tool_name == "filesystem.stat":
+                if result.stdout:
+                    stat_info = json.loads(result.stdout)
+                    state.state_summary.append(
+                        f"File {action.call.arguments['path']} exists with size {stat_info.get('size', 'unknown')} bytes."
+                    )
+            elif tool_name == "filesystem.read_lines":
+                if result.stdout:
+                    state.state_summary.append(
+                        f"Read lines {action.call.arguments.get('start_line', 1)} to {action.call.arguments.get('start_line', 1) + len(result.stdout)} from {action.call.arguments['path']}."
+                    )
+            elif tool_name == "filesystem.read_chunk":
+                state.state_summary.append(
+                    f"File {action.call.arguments['path']} inspected."
+                )
+            elif tool_name == "filesystem.preview_patch":
+                if result.stdout:
+                    state.state_summary.append(
+                        f"Previewed patch for {action.call.arguments['path']} with {len(result.stdout.splitlines())} lines of diff."
+                    )
+            elif tool_name == "filesystem.patch":
+                if result.stdout:
+                    state.state_summary.append(
+                        f"Applied patch to {action.call.arguments['path']} with {len(result.stdout.splitlines())} lines of diff."
+                    )
+            elif tool_name == "filesystem.write":
+                state.state_summary.append(
+                    f"File {action.call.arguments['path']} written."
+                )
+            elif tool_name == "code.summary":
+                state.state_summary.append("Code summary generated.")
             elif tool_name == "shell.run":
                 state.state_summary.append("Shell command executed successfully.")
         else:

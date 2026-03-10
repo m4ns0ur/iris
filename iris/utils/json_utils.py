@@ -4,15 +4,20 @@ from typing import Any
 
 
 def extract_json(text: str) -> Any:
-    # remove markdown fences if present
-    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    text = text.strip()
 
-    # find first { and last }
+    # fast path
+    if text.startswith("{") and text.endswith("}"):
+        return json.loads(text)
+
+    # remove markdown fences but keep content
+    text = re.sub(r"```(?:json)?", "", text)
+    text = text.replace("```", "")
+
     start = text.find("{")
-    end = text.rfind("}")
-
-    if start == -1 or end == -1:
+    if start == -1:
         raise ValueError("No JSON found")
 
-    json_str = text[start : end + 1]
-    return json.loads(json_str)
+    decoder = json.JSONDecoder()
+    obj, _ = decoder.raw_decode(text[start:])
+    return obj
