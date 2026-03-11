@@ -13,7 +13,7 @@ from iris.tools.shell import ALLOWED_COMMANDS
 from iris.utils.json_utils import extract_json
 from iris.utils.logger import logger
 
-MAX_TOOL_OUTPUT = 2000
+MAX_TOOL_OUTPUT = 3000
 
 
 class Executor:
@@ -59,10 +59,10 @@ class Executor:
 
                 # Truncate noisy outputs
                 if result.stdout and len(result.stdout) > MAX_TOOL_OUTPUT:
-                    result.stdout = result.stdout[:MAX_TOOL_OUTPUT] + "\n...[truncated]"
+                    result.stdout = "Output was too long. Change tool usage to get more specific output."
 
                 # Update semantic state instead of raw logs
-                self._update_state_summary(state, response, result)
+                # self._update_state_summary(state, response, result)
 
                 state.last_tool_result = result
 
@@ -74,19 +74,19 @@ class Executor:
         template = self.env.get_template("executor.md")
 
         state_summary_str = (
-            "\n".join(state.state_summary) if state.state_summary else "None"
+            "\n".join(state.state_summary) if state.state_summary else ""
         )
 
         last_tool_result_str = (
             json.dumps(state.last_tool_result.model_dump(), indent=2)
             if state.last_tool_result
-            else "None"
+            else ""
         )
 
         prompt = template.render(
             goal_summary=state.shared_context.goal_summary
             if state.shared_context
-            else "None",
+            else "",
             intent=state.user_intent,
             state_summary=state_summary_str,
             last_tool_result=last_tool_result_str,

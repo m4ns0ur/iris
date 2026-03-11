@@ -27,7 +27,7 @@ class ProposalBuilder:
         template = self.env.get_template("proposal.md")
 
         clarifications_str = (
-            json.dumps(clarifications, indent=2) if clarifications else "None"
+            json.dumps(clarifications, indent=2) if clarifications else ""
         )
 
         prompt = template.render(intent=intent, clarifications=clarifications_str)

@@ -98,6 +98,8 @@ Generate a deterministic project proposal based strictly on:
 
 {{ intent }}
 
+{% if clarifications %}
 ### Clarifications
 
 {{ clarifications }}
+{% endif %}

@@ -61,7 +61,7 @@ class FileSystemTool(Tool):
             return ToolResult(tool=call.tool, success=False, stderr=str(e))
 
     def _read_chunk(self, call: ToolCall) -> ToolResult:
-        path = self._resolve(call.arguments["path"])
+        path = self._resolve(call.arguments.get("path", ""))
 
         if not path.exists():
             return ToolResult(
@@ -113,15 +113,15 @@ class FileSystemTool(Tool):
         )
 
     def _read_lines(self, call: ToolCall) -> ToolResult:
-        path = self._resolve(call.arguments["path"])
+        path = self._resolve(call.arguments.get("path", ""))
 
         if not path.exists():
             return ToolResult(
                 tool=call.tool, success=False, stderr="File does not exist."
             )
 
-        start = call.arguments.get("start_line", 1)
-        count = call.arguments.get("line_count", MAX_READ_LINES)
+        start = max(call.arguments.get("start", 1), 1)
+        count = call.arguments.get("num", MAX_READ_LINES)
 
         with open(path, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -143,7 +143,7 @@ class FileSystemTool(Tool):
         )
 
     def _stat(self, call: ToolCall) -> ToolResult:
-        path = self._resolve(call.arguments["path"])
+        path = self._resolve(call.arguments.get("path", ""))
 
         if not path.exists():
             return ToolResult(
@@ -164,8 +164,8 @@ class FileSystemTool(Tool):
         )
 
     def _find(self, call: ToolCall) -> ToolResult:
-        pattern = call.arguments.get("pattern", "*")
         root = self._resolve(call.arguments.get("path", "."))
+        pattern = call.arguments.get("pattern", "*")
 
         results = []
 
@@ -186,8 +186,8 @@ class FileSystemTool(Tool):
         )
 
     def _grep(self, call: ToolCall) -> ToolResult:
-        pattern = call.arguments["pattern"]
         root = self._resolve(call.arguments.get("path", "."))
+        pattern = call.arguments.get("pattern", "")
 
         regex = re.compile(pattern)
 
@@ -217,7 +217,7 @@ class FileSystemTool(Tool):
         )
 
     def _write(self, call: ToolCall) -> ToolResult:
-        path = self._resolve(call.arguments["path"])
+        path = self._resolve(call.arguments.get("path", ""))
 
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -226,7 +226,7 @@ class FileSystemTool(Tool):
                 tool=call.tool, success=False, stderr="File already exists."
             )
 
-        path.write_text(call.arguments["content"])
+        path.write_text(call.arguments.get("content", ""))
 
         return ToolResult(
             tool=call.tool,
@@ -237,66 +237,83 @@ class FileSystemTool(Tool):
     def _apply_unified_patch(
         self, original_lines: list[str], patch_text: str
     ) -> list[str]:
-        patched = []
-        i = 0
+        lines = patch_text.splitlines()
+        patched = original_lines[:]
 
-        patch_lines = patch_text.splitlines()
+        hunk: list[str] = []
 
-        hunk_header = re.compile(r"^@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@")
-
-        for line in patch_lines:
+        for line in lines:
             if line.startswith("@@"):
-                m = hunk_header.match(line)
-                if not m:
-                    raise ValueError("Invalid patch hunk header")
+                if hunk:
+                    patched = self._apply_hunk(patched, hunk)
+                    hunk = []
+                continue
+            else:
+                hunk.append(line)
 
-                start_old = int(m.group(1)) - 1
+        if hunk:
+            patched = self._apply_hunk(patched, hunk)
 
-                # copy unchanged lines before hunk
-                while i < start_old:
-                    patched.append(original_lines[i])
-                    i += 1
+        return patched
 
-            elif line.startswith(" "):
-                # context line
-                expected = line[1:]
-                if (
-                    i >= len(original_lines)
-                    or original_lines[i].rstrip("\n") != expected
-                ):
-                    raise ValueError("Patch context mismatch")
-                patched.append(original_lines[i])
-                i += 1
+    def _apply_hunk(self, file_lines: list[str], hunk_lines: list[str]) -> list[str]:
+        context = []
+        replacements = []
 
+        for line in hunk_lines:
+            if line.startswith(" "):
+                context.append(line[1:])
+                replacements.append(("context", line[1:]))
             elif line.startswith("-"):
-                # deletion
-                expected = line[1:]
-                if (
-                    i >= len(original_lines)
-                    or original_lines[i].rstrip("\n") != expected
-                ):
-                    raise ValueError("Patch deletion mismatch")
-                i += 1
-
+                context.append(line[1:])
+                replacements.append(("delete", line[1:]))
             elif line.startswith("+"):
-                # insertion
-                patched.append(line[1:] + "\n")
-
+                replacements.append(("insert", line[1:]))
             else:
                 raise ValueError("Invalid patch line")
 
-        patched.extend(original_lines[i:])
-        return patched
+        # find context start in file
+        for i in range(len(file_lines)):
+            match = True
+            j = 0
+
+            for typ, text in replacements:
+                if typ in ("context", "delete"):
+                    if (
+                        i + j >= len(file_lines)
+                        or file_lines[i + j].rstrip("\n") != text
+                    ):
+                        match = False
+                        break
+                    j += 1
+
+            if match:
+                # apply replacement
+                new_lines = []
+                k = i
+
+                for typ, text in replacements:
+                    if typ == "context":
+                        new_lines.append(file_lines[k])
+                        k += 1
+                    elif typ == "delete":
+                        k += 1
+                    elif typ == "insert":
+                        new_lines.append(text + "\n")
+
+                return file_lines[:i] + new_lines + file_lines[k:]
+
+        raise ValueError("Patch context not found in file")
 
     def _preview_patch(self, call: ToolCall) -> ToolResult:
-        path = self._resolve(call.arguments["path"])
+        path = self._resolve(call.arguments.get("path", ""))
 
         if not path.exists():
             return ToolResult(
                 tool=call.tool, success=False, stderr="File does not exist."
             )
 
-        patch_text = call.arguments["patch"]
+        patch_text = call.arguments.get("patch", "")
 
         try:
             original = path.read_text().splitlines(keepends=True)
@@ -318,7 +335,7 @@ class FileSystemTool(Tool):
                 success=True,
                 stdout=diff,
                 metadata={
-                    "path": call.arguments["path"],
+                    "path": call.arguments.get("path", ""),
                     "original_lines": len(original),
                     "patched_lines": len(patched),
                 },
@@ -328,14 +345,14 @@ class FileSystemTool(Tool):
             return ToolResult(tool=call.tool, success=False, stderr=str(e))
 
     def _patch(self, call: ToolCall) -> ToolResult:
-        path = self._resolve(call.arguments["path"])
+        path = self._resolve(call.arguments.get("path", ""))
 
         if not path.exists():
             return ToolResult(
                 tool=call.tool, success=False, stderr="File does not exist."
             )
 
-        patch_text = call.arguments["patch"]
+        patch_text = call.arguments.get("patch", "")
 
         try:
             original = path.read_text().splitlines(keepends=True)
@@ -348,7 +365,7 @@ class FileSystemTool(Tool):
                 tool=call.tool,
                 success=True,
                 metadata={
-                    "path": call.arguments["path"],
+                    "path": call.arguments.get("path", ""),
                     "lines_written": len(patched),
                 },
             )

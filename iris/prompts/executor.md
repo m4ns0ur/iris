@@ -89,10 +89,14 @@ If tool required:
 
 {{ intent }}
 
+{% if state_summary %}
 ### State
 
 {{ state_summary }}
+{% endif %}
 
+{% if last_tool_result %}
 ### Last Tool Result
 
 {{ last_tool_result }}
+{% endif %}

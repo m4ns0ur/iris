@@ -41,7 +41,7 @@ class ShellTool(Tool):
         assert Path(self.workdir).is_dir(), "Workspace must be a directory"
 
         try:
-            command: list[str] = call.arguments["command"]
+            command: list[str] = call.arguments.get("command", [])
 
             if not command:
                 raise ValueError("Empty command.")
