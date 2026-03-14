@@ -1,4 +1,4 @@
-from iris.executor.models.tool_call import ToolCall, ToolResult
+from iris.agent.models.tool_call import ToolCall, ToolResult
 from iris.tools.base import Tool
 
 

@@ -1,7 +1,7 @@
 from pathlib import Path
 import subprocess
 
-from iris.executor.models.tool_call import ToolCall, ToolResult
+from iris.agent.models.tool_call import ToolCall, ToolResult
 from iris.tools.base import Tool
 from iris.utils.logger import logger
 
@@ -25,14 +25,14 @@ ALLOWED_COMMANDS = {
 }
 
 
-class ShellTool(Tool):
+class BashTool(Tool):
     def __init__(self, workdir: str):
         self.workdir = workdir
 
     def execute(self, call: ToolCall) -> ToolResult:
-        if call.tool != "shell.run":
+        if call.tool != "bash.run":
             return ToolResult(
-                tool=call.tool, success=False, stderr="Unsupported shell operation."
+                tool=call.tool, success=False, stderr="Unsupported bash operation."
             )
 
         assert self.workdir and Path(self.workdir).exists(), (
@@ -49,9 +49,7 @@ class ShellTool(Tool):
             if command[0] not in ALLOWED_COMMANDS:
                 raise PermissionError(f"Command '{command[0]}' not allowed.")
 
-            logger.debug(
-                f"Running shell command in {self.workdir}: {' '.join(command)}"
-            )
+            logger.debug(f"Running bash command in {self.workdir}: {' '.join(command)}")
 
             result = subprocess.run(
                 command,

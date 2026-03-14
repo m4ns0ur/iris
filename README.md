@@ -56,7 +56,7 @@ iris/
 ├── cli.py                 # Entry point
 ├── planner/               # Intent analysis & task planning
 ├── executor/              # Step execution & tool orchestration
-├── tools/                 # Tool abstractions (filesystem, shell, etc.)
+├── tools/                 # Tool abstractions (filesystem, bash, etc.)
 ├── llm/                   # Model client abstraction
 └── utils/                 # Logging, JSON repair, helpers
 ```
@@ -83,7 +83,7 @@ Responsible for:
 Current tools:
 
 * Filesystem access
-* Shell execution
+* Bash execution
 
 Future tools:
 

@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+MAX_TOOL_OUTPUT = 3000
+
 
 class ToolCall(BaseModel):
     tool: Literal[
@@ -14,7 +16,7 @@ class ToolCall(BaseModel):
         "filesystem.patch",
         "filesystem.write",
         "code.summary",
-        "shell.run",
+        "bash.run",
     ]
     arguments: dict[str, Any] = Field(default_factory=dict)
 

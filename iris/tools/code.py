@@ -1,7 +1,7 @@
 from pathlib import Path
 import re
 
-from iris.executor.models.tool_call import ToolCall, ToolResult
+from iris.agent.models.tool_call import ToolCall, ToolResult
 from iris.tools.base import Tool
 from iris.utils.logger import logger
 

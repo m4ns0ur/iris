@@ -3,7 +3,7 @@ import fnmatch
 from pathlib import Path
 import re
 
-from iris.executor.models.tool_call import ToolCall, ToolResult
+from iris.agent.models.tool_call import ToolCall, ToolResult
 from iris.tools.base import Tool
 
 MAX_FIND_RESULTS = 200
@@ -88,7 +88,7 @@ class FileSystemTool(Tool):
                 },
             )
 
-        with open(path, "rb") as f:
+        with Path.open(path, "rb") as f:
             f.seek(start)
             data = f.read(CHUNK_SIZE)
 
@@ -123,7 +123,7 @@ class FileSystemTool(Tool):
         start = max(call.arguments.get("start", 1), 1)
         count = call.arguments.get("num", MAX_READ_LINES)
 
-        with open(path, encoding="utf-8", errors="replace") as f:
+        with Path.open(path, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
 
         total_lines = len(lines)
@@ -198,7 +198,7 @@ class FileSystemTool(Tool):
                 continue
 
             try:
-                with open(file, encoding="utf-8", errors="ignore") as f:
+                with Path.open(file, encoding="utf-8", errors="ignore") as f:
                     for i, line in enumerate(f, 1):
                         if regex.search(line):
                             rel = file.relative_to(self.root)

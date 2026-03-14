@@ -12,23 +12,32 @@ class LLMClient:
 
     def generate(
         self,
-        prompt: str,
+        system_prompt: str,
+        user_prompt: str,
         temperature: float = 0.2,
+        top_p: float = 0.95,
+        top_k: int = 40,
+        min_p: float = 0.05,
+        presence_penalty: float = 0.0,
+        repetition_penalty: float = 1.1,
     ) -> str:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "user", "content": prompt},
+                # {"role": "system", "content": system_prompt},
+                {"role": "user", "content": system_prompt + user_prompt},
             ],
             "max_tokens": 32768,
             "temperature": temperature,
-            # "top_p": 0.8,
-            # "presence_penalty": 1.5,
+            "top_p": top_p,
+            "presence_penalty": presence_penalty,
             "response_format": {"type": "json_object"},
-            # "extra_body": {
-            #     "top_k": 20,
-            #     "chat_template_kwargs": {"enable_thinking": False},
-            # },
+            "extra_body": {
+                "top_k": top_k,
+                "min_p": min_p,
+                "repetition_penalty": repetition_penalty,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
         }
 
         # Retry once in case of network hiccup

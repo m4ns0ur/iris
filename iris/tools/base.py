@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from iris.executor.models.tool_call import ToolCall, ToolResult
+from iris.agent.models.tool_call import ToolCall, ToolResult
 
 
 class Tool(ABC):

@@ -2,7 +2,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from iris.executor.models.tool_call import ToolCall
+from iris.agent.models.tool_call import ToolCall
 
 
 class FinalAnswer(BaseModel):
