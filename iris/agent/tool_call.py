@@ -57,14 +57,14 @@ class ToolCaller:
 
         if result.success:
             if tool_name == "filesystem.find":
-                if result.stdout:
+                if result.metadata.get("matches"):
                     state.state_summary.append(
-                        f"Found {len(result.stdout)} files matching criteria."
+                        f"Found {result.metadata.get('matches')} files matching criteria."
                     )
             elif tool_name == "filesystem.grep":
-                if result.stdout:
+                if result.metadata.get("matches"):
                     state.state_summary.append(
-                        f"Found {len(result.stdout)} lines matching criteria."
+                        f"Found {result.metadata.get('matches')} lines matching criteria."
                     )
             elif tool_name == "filesystem.stat":
                 if result.stdout:

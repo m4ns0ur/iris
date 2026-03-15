@@ -1,28 +1,44 @@
 from pathlib import Path
 import subprocess
-from typing import Any
 
 from iris.agent.models.tool_call import ToolCall, ToolResult
 from iris.tools.base import Tool
 from iris.utils.logger import logger
 
-ALLOWED_COMMANDS = {
-    "ls",
-    "echo",
-    "pwd",
-    "cat",
-    "du",
-    "df",
-    "head",
-    "tail",
-    "find",
-    "ps",
-    "grep",
-    "git",
-    "python3",
-    "python",
-    "uv",
-    "mkdir",
+MAX_STD_OUT = 8000
+
+BLOCKED_COMMANDS = {
+    "rm",
+    "shutdown",
+    "reboot",
+    "halt",
+    "poweroff",
+    "mkfs",
+    "dd",
+    "mount",
+    "umount",
+    "sudo",
+    "su",
+    "passwd",
+    "chown",
+    "chmod",
+    "kill",
+    "killall",
+    "init",
+    "curl",
+    "wget",
+    "nc",
+    "ncat",
+    "telnet",
+    "scp",
+    "rsync",
+}
+
+BLOCKED_FLAGS = {
+    "-rf",
+    "-fr",
+    "--no-preserve-root",
+    "-delete",
 }
 
 
@@ -33,13 +49,12 @@ class BashTool(Tool):
     def execute(self, call: ToolCall) -> ToolResult:
         if call.tool != "bash.run":
             return ToolResult(
-                tool=call.tool, success=False, stderr="Unsupported bash operation."
+                tool=call.tool,
+                success=False,
+                stderr="Unsupported bash operation.",
             )
 
-        assert self.workdir and Path(self.workdir).exists(), (
-            "Workspace directory does not exist"
-        )
-        assert Path(self.workdir).is_dir(), "Workspace must be a directory"
+        self._validate_workspace_path()
 
         try:
             command: list[str] = call.arguments.get("command", [])
@@ -47,8 +62,12 @@ class BashTool(Tool):
             if not command:
                 raise ValueError("Empty command.")
 
-            if command[0] not in ALLOWED_COMMANDS:
-                raise PermissionError(f"Command '{command[0]}' not allowed.")
+            cmd = command[0]
+            if cmd in BLOCKED_COMMANDS:
+                raise PermissionError(f"Command '{cmd}' is blocked.")
+
+            self._validate_args(command)
+            self._validate_paths(command)
 
             logger.debug(f"Running bash command in {self.workdir}: {' '.join(command)}")
 
@@ -67,8 +86,8 @@ class BashTool(Tool):
             return ToolResult(
                 tool=call.tool,
                 success=result.returncode == 0,
-                stdout=result.stdout,
-                stderr=result.stderr,
+                stdout=result.stdout[:MAX_STD_OUT],
+                stderr=result.stderr[:MAX_STD_OUT],
                 metadata={"returncode": result.returncode},
             )
 
@@ -79,12 +98,27 @@ class BashTool(Tool):
                 stderr=str(e),
             )
 
+    def _validate_workspace_path(self) -> None:
+        wd = Path(self.workdir).resolve()
 
-def repair_raw_bash_call(data: Any) -> None:
-    if isinstance(data, dict) and data.get("type") == "tool":
-        call = data.get("call", {})
-        tool_name = call.get("tool")
+        if not wd.exists():
+            raise RuntimeError("Workspace does not exist")
 
-        if tool_name in ALLOWED_COMMANDS:
-            data["call"]["tool"] = "bash.run"
-            data["call"]["arguments"] = {"command": [tool_name]}
+        if not wd.is_dir():
+            raise RuntimeError("Workspace must be a directory")
+
+        # prevent running at dangerous locations
+        forbidden = [Path("/"), Path.home()]
+
+        if wd in forbidden:
+            raise RuntimeError("Workspace cannot be root or home directory")
+
+    def _validate_args(self, command: list[str]) -> None:
+        for arg in command:
+            if arg in BLOCKED_FLAGS:
+                raise PermissionError(f"Blocked flag: {arg}")
+
+    def _validate_paths(self, command: list[str]) -> None:
+        for arg in command[1:]:
+            if arg.startswith("/"):
+                raise PermissionError("Absolute paths are not allowed")

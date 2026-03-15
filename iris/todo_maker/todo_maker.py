@@ -9,7 +9,6 @@ from iris.agent.models.tool_state import ToolState
 from iris.agent.tool_call import ToolCaller
 from iris.llm.client import LLMClient
 from iris.todo_maker.models.todo_maker import TodoList
-from iris.tools.bash import repair_raw_bash_call
 from iris.utils.json_utils import extract_json
 
 
@@ -76,8 +75,6 @@ class TodoMaker:
         )
 
         data = extract_json(raw_output)
-
-        repair_raw_bash_call(data)
 
         adapter: TypeAdapter[AgentResponse] = TypeAdapter(AgentResponse)
         return adapter.validate_python(data)

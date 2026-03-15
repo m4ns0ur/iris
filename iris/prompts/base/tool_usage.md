@@ -50,6 +50,7 @@
 
 ### Tool Usage Constraints
 
+- If you get `Access outside workspace is not allowed` error, you should change the path
 - Avoid repeating the same tool call with the same arguments
 - Prefer filesystem.read_lines for code files
 - When modifying files, prefer filesystem.patch
