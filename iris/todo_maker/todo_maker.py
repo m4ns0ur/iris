@@ -2,12 +2,14 @@ import json
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from pydantic import TypeAdapter
 
-from iris.agent.models.agent_step import ToolAction
+from iris.agent.models.agent_step import AgentResponse, FinalAnswer, ToolAction
 from iris.agent.models.tool_state import ToolState
 from iris.agent.tool_call import ToolCaller
 from iris.llm.client import LLMClient
 from iris.todo_maker.models.todo_maker import TodoList
+from iris.tools.bash import repair_raw_bash_call
 from iris.utils.json_utils import extract_json
 
 
@@ -25,9 +27,27 @@ class TodoMaker:
             lstrip_blocks=True,
             keep_trailing_newline=True,
         )
+        self.template = self.env.get_template("todo_maker.md")
 
     def create(self, intent: str) -> TodoList:
         state = ToolState(task=self.intent)
+
+        while state.step_count < self.max_steps:
+            state.step_count += 1
+
+            response = self._reason(state)
+
+            if isinstance(response, FinalAnswer):
+                return TodoList.model_validate(response.result)
+
+            if isinstance(response, ToolAction):
+                self.tool_caller.call(response.call, state, response)
+                continue
+
+        todo_list = TodoList(todos=[])
+        return todo_list
+
+    def _reason(self, state: ToolState) -> FinalAnswer | ToolAction:
         state_summary_str = (
             "\n".join(state.state_summary) if state.state_summary else ""
         )
@@ -38,35 +58,26 @@ class TodoMaker:
             else ""
         )
 
-        template = self.env.get_template("todo_maker.md")
-        system_prompt = template.render(
+        system_prompt = self.template.render(
             state_summary=state_summary_str,
             last_tool_result=last_tool_result_str,
         )
-        user_prompt = f"{intent}"
+        user_prompt = f"{self.intent}"
 
-        while state.step_count < self.max_steps:
-            state.step_count += 1
+        raw_output = self.llm.generate(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=0.1,
+            top_p=0.9,
+            top_k=40,
+            min_p=0.05,
+            presence_penalty=0.0,
+            repetition_penalty=1.05,
+        )
 
-            raw_output = self.llm.generate(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                temperature=0.1,
-                top_p=0.9,
-                top_k=40,
-                min_p=0.05,
-                presence_penalty=0.0,
-                repetition_penalty=1.05,
-            )
+        data = extract_json(raw_output)
 
-            data = extract_json(raw_output)
-            response = TodoList.model_validate(data)
+        repair_raw_bash_call(data)
 
-            if isinstance(response, ToolAction):
-                self.tool_caller.call(response.call, state, response)
-                continue
-
-            return response
-
-        todo_list = TodoList(todos=[])
-        return todo_list
+        adapter: TypeAdapter[AgentResponse] = TypeAdapter(AgentResponse)
+        return adapter.validate_python(data)

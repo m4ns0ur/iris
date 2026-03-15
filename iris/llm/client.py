@@ -24,8 +24,8 @@ class LLMClient:
         payload = {
             "model": self.model,
             "messages": [
-                # {"role": "system", "content": system_prompt},
-                {"role": "user", "content": system_prompt + user_prompt},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
             "max_tokens": 32768,
             "temperature": temperature,

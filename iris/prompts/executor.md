@@ -31,7 +31,7 @@ Execute a single atomic task based on the user intent. The task will be provided
 ```
 {
   "type": "final",
-  "message": "..."
+  "result": "..."
 }
 ```
 {% endset %}

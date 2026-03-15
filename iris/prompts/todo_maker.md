@@ -23,17 +23,20 @@ Generate a detailed todo list that breaks down the intent into clear, actionable
 {% set json_contract %}
 ```
 {
-  "todos": [
-    {
-      "step": 1,
-      "description": "string"
-    },
-    {
-      "step": 2,
-      "description": "string"
-    },
-    ...
-  ]
+  "type": "final",
+  "result": {
+    "todos": [
+        {
+        "step": 1,
+        "description": "string"
+        },
+        {
+        "step": 2,
+        "description": "string"
+        },
+        ...
+    ]
+  }
 }
 ```
 {% endset %}

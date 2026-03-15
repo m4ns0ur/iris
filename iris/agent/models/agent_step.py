@@ -1,4 +1,4 @@
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -7,7 +7,7 @@ from iris.agent.models.tool_call import ToolCall
 
 class FinalAnswer(BaseModel):
     type: Literal["final"]
-    message: str
+    result: Any
 
 
 class ToolAction(BaseModel):

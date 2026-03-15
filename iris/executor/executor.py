@@ -8,7 +8,7 @@ from iris.agent.models.agent_step import AgentResponse, FinalAnswer, ToolAction
 from iris.agent.models.tool_state import ToolState
 from iris.agent.tool_call import ToolCaller
 from iris.llm.client import LLMClient
-from iris.tools.bash import ALLOWED_COMMANDS
+from iris.tools.bash import repair_raw_bash_call
 from iris.utils.json_utils import extract_json
 
 
@@ -30,6 +30,7 @@ class Executor:
             lstrip_blocks=True,
             keep_trailing_newline=True,
         )
+        self.template = self.env.get_template("executor.md")
 
     def run(self, task: str) -> str:
         state = ToolState(task=task)
@@ -40,7 +41,7 @@ class Executor:
             response = self._reason(state)
 
             if isinstance(response, FinalAnswer):
-                return response.message
+                return str(response.result)
 
             if isinstance(response, ToolAction):
                 self.tool_caller.call(response.call, state, response)
@@ -49,8 +50,6 @@ class Executor:
         return "Execution stopped: max steps reached."
 
     def _reason(self, state: ToolState) -> FinalAnswer | ToolAction:
-        template = self.env.get_template("executor.md")
-
         state_summary_str = (
             "\n".join(state.state_summary) if state.state_summary else ""
         )
@@ -61,12 +60,12 @@ class Executor:
             else ""
         )
 
-        system_prompt = template.render(
+        system_prompt = self.template.render(
             state_summary=state_summary_str,
             last_tool_result=last_tool_result_str,
         )
 
-        user_prompt = f"User: {self.intent}. Current task: {state.task}"
+        user_prompt = f"{self.intent}\nCurrent task: {state.task}"
         raw_output = self.llm.generate(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -79,14 +78,7 @@ class Executor:
         )
         data = extract_json(raw_output)
 
-        # Auto-repair raw bash commands
-        if isinstance(data, dict) and data.get("type") == "tool":
-            call = data.get("call", {})
-            tool_name = call.get("tool")
-
-            if tool_name in ALLOWED_COMMANDS:
-                data["call"]["tool"] = "bash.run"
-                data["call"]["arguments"] = {"command": [tool_name]}
+        repair_raw_bash_call(data)
 
         adapter: TypeAdapter[AgentResponse] = TypeAdapter(AgentResponse)
         return adapter.validate_python(data)

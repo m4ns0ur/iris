@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+from typing import Any
 
 from iris.agent.models.tool_call import ToolCall, ToolResult
 from iris.tools.base import Tool
@@ -77,3 +78,13 @@ class BashTool(Tool):
                 success=False,
                 stderr=str(e),
             )
+
+
+def repair_raw_bash_call(data: Any) -> None:
+    if isinstance(data, dict) and data.get("type") == "tool":
+        call = data.get("call", {})
+        tool_name = call.get("tool")
+
+        if tool_name in ALLOWED_COMMANDS:
+            data["call"]["tool"] = "bash.run"
+            data["call"]["arguments"] = {"command": [tool_name]}
