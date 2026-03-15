@@ -13,6 +13,8 @@ from iris.tools.filesystem import FileSystemTool
 from iris.tools.registry import ToolRegistry
 from iris.utils.logger import logger
 
+MAX_LAST_TOOLS = 5
+
 
 class ToolCaller:
     def __init__(self, workspace: Path) -> None:
@@ -46,11 +48,11 @@ class ToolCaller:
             )
 
         # Update semantic state instead of raw logs
-        self._update_state_summary(state, action, result)
+        self._update_last_tools(state, action, result)
 
         state.last_tool_result = result
 
-    def _update_state_summary(
+    def _update_last_tools(
         self, state: ToolState, action: ToolAction, result: ToolResult
     ) -> None:
         tool_name = action.call.tool
@@ -58,48 +60,51 @@ class ToolCaller:
         if result.success:
             if tool_name == "filesystem.find":
                 if result.metadata.get("matches"):
-                    state.state_summary.append(
-                        f"Found {result.metadata.get('matches')} files matching criteria."
+                    state.last_tools.insert(
+                        0,
+                        f"Found {result.metadata.get('matches')} files matching criteria.",
                     )
             elif tool_name == "filesystem.grep":
                 if result.metadata.get("matches"):
-                    state.state_summary.append(
-                        f"Found {result.metadata.get('matches')} lines matching criteria."
+                    state.last_tools.insert(
+                        0,
+                        f"Found {result.metadata.get('matches')} lines matching criteria.",
                     )
             elif tool_name == "filesystem.stat":
                 if result.stdout:
                     stat_info = json.loads(result.stdout)
-                    state.state_summary.append(
-                        f"File {action.call.arguments['path']} exists with size {stat_info.get('size', 'unknown')} bytes."
+                    state.last_tools.insert(
+                        0,
+                        f"File {action.call.arguments['path']} exists with size {stat_info.get('size', 'unknown')} bytes.",
                     )
             elif tool_name == "filesystem.read_lines":
                 if result.stdout:
-                    state.state_summary.append(
-                        f"Read lines {action.call.arguments.get('start_line', 1)} to {action.call.arguments.get('start_line', 1) + len(result.stdout)} from {action.call.arguments['path']}."
+                    state.last_tools.insert(
+                        0,
+                        f"Read lines {action.call.arguments.get('start_line', 1)} to {action.call.arguments.get('start_line', 1) + len(result.stdout)} from {action.call.arguments['path']}.",
                     )
             elif tool_name == "filesystem.read_chunk":
-                state.state_summary.append(
-                    f"File {action.call.arguments['path']} inspected."
+                state.last_tools.insert(
+                    0, f"File {action.call.arguments['path']} inspected."
                 )
-            elif tool_name == "filesystem.preview_patch":
-                if result.stdout:
-                    state.state_summary.append(
-                        f"Previewed patch for {action.call.arguments['path']} with {len(result.stdout.splitlines())} lines of diff."
-                    )
             elif tool_name == "filesystem.patch":
                 if result.stdout:
-                    state.state_summary.append(
-                        f"Applied patch to {action.call.arguments['path']} with {len(result.stdout.splitlines())} lines of diff."
+                    state.last_tools.insert(
+                        0,
+                        f"Applied patch to {action.call.arguments['path']} with {len(result.stdout.splitlines())} lines of diff.",
                     )
             elif tool_name == "filesystem.write":
-                state.state_summary.append(
-                    f"File {action.call.arguments['path']} written."
+                state.last_tools.insert(
+                    0, f"File {action.call.arguments['path']} written."
                 )
             elif tool_name == "code.summary":
-                state.state_summary.append("Code summary generated.")
+                state.last_tools.insert(0, "Code summary generated.")
             elif tool_name == "bash.run":
-                state.state_summary.append("Bash command executed successfully.")
+                state.last_tools.insert(0, "Bash command executed successfully.")
         else:
-            state.state_summary.append(
-                f"{tool_name} failed: {result.stderr or 'Unknown error'}"
+            state.last_tools.insert(
+                0, f"{tool_name} failed: {result.stderr or 'Unknown error'}"
             )
+
+        if len(state.last_tools) > MAX_LAST_TOOLS:
+            state.last_tools = state.last_tools[-MAX_LAST_TOOLS:]

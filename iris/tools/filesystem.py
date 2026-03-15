@@ -1,10 +1,10 @@
-import difflib
 import fnmatch
 from pathlib import Path
 import re
 
 from iris.agent.models.tool_call import ToolCall, ToolResult
 from iris.tools.base import Tool
+from iris.tools.patch import apply_search_replace_patch
 
 MAX_FIND_RESULTS = 200
 MAX_GREP_RESULTS = 200
@@ -35,9 +35,6 @@ class FileSystemTool(Tool):
 
             if call.tool == "filesystem.write":
                 return self._write(call)
-
-            if call.tool == "filesystem.preview_patch":
-                return self._preview_patch(call)
 
             if call.tool == "filesystem.patch":
                 return self._patch(call)
@@ -234,141 +231,34 @@ class FileSystemTool(Tool):
             metadata={"path": str(path.relative_to(self.root))},
         )
 
-    def _apply_unified_patch(
-        self, original_lines: list[str], patch_text: str
-    ) -> list[str]:
-        lines = patch_text.splitlines()
-        patched = original_lines[:]
-
-        hunk: list[str] = []
-
-        for line in lines:
-            if line.startswith("@@"):
-                if hunk:
-                    patched = self._apply_hunk(patched, hunk)
-                    hunk = []
-                continue
-            else:
-                hunk.append(line)
-
-        if hunk:
-            patched = self._apply_hunk(patched, hunk)
-
-        return patched
-
-    def _apply_hunk(self, file_lines: list[str], hunk_lines: list[str]) -> list[str]:
-        context = []
-        replacements = []
-
-        for line in hunk_lines:
-            if line.startswith(" "):
-                context.append(line[1:])
-                replacements.append(("context", line[1:]))
-            elif line.startswith("-"):
-                context.append(line[1:])
-                replacements.append(("delete", line[1:]))
-            elif line.startswith("+"):
-                replacements.append(("insert", line[1:]))
-            else:
-                raise ValueError("Invalid patch line")
-
-        # find context start in file
-        for i in range(len(file_lines)):
-            match = True
-            j = 0
-
-            for typ, text in replacements:
-                if typ in ("context", "delete"):
-                    if (
-                        i + j >= len(file_lines)
-                        or file_lines[i + j].rstrip("\n") != text
-                    ):
-                        match = False
-                        break
-                    j += 1
-
-            if match:
-                # apply replacement
-                new_lines = []
-                k = i
-
-                for typ, text in replacements:
-                    if typ == "context":
-                        new_lines.append(file_lines[k])
-                        k += 1
-                    elif typ == "delete":
-                        k += 1
-                    elif typ == "insert":
-                        new_lines.append(text + "\n")
-
-                return file_lines[:i] + new_lines + file_lines[k:]
-
-        raise ValueError("Patch context not found in file")
-
-    def _preview_patch(self, call: ToolCall) -> ToolResult:
-        path = self._resolve(call.arguments.get("path", ""))
-
-        if not path.exists():
-            return ToolResult(
-                tool=call.tool, success=False, stderr="File does not exist."
-            )
-
-        patch_text = call.arguments.get("patch", "")
-
-        try:
-            original = path.read_text().splitlines(keepends=True)
-
-            patched = self._apply_unified_patch(original, patch_text)
-
-            diff = "".join(
-                difflib.unified_diff(
-                    original,
-                    patched,
-                    fromfile=str(path),
-                    tofile=str(path),
-                    lineterm="",
-                )
-            )
-
-            return ToolResult(
-                tool=call.tool,
-                success=True,
-                stdout=diff,
-                metadata={
-                    "path": call.arguments.get("path", ""),
-                    "original_lines": len(original),
-                    "patched_lines": len(patched),
-                },
-            )
-
-        except Exception as e:
-            return ToolResult(tool=call.tool, success=False, stderr=str(e))
-
     def _patch(self, call: ToolCall) -> ToolResult:
         path = self._resolve(call.arguments.get("path", ""))
 
         if not path.exists():
             return ToolResult(
-                tool=call.tool, success=False, stderr="File does not exist."
+                tool=call.tool,
+                success=False,
+                stderr="File does not exist.",
             )
 
         patch_text = call.arguments.get("patch", "")
 
         try:
-            original = path.read_text().splitlines(keepends=True)
+            original = path.read_text()
 
-            patched = self._apply_unified_patch(original, patch_text)
+            patched = apply_search_replace_patch(original, patch_text)
 
-            path.write_text("".join(patched))
+            path.write_text(patched)
 
             return ToolResult(
                 tool=call.tool,
                 success=True,
-                metadata={
-                    "path": call.arguments.get("path", ""),
-                    "lines_written": len(patched),
-                },
+                metadata={"path": str(path)},
             )
 
         except Exception as e:
-            return ToolResult(tool=call.tool, success=False, stderr=str(e))
+            return ToolResult(
+                tool=call.tool,
+                success=False,
+                stderr=str(e),
+            )

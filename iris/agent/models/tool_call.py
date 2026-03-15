@@ -12,7 +12,6 @@ class ToolCall(BaseModel):
         "filesystem.stat",
         "filesystem.read_lines",
         "filesystem.read_chunk",
-        "filesystem.preview_patch",
         "filesystem.patch",
         "filesystem.write",
         "code.summary",

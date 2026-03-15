@@ -1,7 +1,9 @@
-{% if state_summary %}
-## State Summary
+{% if last_tools %}
+## Last 5 Tool Usage
 
-{{ state_summary }}
+{% for tool in last_tools %}
+{{ loop.index }}. {{ tool }}
+{% endfor %}
 {% endif %}
 
 {% if last_tool_result %}

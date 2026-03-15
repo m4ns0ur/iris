@@ -49,10 +49,6 @@ class Executor:
         return "Execution stopped: max steps reached."
 
     def _reason(self, state: ToolState) -> FinalAnswer | ToolAction:
-        state_summary_str = (
-            "\n".join(state.state_summary) if state.state_summary else ""
-        )
-
         last_tool_result_str = (
             json.dumps(state.last_tool_result.model_dump(), indent=2)
             if state.last_tool_result
@@ -60,7 +56,7 @@ class Executor:
         )
 
         system_prompt = self.template.render(
-            state_summary=state_summary_str,
+            last_tools=state.last_tools,
             last_tool_result=last_tool_result_str,
         )
 
