@@ -35,7 +35,7 @@ Execute a single atomic task based on the user intent. The task will be provided
 }
 ```
 {% endset %}
-{% with json_contract=json_contract %}
+{% with json_contract=json_contract, tool_available=true %}
 {% include "base/output_contract.md" %}
 {% endwith %}
 

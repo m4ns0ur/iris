@@ -40,7 +40,7 @@ Generate a detailed todo list that breaks down the intent into clear, actionable
 }
 ```
 {% endset %}
-{% with json_contract=json_contract %}
+{% with json_contract=json_contract, tool_available=true %}
 {% include "base/output_contract.md" %}
 {% endwith %}
 

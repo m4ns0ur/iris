@@ -9,6 +9,7 @@ from iris.agent.models.tool_state import ToolState
 from iris.agent.tool_call import ToolCaller
 from iris.llm.client import LLMClient
 from iris.utils.json_utils import extract_json
+from iris.utils.logger import logger
 
 
 class Executor:
@@ -40,6 +41,7 @@ class Executor:
             response = self._reason(state)
 
             if isinstance(response, FinalAnswer):
+                logger.debug(f"Step: {state.step_count}/{self.max_steps}")
                 return str(response.result)
 
             if isinstance(response, ToolAction):

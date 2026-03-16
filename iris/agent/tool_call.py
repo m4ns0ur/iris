@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
@@ -56,55 +55,59 @@ class ToolCaller:
         self, state: ToolState, action: ToolAction, result: ToolResult
     ) -> None:
         tool_name = action.call.tool
+        is_ok = "Success" if result.success else "Failed"
+        args = action.call.arguments
+        args.pop("content")
+        state.last_tools.insert(0, f"{tool_name} {is_ok}: {args}")
 
-        if result.success:
-            if tool_name == "filesystem.find":
-                if result.metadata.get("matches"):
-                    state.last_tools.insert(
-                        0,
-                        f"Found {result.metadata.get('matches')} files matching criteria.",
-                    )
-            elif tool_name == "filesystem.grep":
-                if result.metadata.get("matches"):
-                    state.last_tools.insert(
-                        0,
-                        f"Found {result.metadata.get('matches')} lines matching criteria.",
-                    )
-            elif tool_name == "filesystem.stat":
-                if result.stdout:
-                    stat_info = json.loads(result.stdout)
-                    state.last_tools.insert(
-                        0,
-                        f"File {action.call.arguments['path']} exists with size {stat_info.get('size', 'unknown')} bytes.",
-                    )
-            elif tool_name == "filesystem.read_lines":
-                if result.stdout:
-                    state.last_tools.insert(
-                        0,
-                        f"Read lines {action.call.arguments.get('start_line', 1)} to {action.call.arguments.get('start_line', 1) + len(result.stdout)} from {action.call.arguments['path']}.",
-                    )
-            elif tool_name == "filesystem.read_chunk":
-                state.last_tools.insert(
-                    0, f"File {action.call.arguments['path']} inspected."
-                )
-            elif tool_name == "filesystem.patch":
-                if result.stdout:
-                    state.last_tools.insert(
-                        0,
-                        f"Applied patch to {action.call.arguments['path']} with {len(result.stdout.splitlines())} lines of diff.",
-                    )
-            elif tool_name == "filesystem.write":
-                state.last_tools.insert(
-                    0, f"File {action.call.arguments['path']} written."
-                )
-            elif tool_name == "code.summary":
-                state.last_tools.insert(0, "Code summary generated.")
-            elif tool_name == "bash.run":
-                state.last_tools.insert(0, "Bash command executed successfully.")
-        else:
-            state.last_tools.insert(
-                0, f"{tool_name} failed: {result.stderr or 'Unknown error'}"
-            )
+        # if result.success:
+        #     if tool_name == "filesystem.find":
+        #         if result.metadata.get("matches"):
+        #             state.last_tools.insert(
+        #                 0,
+        #                 f"Found {result.metadata.get('matches')} files matching criteria.",
+        #             )
+        #     elif tool_name == "filesystem.grep":
+        #         if result.metadata.get("matches"):
+        #             state.last_tools.insert(
+        #                 0,
+        #                 f"Found {result.metadata.get('matches')} lines matching criteria.",
+        #             )
+        #     elif tool_name == "filesystem.stat":
+        #         if result.stdout:
+        #             stat_info = json.loads(result.stdout)
+        #             state.last_tools.insert(
+        #                 0,
+        #                 f"File {action.call.arguments['path']} exists with size {stat_info.get('size', 'unknown')} bytes.",
+        #             )
+        #     elif tool_name == "filesystem.read_lines":
+        #         if result.stdout:
+        #             state.last_tools.insert(
+        #                 0,
+        #                 f"Read lines {action.call.arguments.get('start_line', 1)} to {action.call.arguments.get('start_line', 1) + len(result.stdout)} from {action.call.arguments['path']}.",
+        #             )
+        #     elif tool_name == "filesystem.read_chunk":
+        #         state.last_tools.insert(
+        #             0, f"File {action.call.arguments['path']} inspected."
+        #         )
+        #     elif tool_name == "filesystem.patch":
+        #         if result.stdout:
+        #             state.last_tools.insert(
+        #                 0,
+        #                 f"Applied patch to {action.call.arguments['path']} with {len(result.stdout.splitlines())} lines of diff.",
+        #             )
+        #     elif tool_name == "filesystem.write":
+        #         state.last_tools.insert(
+        #             0, f"File {action.call.arguments['path']} written."
+        #         )
+        #     elif tool_name == "code.summary":
+        #         state.last_tools.insert(0, "Code summary generated.")
+        #     elif tool_name == "bash.run":
+        #         state.last_tools.insert(0, "Bash command executed successfully.")
+        # else:
+        #     state.last_tools.insert(
+        #         0, f"{tool_name} failed: {result.stderr or 'Unknown error'}"
+        #     )
 
         if len(state.last_tools) > MAX_LAST_TOOLS:
-            state.last_tools = state.last_tools[-MAX_LAST_TOOLS:]
+            state.last_tools = state.last_tools[:MAX_LAST_TOOLS]

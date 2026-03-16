@@ -88,6 +88,18 @@ def log_llm_response(response: str) -> None:
                     logger.debug(f"Content preview:\n{content}")
             else:
                 console.print(Pretty(content))
+
+        usage = parsed.get("usage", {})
+        try:
+            parsed_usage = json.loads(usage)
+            console.print(f"[bold]Usage:[/bold] {Pretty(parsed_usage)}")
+        except Exception:
+            console.print(f"[bold]Usage:[/bold] {usage}")
+
+        timings = parsed.get("timings", {})
+        tokens_per_second = timings.get("predicted_per_second", "")
+        console.print(f"[bold]Speed:[/bold] {tokens_per_second:.2f} T/s")
+
     except Exception:
         logger.debug(response)
 

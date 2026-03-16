@@ -2,6 +2,7 @@
 
 Respond only with valid JSON in the following structure:
 
+{% if tool_available %}
 If tool required:
 ```
 {
@@ -12,6 +13,7 @@ If tool required:
   }
 }
 ```
+{% endif %}
 If finished:
 {{ json_contract }}
 - You must output only valid JSON
@@ -20,5 +22,7 @@ If finished:
 - Do NOT add extra fields
 - Do NOT rename fields
 - All string fields must contain literal values only
+{% if tool_available %}
 - The `tool` field must be exactly one of the available tools
 - If tool output already answers the goal, return type: `final`
+{% endif %}
