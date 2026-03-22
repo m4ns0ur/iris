@@ -72,11 +72,11 @@
 
 ### Tool Usage Constraints
 
-- Avoid repeating the same tool call with the same arguments
-- Prefer filesystem.read_lines for code files
-- When modifying files, prefer filesystem.patch
+- Always check "Last 5 Tool Usage" section to avoid repeating the same tool call with the same arguments.
+- Always check that file doesn't exist before `filesystem.write`. If file exists, use `filesystem.patch` to edit.
+- Prefer `filesystem.read_lines` for code files.
 - A final answer is only valid if:
-  - The goal has been fully answered
-  - No further tool calls are required
-  - You are not describing what you would do
-  - You are not describing missing information
+  - The goal has been fully answered.
+  - No further tool calls are required.
+  - You are not describing what you would do.
+  - You are not describing missing information.

@@ -62,7 +62,7 @@ class Executor:
             last_tool_result=last_tool_result_str,
         )
 
-        user_prompt = f"{self.intent}\nCurrent task: {state.task}"
+        user_prompt = f"Final Goal: {self.intent}\nCurrent task: {state.task}"
         raw_output = self.llm.generate(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
