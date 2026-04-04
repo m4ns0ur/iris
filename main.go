@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/m4ns0ur/iris/internal/llm"
@@ -21,13 +22,15 @@ Rules:
 
 	userPrompt := "create a snake game in js"
 
-	_, err := llmClient.Generate(systemPrompt, userPrompt, &llm.LLMOptions{
+	err := llmClient.GenerateStream(systemPrompt, userPrompt, &llm.LLMOptions{
 		Temperature:       0.1,
 		TopP:              0.9,
 		TopK:              40,
 		MinP:              0.05,
 		PresencePenalty:   0.0,
 		RepetitionPenalty: 1.05,
+	}, func(chunk string) {
+		fmt.Print(chunk)
 	})
 	if err != nil {
 		Logger.Error("LLM generation failed", "error", err)
