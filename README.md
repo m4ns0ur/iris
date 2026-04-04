@@ -32,14 +32,7 @@ It is an **agent system**.
 * Explicit tool schema and validation
 * Deterministic agent loop
 
-### 3. Structured Reasoning
-
-* Planner proposes steps
-* Executor performs atomic actions
-* Subtask creator narrows scope for small models
-* State is tracked explicitly outside the model
-
-### 4. Extensible Agent Core
+### 3. Extensible Agent Core
 
 Designed to support:
 
@@ -48,49 +41,6 @@ Designed to support:
 * Persistent memory
 * Multi-agent collaboration
 * General-purpose task execution
-
-## Current Architecture
-
-```
-iris/
-├── cli.py                 # Entry point
-├── planner/               # Intent analysis & task planning
-├── executor/              # Step execution & tool orchestration
-├── tools/                 # Tool abstractions (filesystem, bash, etc.)
-├── llm/                   # Model client abstraction
-└── utils/                 # Logging, JSON repair, helpers
-```
-
-### Planner
-
-Responsible for:
-
-* Classifying user intent
-* Requesting clarification
-* Generating structured proposals
-
-### Executor
-
-Responsible for:
-
-* Executing agent steps
-* Managing subtask decomposition
-* Calling tools
-* Updating state
-
-### Tools
-
-Current tools:
-
-* Filesystem access
-* Bash execution
-
-Future tools:
-
-* HTTP client
-* Browser automation
-* Memory store
-* Knowledge retrieval
 
 ### LLM Client
 
@@ -112,43 +62,6 @@ Constraints embraced:
 
 The architecture compensates for these limitations.
 
-## Roadmap
-
-### Phase 0 – Dev Agent (Current)
-
-* Structured planning & execution
-* Deterministic tool calls
-* Clean state modeling
-* Prompt modularization
-
-### Phase 1 – Reliability Layer
-
-* Failure classification
-* Automatic plan repair
-* Tool result summarization
-* Token budget management
-
-### Phase 2 – Memory Layer
-
-* Short-term working memory
-* Long-term episodic storage
-* Context compression
-* Persistent identity
-
-### Phase 3 – Reflective Agent
-
-* Self-evaluation
-* Execution scoring
-* Replanning loops
-* Multi-agent orchestration
-
-### Phase 4 – General Assistant
-
-* Broader task support
-* OS-level automation
-* Knowledge integration
-* Personal assistant capabilities
-
 ## Why Iris Exists
 
 Most modern AI systems assume:
@@ -162,23 +75,6 @@ Iris explores a different direction:
 > What if strong architecture enables small models to behave intelligently?
 
 This project is an exploration of agent engineering under constraint.
-
-## Installation
-
-```bash
-# Clone repository
-git clone <repo-url>
-cd iris
-
-# Install dependencies
-uv sync
-```
-
-## Usage
-
-```bash
-uv run -m iris.cli --debug "create a snake game"
-```
 
 ## Development Goals
 
