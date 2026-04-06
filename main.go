@@ -1,39 +1,19 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
+	"github.com/m4ns0ur/iris/internal/agent"
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/logger"
+	"github.com/m4ns0ur/iris/internal/tui"
 )
 
 var Logger = logger.Logger
 
 func main() {
-	llmClient := llm.NewClient("")
-
-	systemPrompt := `You are Iris, an autonomous agent.
-
-You get the user input and generate a prompt for a agent to work on it.
-
-Rules:
-  - Prompt must be concise and effective`
-
-	userPrompt := "create a snake game in js"
-
-	err := llmClient.GenerateStream(systemPrompt, userPrompt, &llm.LLMOptions{
-		Temperature:       0.1,
-		TopP:              0.9,
-		TopK:              40,
-		MinP:              0.05,
-		PresencePenalty:   0.0,
-		RepetitionPenalty: 1.05,
-	}, func(chunk string) {
-		fmt.Print(chunk)
-	})
-	if err != nil {
-		Logger.Error("LLM generation failed", "error", err)
+	if err := tui.Run(agent.NewAgent(llm.NewClient(""))); err != nil {
+		Logger.Error("Bubble Tea program failed", "error", err)
 		os.Exit(1)
 	}
 }

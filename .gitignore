@@ -33,5 +33,5 @@ go.work.sum
 
 # Project-specific ignores
 workspace/
-iris_debug.log
+iris_*.log
 iris

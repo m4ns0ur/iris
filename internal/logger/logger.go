@@ -20,9 +20,9 @@ var levelVar = new(slog.LevelVar)
 func init() {
 	levelVar.Set(slog.LevelDebug)
 
-	consoleHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: levelVar,
-	})
+	// consoleHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	// 	Level: levelVar,
+	// })
 
 	file, err := os.OpenFile("iris_debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
 	if err != nil {
@@ -32,7 +32,7 @@ func init() {
 		Level: levelVar,
 	})
 
-	Logger = slog.New(slog.NewMultiHandler(consoleHandler, fileHandler))
+	Logger = slog.New(slog.NewMultiHandler( /*consoleHandler,*/ fileHandler))
 }
 
 func SetDebug(enable bool) {
