@@ -2,7 +2,6 @@ package agent
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/m4ns0ur/iris/internal/llm"
@@ -94,7 +93,7 @@ func (a *Agent) reorderTasks(taskIndex int, reason string) error {
 
 func (a *Agent) mergeTasks(taskIndices ...int) error {
 	if len(taskIndices) < 2 {
-		return fmt.Errorf("Need at least 2 tasks to merge")
+		return fmt.Errorf("need at least 2 tasks to merge")
 	}
 
 	Logger.Info("Merging tasks", "indices", taskIndices)
@@ -159,14 +158,14 @@ func (a *Agent) splitTask(taskIndex int, reason string) error {
 
 	resp, err := a.client.Generate(prompt.BuildSystemPrompt(), subtaskPrompt, opts)
 	if err != nil {
-		return fmt.Errorf("Failed to generate subtasks: %w", err)
+		return fmt.Errorf("failed to generate subtasks: %w", err)
 	}
 
 	Logger.Debug("Subtask generation response", "length", len(resp))
 
 	subtasks, err := a.extractSubtasks(resp)
 	if err != nil {
-		return fmt.Errorf("Failed to parse subtasks: %w", err)
+		return fmt.Errorf("failed to parse subtasks: %w", err)
 	}
 
 	Logger.Info("Subtasks extracted", "count", len(subtasks))
@@ -177,9 +176,7 @@ func (a *Agent) splitTask(taskIndex int, reason string) error {
 		a.goals = append(a.goals[:taskIndex], a.goals[taskIndex+1:]...)
 
 		// Insert subtasks in place of the original task
-		for _, subtask := range subtasks {
-			a.goals = append(a.goals, subtask)
-		}
+		a.goals = append(a.goals, subtasks...)
 
 		Logger.Info("Task split successfully", "originalIndex", taskIndex, "subtaskCount", len(subtasks))
 
@@ -218,14 +215,14 @@ func (a *Agent) extractSubtasks(response string) ([]string, error) {
 		}
 
 		// Pattern: Numbered list ("1. Subtask description")
-		if matched, _ := regexp.MatchString(`^\d+\.\s+(.+)$`, line); matched {
+		if numberedListRegex.MatchString(line) {
 			subtask := strings.TrimPrefix(line, " ")
 			subtasks = append(subtasks, strings.TrimSpace(subtask))
 			continue
 		}
 
 		// Pattern: Bullet points ("- Subtask description")
-		if matched, _ := regexp.MatchString(`^-\s+(.+)$`, line); matched {
+		if bulletListRegex.MatchString(line) {
 			subtask := strings.TrimPrefix(line, "- ")
 			subtasks = append(subtasks, strings.TrimSpace(subtask))
 			continue

@@ -18,17 +18,14 @@ func DefaultRegistry() *ToolRegistry {
 // NewDefaultRegistry creates and registers all default built-in tools.
 func NewDefaultRegistry() *ToolRegistry {
 	reg := NewToolRegistry()
-	
-	// Register file operations
+
+	// Register built-in tools
 	reg.Register("file_read", NewFileReadTool())
 	reg.Register("file_write", NewFileWriteTool())
-	reg.Register("file_list", NewFileListTool())
-	
-	// Register system tools
-	reg.Register("shell", NewShellTool())
 	reg.Register("search", NewSearchTool())
 	reg.Register("grep", NewGrepTool())
-	
+	reg.Register("shell", NewShellTool())
+
 	return reg
 }
 
@@ -38,7 +35,7 @@ func ExecuteWithTools(ctx context.Context, registry *ToolRegistry, name string, 
 	if tool == nil {
 		return nil, ErrToolNotFound
 	}
-	
+
 	ctx = WithCurrentTool(ctx, name, args)
 	return tool.Execute(ctx, args)
 }
@@ -49,13 +46,13 @@ func ExecuteWithToolsAndContext(ctx context.Context, registry *ToolRegistry, nam
 	if tool == nil {
 		return nil, ErrToolNotFound
 	}
-	
+
 	ctx = WithCurrentTool(ctx, name, args)
 	result, err := tool.Execute(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return result, nil
 }
 
@@ -65,7 +62,7 @@ func (r *ToolRegistry) Call(name string, args map[string]any) (map[string]any, e
 	if tool == nil {
 		return nil, ErrToolNotFound
 	}
-	
+
 	ctx := context.Background()
 	return tool.Execute(ctx, args)
 }
@@ -76,7 +73,7 @@ func (r *ToolRegistry) CallWithContext(ctx context.Context, name string, args ma
 	if tool == nil {
 		return nil, ErrToolNotFound
 	}
-	
+
 	ctx = WithCurrentTool(ctx, name, args)
 	return tool.Execute(ctx, args)
 }

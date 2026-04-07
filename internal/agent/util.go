@@ -2,9 +2,13 @@ package agent
 
 import (
 	"encoding/json"
-	"fmt"
+	"regexp"
 	"strings"
 )
+
+var numberedListRegex = regexp.MustCompile(`^\d+\.\s+(.+)$`)
+var bulletListRegex = regexp.MustCompile(`^-\s+(.+)$`)
+var taskMarkerRegex = regexp.MustCompile(`^(?:Task|Goal):\s+(.+)$`)
 
 func extractJSONArray(text string) *[]string {
 	text = strings.TrimSpace(text)
@@ -40,22 +44,4 @@ func extractJSONArray(text string) *[]string {
 	}
 
 	return &result
-}
-
-func parseJSONItem(item any) (string, bool) {
-	switch v := item.(type) {
-	case string:
-		return strings.TrimSpace(v), true
-	default:
-		return "", false
-	}
-}
-
-func parseAdjustment(jsonStr string) (Adjustment, error) {
-	var adj Adjustment
-	err := json.Unmarshal([]byte(jsonStr), &adj)
-	if err != nil {
-		return Adjustment{}, fmt.Errorf("Failed to unmarshal: %w", err)
-	}
-	return adj, nil
 }

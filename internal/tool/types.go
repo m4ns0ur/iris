@@ -8,23 +8,23 @@ import (
 type Tool interface {
 	// Name returns the unique identifier for this tool.
 	Name() string
-	
+
 	// Description returns a human-readable description of what the tool does.
 	Description() string
-	
+
 	// Parameters describes the input schema for this tool (optional).
 	Parameters() map[string]any
-	
+
 	// Execute runs the tool with the given arguments and context.
 	Execute(ctx context.Context, args map[string]any) (map[string]any, error)
 }
 
 // ToolDefinition holds metadata about a tool for LLM prompts.
 type ToolDefinition struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	Parameters  map[string]any         `json:"parameters,omitempty"`
-	Schema      *ToolParameterSchema   `json:"schema,omitempty"`
+	Name        string               `json:"name"`
+	Description string               `json:"description"`
+	Parameters  map[string]any       `json:"parameters,omitempty"`
+	Schema      *ToolParameterSchema `json:"schema,omitempty"`
 }
 
 // ToolParameterSchema defines the parameter schema for a tool.

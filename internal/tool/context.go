@@ -13,7 +13,7 @@ type ContextKey string
 const (
 	// ToolsContextKey holds the ToolRegistry in the context.
 	ToolsContextKey = ContextKey("tool_registry")
-	
+
 	// CurrentToolContextKey holds information about the currently executing tool.
 	CurrentToolContextKey = ContextKey("current_tool")
 )
@@ -29,7 +29,7 @@ func FromTools(ctx context.Context) (*ToolRegistry, bool) {
 	if v == nil {
 		return nil, false
 	}
-	
+
 	reg, ok := v.(*ToolRegistry)
 	return reg, ok
 }
@@ -37,8 +37,8 @@ func FromTools(ctx context.Context) (*ToolRegistry, bool) {
 // WithCurrentTool creates a new context with information about the currently executing tool.
 func WithCurrentTool(ctx context.Context, name string, args map[string]any) context.Context {
 	return context.WithValue(ctx, CurrentToolContextKey, struct {
-		Name  string
-		Args  map[string]any
+		Name string
+		Args map[string]any
 	}{Name: name, Args: args})
 }
 
@@ -48,15 +48,15 @@ func FromCurrentTool(ctx context.Context) (string, map[string]any, bool) {
 	if v == nil {
 		return "", nil, false
 	}
-	
+
 	data, ok := v.(struct {
-		Name  string
-		Args  map[string]any
+		Name string
+		Args map[string]any
 	})
 	if !ok {
 		return "", nil, false
 	}
-	
+
 	return data.Name, data.Args, true
 }
 
@@ -70,17 +70,17 @@ func (tc *ToolContext) BuildPrompt() string {
 	if tc.Registry == nil || len(tc.Registry.List()) == 0 {
 		return ""
 	}
-	
+
 	var sb strings.Builder
-	
+
 	sb.WriteString("Available Tools:\n")
 	sb.WriteString("==================\n\n")
-	
+
 	for _, name := range tc.Registry.List() {
 		tool := tc.Registry.Get(name)
 		sb.WriteString(tool.Description())
 		sb.WriteString("\n\nParameters:\n")
-		
+
 		params := tool.Parameters()
 		if len(params) > 0 {
 			for key, param := range params {
@@ -92,10 +92,10 @@ func (tc *ToolContext) BuildPrompt() string {
 				sb.WriteString("  - " + key + desc + "\n")
 			}
 		}
-		
+
 		sb.WriteString("\n---\n\n")
 	}
-	
+
 	return sb.String()
 }
 
@@ -104,9 +104,9 @@ func (tc *ToolContext) BuildJSONPrompt() string {
 	if tc.Registry == nil || len(tc.Registry.List()) == 0 {
 		return ""
 	}
-	
+
 	var tools []map[string]any
-	
+
 	for _, name := range tc.Registry.List() {
 		tool := tc.Registry.Get(name)
 		def := ToolDefinition{
@@ -114,10 +114,10 @@ func (tc *ToolContext) BuildJSONPrompt() string {
 			Description: tool.Description(),
 			Parameters:  tool.Parameters(),
 		}
-		
+
 		tools = append(tools, defToMap(def))
 	}
-	
+
 	return toJSON(tools)
 }
 
@@ -125,13 +125,13 @@ func defToMap(d ToolDefinition) map[string]any {
 	m := make(map[string]any)
 	m["name"] = d.Name
 	m["description"] = d.Description
-	
+
 	if d.Schema != nil {
 		m["parameters"] = dtoSchema(d.Schema)
 	} else if len(d.Parameters) > 0 {
-		m["parameters"] = paramstoSchema(d.Parameters)
+		m["parameters"] = paramsToSchema(d.Parameters)
 	}
-	
+
 	return m
 }
 
@@ -139,46 +139,46 @@ func dtoSchema(s *ToolParameterSchema) map[string]any {
 	if s == nil {
 		return nil
 	}
-	
+
 	result := make(map[string]any)
 	result["type"] = "object"
 	properties := make(map[string]any)
 	requiredList := []string{}
-	
+
 	for name, param := range s.Properties {
 		paramMap := map[string]any{
 			"type":        param.Type,
 			"description": param.Description,
 		}
 		properties[name] = paramMap
-		
+
 		if param.Required {
 			requiredList = append(requiredList, name)
 		}
-		
+
 		if len(param.Enum) > 0 {
 			paramMap["enum"] = param.Enum
 		}
-		
+
 		if param.Default != nil {
 			paramMap["default"] = param.Default
 		}
 	}
-	
+
 	result["properties"] = properties
 	if len(requiredList) > 0 {
 		result["required"] = requiredList
 	}
-	
+
 	return result
 }
 
-func paramstoSchema(params map[string]any) map[string]any {
+func paramsToSchema(params map[string]any) map[string]any {
 	result := make(map[string]any)
 	result["type"] = "object"
 	properties := make(map[string]any)
 	requiredList := []string{}
-	
+
 	for name, param := range params {
 		paramDef := param.(map[string]any)
 		paramMap := map[string]any{
@@ -186,17 +186,17 @@ func paramstoSchema(params map[string]any) map[string]any {
 			"description": paramDef["description"],
 		}
 		properties[name] = paramMap
-		
+
 		if req, ok := paramDef["required"]; ok && req == true {
 			requiredList = append(requiredList, name)
 		}
 	}
-	
+
 	result["properties"] = properties
 	if len(requiredList) > 0 {
 		result["required"] = requiredList
 	}
-	
+
 	return result
 }
 

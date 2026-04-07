@@ -12,15 +12,12 @@ The tool registry allows you to:
 
 ## Built-in Tools
 
-### File Operations
+The built-in registry includes the following tools:
 - **file_read**: Read the contents of a file
 - **file_write**: Write content to a file (creates or overwrites)
-- **file_list**: List files and directories in a directory
-
-### System Tools
-- **shell**: Execute shell commands
 - **search**: Find files matching glob patterns
 - **grep**: Search for text patterns in files
+- **shell**: Execute shell commands
 
 ## Usage
 
@@ -89,12 +86,12 @@ prompt := toolContext.BuildPrompt()
 // Returns something like:
 // Available Tools:
 // ==================
-// 
+//
 // Read the contents of a file...
-// 
+//
 // Parameters:
 //   - path (Path to the file to read)
-// 
+//
 // ---
 // ...
 
@@ -147,28 +144,28 @@ package main
 import (
     "context"
     "fmt"
-    
+
     "github.com/m4ns0ur/iris/internal/tool"
 )
 
 func main() {
     // Create registry
     registry := tool.DefaultRegistry()
-    
+
     // Add custom tool
     registry.Register("custom_tool", &MyTool{})
-    
+
     // Execute a tool
     ctx := context.Background()
     result, err := registry.CallWithContext(ctx, "file_read", map[string]any{
         "path": "./README.md",
     })
-    
+
     if err != nil {
         fmt.Printf("Error: %v\n", err)
         return
     }
-    
+
     content := result["content"].(string)
     fmt.Println(content)
 }

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -52,7 +53,7 @@ func (a *Agent) generatePlan(systemPrompt, userPrompt string) (*Plan, error) {
 
 	plan, err := a.extractGoalsFromResponse(resp)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to extract plan: %w", err)
+		return nil, fmt.Errorf("failed to extract plan: %w", err)
 	}
 
 	Logger.Info("Plan generated", "goalsCount", len(plan.Goals))
@@ -121,21 +122,21 @@ func (a *Agent) extractGoalsFromResponse(response string) (*Plan, error) {
 		line = strings.TrimSpace(line)
 
 		// Pattern 1: Numbered list ("1. Task description")
-		if matched, _ := regexp.MatchString(`^\d+\.\s+(.+)$`, line); matched {
+		if numberedListRegex.MatchString(line) {
 			goal := strings.TrimPrefix(line, " ")
 			plan.Goals = append(plan.Goals, strings.TrimSpace(goal))
 			continue
 		}
 
 		// Pattern 2: Bullet points ("- Task description")
-		if matched, _ := regexp.MatchString(`^-\s+(.+)$`, line); matched {
+		if bulletListRegex.MatchString(line) {
 			goal := strings.TrimPrefix(line, "- ")
 			plan.Goals = append(plan.Goals, strings.TrimSpace(goal))
 			continue
 		}
 
 		// Pattern 3: Task markers ("Task:", "Goal:", etc.)
-		if matched, _ := regexp.MatchString(`^(?:Task|Goal):\s+(.+)$`, line); matched {
+		if taskMarkerRegex.MatchString(line) {
 			goal := strings.TrimPrefix(line, "Task: ")
 			plan.Goals = append(plan.Goals, strings.TrimSpace(goal))
 			continue
@@ -182,7 +183,7 @@ func (a *Agent) adjustPlan() error {
 
 	adjustments, err := a.parseAdjustments(resp)
 	if err != nil {
-		return fmt.Errorf("Failed to parse adjustments: %w", err)
+		return fmt.Errorf("failed to parse adjustments: %w", err)
 	}
 
 	Logger.Info("Plan adjusted", "actions", len(adjustments))
@@ -191,12 +192,12 @@ func (a *Agent) adjustPlan() error {
 		switch action.Type {
 		case "split":
 			if err := a.splitTask(action.TaskIndex, action.Description); err != nil {
-				return fmt.Errorf("Failed to split task: %w", err)
+				return fmt.Errorf("failed to split task: %w", err)
 			}
 
 		case "merge":
 			if err := a.mergeTasks(action.TaskIndices...); err != nil {
-				return fmt.Errorf("Failed to merge tasks: %w", err)
+				return fmt.Errorf("failed to merge tasks: %w", err)
 			}
 
 		case "reorder":
@@ -265,4 +266,22 @@ func (a *Agent) parseAdjustments(response string) ([]Adjustment, error) {
 	}
 
 	return adjustments, nil
+}
+
+func parseJSONItem(item any) (string, bool) {
+	switch v := item.(type) {
+	case string:
+		return strings.TrimSpace(v), true
+	default:
+		return "", false
+	}
+}
+
+func parseAdjustment(jsonStr string) (Adjustment, error) {
+	var adj Adjustment
+	err := json.Unmarshal([]byte(jsonStr), &adj)
+	if err != nil {
+		return Adjustment{}, fmt.Errorf("failed to unmarshal: %w", err)
+	}
+	return adj, nil
 }
