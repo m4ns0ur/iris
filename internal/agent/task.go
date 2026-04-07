@@ -1,27 +1,211 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
+	"regexp"
 	"strings"
 
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/prompt"
+	"github.com/m4ns0ur/iris/internal/tool"
 )
 
 func (a *Agent) runTask() error {
-	// Stub: Execute the current task
-	// This should call appropriate tools based on the goal
-
 	task := a.goals[a.currentTask]
 
-	Logger.Debug("Running task", "task", task)
+	Logger.Debug("Running task", "taskIndex", a.currentTask, "task", task)
 
-	// Stub: Implement tool selection and execution
-	// - Analyze the task description
-	// - Select appropriate tools (file read, write, etc.)
-	// - Execute tools and capture results
+	opts := &llm.LLMOptions{
+		Temperature:       0.1,
+		TopP:              0.9,
+		RepetitionPenalty: 1.05,
+	}
+
+	// Build prompt with available tools
+	registry := tool.DefaultRegistry()
+	toolContext := &tool.ToolContext{Registry: registry}
+	systemPrompt := prompt.BuildSystemPrompt() + "\n\n" + toolContext.BuildPrompt()
+
+	// Add task context to prompt
+	taskPrompt := fmt.Sprintf(
+		"Current Task (%d/%d): %s\n\n",
+		a.currentTask+1, len(a.goals), task)
+
+	// Include conversation history for context
+	historyContext := a.buildHistoryContext()
+	fullPrompt := systemPrompt + taskPrompt + historyContext
+
+	Logger.Debug("Task prompt length", "length", len(fullPrompt))
+
+	// Generate response from LLM
+	resp, err := a.client.Generate(fullPrompt, "", opts)
+	if err != nil {
+		return fmt.Errorf("failed to generate task response: %w", err)
+	}
+
+	Logger.Debug("Task response received", "length", len(resp))
+
+	// Parse tool call from response
+	toolCall, args := a.parseToolCall(resp)
+	if toolCall == "" {
+		// No tool needed - task is complete or needs reflection
+		Logger.Info("No tool required for task")
+		a.state = "reflecting"
+		return nil
+	}
+
+	Logger.Info("Executing tool", "toolName", toolCall, "args", args)
+
+	// Execute the tool with context
+	ctx := context.Background()
+	result, err := tool.ExecuteWithTools(ctx, registry, toolCall, args)
+	if err != nil {
+		return fmt.Errorf("tool execution failed: %w", err)
+	}
+
+	Logger.Debug("Tool result", "toolName", toolCall, "result", result)
+
+	// Add result to conversation history
+	a.history = append(a.history, Message{
+		Role:    "assistant",
+		Content: fmt.Sprintf("Executed tool '%s': %s", toolCall, formatResult(result)),
+	})
 
 	return nil
+}
+
+func (a *Agent) buildHistoryContext() string {
+	if len(a.history) < 2 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\nConversation History:\n")
+
+	// Show last 5 messages or all if fewer than 5
+	start := max(len(a.history)-5, 0)
+
+	for i := start; i < len(a.history); i++ {
+		fmt.Fprintf(&sb, "\n%s: %s", a.history[i].Role, truncateString(a.history[i].Content, 200))
+	}
+
+	return sb.String()
+}
+
+func (a *Agent) parseToolCall(response string) (string, map[string]any) {
+	// Try to find JSON in response first
+	jsonMatch := extractJSONArray(response)
+	if jsonMatch != nil && len(*jsonMatch) > 0 {
+		for _, item := range *jsonMatch {
+			data, err := parseToolCallJSON(item)
+			if err == nil && data.Name != "" {
+				return data.Name, data.Parameters
+			}
+		}
+		return "", nil
+	}
+
+	// Fallback: Parse natural language tool call
+	lines := strings.SplitSeq(response, "\n")
+	for line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Pattern 1: Tool name with JSON args ("file_read {"path": ...}")
+		if strings.Contains(strings.ToLower(line), "tool:") ||
+			strings.Contains(strings.ToLower(line), "using") {
+			match := regexp.MustCompile(`(file_read|file_write|shell|search|grep):\s*(.+)?`)
+			if match.MatchString(line) {
+				groups := match.FindStringSubmatch(line)
+				toolName := strings.TrimSpace(groups[1])
+				argsStr := groups[2]
+
+				// Try to parse as JSON if present
+				if argsStr != "" && (strings.HasPrefix(argsStr, "{") || strings.Contains(argsStr, "\"path\"")) {
+					data, err := parseToolCallJSON(argsStr)
+					if err == nil {
+						return toolName, data.Parameters
+					}
+				}
+				// Simple case: just tool name
+				if argsStr == "" || strings.TrimSpace(argsStr) == "" {
+					return toolName, map[string]any{}
+				}
+			}
+		}
+	}
+
+	// Last resort: return empty (no tool call detected)
+	Logger.Debug("No tool call pattern found in response")
+	return "", nil
+}
+
+func parseToolCallJSON(jsonStr string) (*tool.ToolDefinition, error) {
+	var def tool.ToolDefinition
+	err := json.Unmarshal([]byte(jsonStr), &def)
+	if err != nil {
+		// Try parsing as map[string]any first
+		var m map[string]any
+		err = json.Unmarshal([]byte(jsonStr), &m)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		}
+
+		// Extract name and args from map
+		name, ok := m["name"].(string)
+		if !ok || name == "" {
+			return nil, fmt.Errorf("missing 'name' field")
+		}
+
+		argsMap := make(map[string]any)
+		if params, ok := m["arguments"].(map[string]any); ok {
+			maps.Copy(argsMap, params)
+		} else if args, ok := m["args"].(map[string]any); ok {
+			maps.Copy(argsMap, args)
+		}
+
+		return &tool.ToolDefinition{
+			Name:       name,
+			Parameters: argsMap,
+		}, nil
+	}
+
+	return &def, err
+}
+
+func formatResult(result map[string]any) string {
+	if result == nil {
+		return "(no output)"
+	}
+
+	content, ok := result["content"].(string)
+	if ok && content != "" {
+		return truncateString(content, 500)
+	}
+
+	// Try to marshal as JSON if not a simple string
+	jsonBytes, err := json.MarshalIndent(result, "", "  ")
+	if err == nil {
+		return string(jsonBytes[:min(len(jsonBytes), 1000)]) + "..."
+	}
+
+	return fmt.Sprintf("%v", result)
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (a *Agent) isTaskComplete() bool {

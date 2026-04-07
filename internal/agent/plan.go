@@ -117,8 +117,8 @@ func (a *Agent) extractGoalsFromResponse(response string) (*Plan, error) {
 	}
 
 	// Fallback: Extract goals using regex patterns
-	lines := strings.Split(response, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(response, "\n")
+	for line := range lines {
 		line = strings.TrimSpace(line)
 
 		// Pattern 1: Numbered list ("1. Task description")
@@ -236,8 +236,8 @@ func (a *Agent) parseAdjustments(response string) ([]Adjustment, error) {
 	}
 
 	// Fallback: Parse natural language instructions
-	lines := strings.Split(response, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(response, "\n")
+	for line := range lines {
 		line = strings.TrimSpace(line)
 
 		if len(line) == 0 || strings.HasPrefix(strings.ToLower(line), "no changes needed") {
