@@ -265,3 +265,148 @@ func findSubstring(s, substr string) bool {
 	}
 	return false
 }
+
+func TestFileReadTool_FallbackToCurrentDir(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register("file_read", NewFileReadTool())
+
+	ctx := context.Background() // No workdir set
+
+	// Read a file in current directory (should use cwd as fallback)
+	result, err := reg.CallWithContext(ctx, "file_read", map[string]any{
+		"path": "/etc/hosts", // Absolute path should still work
+	})
+	if err != nil {
+		t.Fatalf("Failed to read file without workdir: %v", err)
+	}
+
+	readContent, ok := result["content"].(string)
+	if !ok {
+		t.Fatal("Expected content in result")
+	}
+	if len(readContent) == 0 {
+		t.Error("Expected non-empty content from /etc/hosts")
+	}
+}
+
+func TestFileWriteTool_FallbackToCurrentDir(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "fallback-write-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	reg := NewToolRegistry()
+	reg.Register("file_write", NewFileWriteTool())
+
+	ctx := context.Background() // No workdir set
+
+	result, err := reg.CallWithContext(ctx, "file_write", map[string]any{
+		"path":    filepath.Join(tmpDir, "fallback.txt"), // Absolute path should work
+		"content": "Test fallback to current directory!",
+	})
+	if err != nil {
+		t.Fatalf("Failed to write file without workdir: %v", err)
+	}
+
+	success, ok := result["success"].(bool)
+	if !ok || !success {
+		t.Fatal("Expected success in result")
+	}
+
+	// Verify the file was created at the absolute path
+	expectedPath := filepath.Join(tmpDir, "fallback.txt")
+	if _, err := os.Stat(expectedPath); os.IsNotExist(err) {
+		t.Errorf("File not created at expected path: %s", expectedPath)
+	} else {
+		actualContent, _ := os.ReadFile(expectedPath)
+		if string(actualContent) != "Test fallback to current directory!" {
+			t.Errorf("Expected 'Test fallback to current directory!', got '%s'", string(actualContent))
+		}
+	}
+}
+
+func TestSearchTool_FallbackToCurrentDir(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "fallback-search-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create test file in temp directory
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+
+	reg := NewToolRegistry()
+	reg.Register("search", NewSearchTool())
+
+	ctx := context.Background() // No workdir set
+
+	result, err := reg.CallWithContext(ctx, "search", map[string]any{
+		"path":    tmpDir, // Absolute path should work
+		"pattern": "*.txt",
+	})
+	if err != nil {
+		t.Fatalf("Failed to search without workdir: %v", err)
+	}
+
+	matches, ok := result["matches"].([]string)
+	if !ok {
+		t.Fatal("Expected matches in result")
+	}
+
+	if len(matches) < 1 {
+		t.Errorf("Expected at least 1 match, got %d", len(matches))
+	}
+
+	// Verify the match is within the temp directory
+	for _, match := range matches {
+		if !filepath.IsAbs(match) || filepath.Dir(match) != tmpDir {
+			t.Errorf("Match '%s' should be within temp dir '%s'", match, tmpDir)
+		}
+	}
+}
+
+func TestGrepTool_FallbackToCurrentDir(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "fallback-grep-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create test file in temp directory with content
+	testFile := filepath.Join(tmpDir, "test.txt")
+	content := "grep fallback pattern"
+	if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+
+	reg := NewToolRegistry()
+	reg.Register("grep", NewGrepTool())
+
+	ctx := context.Background() // No workdir set
+
+	result, err := reg.CallWithContext(ctx, "grep", map[string]any{
+		"path":    tmpDir, // Absolute path should work
+		"pattern": content,
+	})
+	if err != nil {
+		t.Fatalf("Failed to grep without workdir: %v", err)
+	}
+
+	output, ok := result["output"].(string)
+	if !ok {
+		t.Fatal("Expected output in result")
+	}
+
+	if len(output) == 0 {
+		t.Error("Expected non-empty output from grep")
+	}
+
+	// Verify output contains the pattern and file path within temp directory
+	if !containsString(output, content) || !containsString(output, tmpDir) {
+		t.Errorf("Output should contain both pattern and temp dir path. Got: %s", output)
+	}
+}

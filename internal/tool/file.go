@@ -57,12 +57,13 @@ func (t *FileReadTool) Execute(ctx context.Context, args map[string]any) (map[st
 	}, nil
 }
 
-// resolvePath resolves a path relative to workdir if provided in context, otherwise returns as-is.
+// resolvePath resolves a path relative to workdir if provided in context, otherwise uses current working directory.
 func (t *FileReadTool) resolvePath(ctx context.Context, path string) (string, error) {
 	workdir, hasWorkdir := FromWorkdir(ctx)
+
+	// If no workdir is set, use the current working directory
 	if !hasWorkdir || workdir == "" {
-		// No workdir in context, return path as-is
-		return path, nil
+		workdir = "."
 	}
 
 	// If path is absolute, use it directly
@@ -70,17 +71,18 @@ func (t *FileReadTool) resolvePath(ctx context.Context, path string) (string, er
 		return path, nil
 	}
 
-	// Resolve relative to workdir
+	// Resolve relative to workdir (or current directory if not set)
 	resolved := filepath.Join(workdir, path)
 	return resolved, nil
 }
 
-// resolvePath resolves a path relative to workdir if provided in context, otherwise returns as-is.
+// resolvePath resolves a path relative to workdir if provided in context, otherwise uses current working directory.
 func (t *FileWriteTool) resolvePath(ctx context.Context, path string) (string, error) {
 	workdir, hasWorkdir := FromWorkdir(ctx)
+
+	// If no workdir is set, use the current working directory
 	if !hasWorkdir || workdir == "" {
-		// No workdir in context, return path as-is
-		return path, nil
+		workdir = "."
 	}
 
 	// If path is absolute, use it directly
@@ -88,7 +90,7 @@ func (t *FileWriteTool) resolvePath(ctx context.Context, path string) (string, e
 		return path, nil
 	}
 
-	// Resolve relative to workdir
+	// Resolve relative to workdir (or current directory if not set)
 	resolved := filepath.Join(workdir, path)
 	return resolved, nil
 }
