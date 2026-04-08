@@ -14,6 +14,7 @@ type Agent struct {
 	currentTask int
 	history     []Message
 	maxSteps    int
+	workdir     string
 }
 
 type Message struct {
@@ -34,7 +35,7 @@ type Adjustment struct {
 
 var Logger = logger.Logger
 
-func NewAgent(client *llm.LLMClient) *Agent {
+func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 	return &Agent{
 		client:      client,
 		state:       "idle",
@@ -42,6 +43,7 @@ func NewAgent(client *llm.LLMClient) *Agent {
 		currentTask: -1,
 		history:     []Message{},
 		maxSteps:    50, // Prevent infinite loops
+		workdir:     workdir,
 	}
 }
 
