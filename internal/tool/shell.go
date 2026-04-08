@@ -48,7 +48,7 @@ func (t *ShellTool) Execute(ctx context.Context, args map[string]any) (map[strin
 		}
 	}
 
-	output, err := bash(command)
+	output, err := bash(ctx, command)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute command: %w", err)
 	}
@@ -59,8 +59,19 @@ func (t *ShellTool) Execute(ctx context.Context, args map[string]any) (map[strin
 }
 
 // bash executes a shell command and returns its output.
-func bash(command string) (string, error) {
+func bash(ctx context.Context, command string) (string, error) {
+	workdir, hasWorkdir := FromWorkdir(ctx)
+
 	cmd := exec.Command("bash", "-c", command)
+
+	if hasWorkdir && workdir != "" {
+		// Change to workdir before executing the command
+		cmd.Dir = workdir
+	} else {
+		// Use current working directory
+		cmd.Dir = "."
+	}
+
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }

@@ -4,10 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // FileReadTool reads the contents of a file.
 type FileReadTool struct{}
+
+// FileWriteTool writes content to a file.
+type FileWriteTool struct{}
 
 func NewFileReadTool() *FileReadTool {
 	return &FileReadTool{}
@@ -37,9 +41,15 @@ func (t *FileReadTool) Execute(ctx context.Context, args map[string]any) (map[st
 		return nil, fmt.Errorf("missing required parameter: path")
 	}
 
-	content, err := os.ReadFile(path)
+	// Resolve path relative to workdir if provided in context
+	resolvedPath, err := t.resolvePath(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file %q: %w", path, err)
+		return nil, err
+	}
+
+	content, err := os.ReadFile(resolvedPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file %q: %w", resolvedPath, err)
 	}
 
 	return map[string]any{
@@ -47,8 +57,41 @@ func (t *FileReadTool) Execute(ctx context.Context, args map[string]any) (map[st
 	}, nil
 }
 
-// FileWriteTool writes content to a file.
-type FileWriteTool struct{}
+// resolvePath resolves a path relative to workdir if provided in context, otherwise returns as-is.
+func (t *FileReadTool) resolvePath(ctx context.Context, path string) (string, error) {
+	workdir, hasWorkdir := FromWorkdir(ctx)
+	if !hasWorkdir || workdir == "" {
+		// No workdir in context, return path as-is
+		return path, nil
+	}
+
+	// If path is absolute, use it directly
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+
+	// Resolve relative to workdir
+	resolved := filepath.Join(workdir, path)
+	return resolved, nil
+}
+
+// resolvePath resolves a path relative to workdir if provided in context, otherwise returns as-is.
+func (t *FileWriteTool) resolvePath(ctx context.Context, path string) (string, error) {
+	workdir, hasWorkdir := FromWorkdir(ctx)
+	if !hasWorkdir || workdir == "" {
+		// No workdir in context, return path as-is
+		return path, nil
+	}
+
+	// If path is absolute, use it directly
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+
+	// Resolve relative to workdir
+	resolved := filepath.Join(workdir, path)
+	return resolved, nil
+}
 
 func NewFileWriteTool() *FileWriteTool {
 	return &FileWriteTool{}
@@ -88,9 +131,15 @@ func (t *FileWriteTool) Execute(ctx context.Context, args map[string]any) (map[s
 		return nil, fmt.Errorf("missing required parameter: content")
 	}
 
-	err := os.WriteFile(path, []byte(content), 0644)
+	// Resolve path relative to workdir if provided in context
+	resolvedPath, err := t.resolvePath(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to write file %q: %w", path, err)
+		return nil, err
+	}
+
+	err = os.WriteFile(resolvedPath, []byte(content), 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write file %q: %w", resolvedPath, err)
 	}
 
 	return map[string]any{

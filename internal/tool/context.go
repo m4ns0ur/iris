@@ -10,12 +10,21 @@ import (
 // ContextKey is a type for context keys.
 type ContextKey string
 
+// ToolContext is a helper struct for passing tool-related information in prompts.
+type ToolContext struct {
+	Registry *ToolRegistry
+	Workdir  string
+}
+
 const (
 	// ToolsContextKey holds the ToolRegistry in the context.
 	ToolsContextKey = ContextKey("tool_registry")
 
 	// CurrentToolContextKey holds information about the currently executing tool.
 	CurrentToolContextKey = ContextKey("current_tool")
+
+	// WorkdirContextKey holds the working directory for file operations.
+	WorkdirContextKey = ContextKey("workdir")
 )
 
 // WithTools creates a new context with the tool registry attached.
@@ -32,6 +41,22 @@ func FromTools(ctx context.Context) (*ToolRegistry, bool) {
 
 	reg, ok := v.(*ToolRegistry)
 	return reg, ok
+}
+
+// WithWorkdir creates a new context with the working directory set.
+func WithWorkdir(ctx context.Context, workdir string) context.Context {
+	return context.WithValue(ctx, WorkdirContextKey, workdir)
+}
+
+// FromWorkdir retrieves the working directory from the context.
+func FromWorkdir(ctx context.Context) (string, bool) {
+	v := ctx.Value(WorkdirContextKey)
+	if v == nil {
+		return "", false
+	}
+
+	workdir, ok := v.(string)
+	return workdir, ok
 }
 
 // WithCurrentTool creates a new context with information about the currently executing tool.
@@ -58,11 +83,6 @@ func FromCurrentTool(ctx context.Context) (string, map[string]any, bool) {
 	}
 
 	return data.Name, data.Args, true
-}
-
-// ToolContext is a helper struct for passing tool-related information in prompts.
-type ToolContext struct {
-	Registry *ToolRegistry
 }
 
 // BuildPrompt adds tool descriptions to a prompt for the LLM.

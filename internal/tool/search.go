@@ -48,7 +48,13 @@ func (t *SearchTool) Execute(ctx context.Context, args map[string]any) (map[stri
 		return nil, fmt.Errorf("missing required parameter: pattern")
 	}
 
-	matches, err := filepath.Glob(filepath.Join(path, pattern))
+	// Resolve path relative to workdir if provided in context
+	resolvedPath, err := t.resolvePath(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+
+	matches, err := filepath.Glob(filepath.Join(resolvedPath, pattern))
 	if err != nil {
 		return nil, fmt.Errorf("failed to search for files: %w", err)
 	}
@@ -56,4 +62,22 @@ func (t *SearchTool) Execute(ctx context.Context, args map[string]any) (map[stri
 	return map[string]any{
 		"matches": matches,
 	}, nil
+}
+
+// resolvePath resolves a path relative to workdir if provided in context, otherwise returns as-is.
+func (t *SearchTool) resolvePath(ctx context.Context, path string) (string, error) {
+	workdir, hasWorkdir := FromWorkdir(ctx)
+	if !hasWorkdir || workdir == "" {
+		// No workdir in context, return path as-is
+		return path, nil
+	}
+
+	// If path is absolute, use it directly
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+
+	// Resolve relative to workdir
+	resolved := filepath.Join(workdir, path)
+	return resolved, nil
 }

@@ -59,8 +59,9 @@ func (a *Agent) runTask() error {
 
 	Logger.Info("Executing tool", "toolName", toolCall, "args", args)
 
-	// Execute the tool with context
+	// Execute the tool with context including workdir
 	ctx := context.Background()
+	ctx = tool.WithWorkdir(ctx, a.workdir)
 	result, err := tool.ExecuteWithTools(ctx, registry, toolCall, args)
 	if err != nil {
 		return fmt.Errorf("tool execution failed: %w", err)
