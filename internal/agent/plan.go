@@ -11,7 +11,7 @@ import (
 	"github.com/m4ns0ur/iris/internal/prompt"
 )
 
-func (a *Agent) plan() error {
+func (a *Agent) plan(onChunk func(string), onError func(error)) error {
 	a.state = "planning"
 
 	systemPrompt := prompt.BuildSystemPrompt()
@@ -19,7 +19,7 @@ func (a *Agent) plan() error {
 
 	Logger.Debug("Planning phase", "systemPrompt", systemPrompt, "userPrompt", userPrompt)
 
-	plan, err := a.generatePlan(systemPrompt, userPrompt)
+	plan, err := a.generatePlan(systemPrompt, userPrompt, onChunk, onError)
 	if err != nil {
 		return err
 	}
@@ -31,7 +31,7 @@ func (a *Agent) plan() error {
 	return nil
 }
 
-func (a *Agent) generatePlan(systemPrompt, userPrompt string) (*Plan, error) {
+func (a *Agent) generatePlan(systemPrompt, userPrompt string, onChunk func(string), onError func(error)) (*Plan, error) {
 	if a.client == nil {
 		return nil, fmt.Errorf("LLM client is not initialized")
 	}
@@ -44,7 +44,7 @@ func (a *Agent) generatePlan(systemPrompt, userPrompt string) (*Plan, error) {
 		RepetitionPenalty: 1.05,
 	}
 
-	resp, err := a.client.Generate(systemPrompt, userPrompt, opts)
+	resp, err := a.client.Generate(systemPrompt, userPrompt, opts, onChunk, onError)
 	if err != nil {
 		return nil, fmt.Errorf("LLM generation failed: %w", err)
 	}
@@ -65,7 +65,7 @@ func (a *Agent) generatePlan(systemPrompt, userPrompt string) (*Plan, error) {
 	return plan, nil
 }
 
-func (a *Agent) reflect() error {
+func (a *Agent) reflect(onChunk func(string), onError func(error)) error {
 	a.state = "reflecting"
 
 	Logger.Debug("Reflection phase")
@@ -76,14 +76,14 @@ func (a *Agent) reflect() error {
 		return nil
 	}
 
-	if err := a.adjustPlan(); err != nil {
+	if err := a.adjustPlan(onChunk, onError); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (a *Agent) executePlan() error {
+func (a *Agent) executePlan(onChunk func(string), onError func(error)) error {
 	if a.currentTask >= len(a.goals) {
 		a.state = "done"
 		return nil
@@ -94,7 +94,7 @@ func (a *Agent) executePlan() error {
 
 	Logger.Info("Executing task", "taskIndex", a.currentTask, "task", task)
 
-	if err := a.runTask(); err != nil {
+	if err := a.runTask(onChunk, onError); err != nil {
 		return err
 	}
 
@@ -151,7 +151,7 @@ func (a *Agent) extractGoalsFromResponse(response string) (*Plan, error) {
 	return plan, nil
 }
 
-func (a *Agent) adjustPlan() error {
+func (a *Agent) adjustPlan(onChunk func(string), onError func(error)) error {
 	if a.client == nil {
 		return fmt.Errorf("LLM client is not initialized")
 	}
@@ -174,7 +174,7 @@ func (a *Agent) adjustPlan() error {
 		RepetitionPenalty: 1.05,
 	}
 
-	resp, err := a.client.Generate(prompt.BuildSystemPrompt(), reflectionPrompt+historyContext, opts)
+	resp, err := a.client.Generate(prompt.BuildSystemPrompt(), reflectionPrompt+historyContext, opts, onChunk, onError)
 	if err != nil {
 		return fmt.Errorf("LLM adjustment failed: %w", err)
 	}
@@ -191,7 +191,7 @@ func (a *Agent) adjustPlan() error {
 	for _, action := range adjustments {
 		switch action.Type {
 		case "split":
-			if err := a.splitTask(action.TaskIndex, action.Description); err != nil {
+			if err := a.splitTask(action.TaskIndex, action.Description, onChunk, onError); err != nil {
 				return fmt.Errorf("failed to split task: %w", err)
 			}
 

@@ -13,7 +13,7 @@ import (
 	"github.com/m4ns0ur/iris/internal/tool"
 )
 
-func (a *Agent) runTask() error {
+func (a *Agent) runTask(onChunk func(string), onError func(error)) error {
 	task := a.goals[a.currentTask]
 
 	Logger.Debug("Running task", "taskIndex", a.currentTask, "task", task)
@@ -40,10 +40,10 @@ func (a *Agent) runTask() error {
 
 	Logger.Debug("Task prompt length", "length", len(fullPrompt))
 
-	// Generate response from LLM
-	resp, err := a.client.Generate(fullPrompt, "", opts)
+	// Generate response from LLM with streaming support
+	resp, err := a.client.Generate(fullPrompt, "", opts, onChunk, onError)
 	if err != nil {
-		return fmt.Errorf("failed to generate task response: %w", err)
+		return fmt.Errorf("LLM generation failed: %w", err)
 	}
 
 	Logger.Debug("Task response received", "length", len(resp))
@@ -326,7 +326,7 @@ func (a *Agent) mergeTasks(taskIndices ...int) error {
 	return nil
 }
 
-func (a *Agent) splitTask(taskIndex int, reason string) error {
+func (a *Agent) splitTask(taskIndex int, reason string, onChunk func(string), onError func(error)) error {
 	if taskIndex < 0 || taskIndex >= len(a.goals) {
 		return fmt.Errorf("invalid task index: %d", taskIndex)
 	}
@@ -341,7 +341,7 @@ func (a *Agent) splitTask(taskIndex int, reason string) error {
 		RepetitionPenalty: 1.05,
 	}
 
-	resp, err := a.client.Generate(prompt.BuildSystemPrompt(), subtaskPrompt, opts)
+	resp, err := a.client.Generate(prompt.BuildSystemPrompt(), subtaskPrompt, opts, onChunk, onError)
 	if err != nil {
 		return fmt.Errorf("failed to generate subtasks: %w", err)
 	}

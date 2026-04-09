@@ -13,9 +13,10 @@ import (
 )
 
 type model struct {
-	agent        *agent.Agent
-	fullResponse *strings.Builder
-	streaming    bool
+	agent         *agent.Agent
+	fullResponse  *strings.Builder
+	streaming     bool
+	inAgenticLoop bool
 
 	width    int
 	state    state
@@ -116,11 +117,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.streaming = true
 				m.state = stateStreaming
 
-				return m, tea.Batch(
-					m.spinner.Tick,
-					streamCommand(m.agent, input, m.stream),
-					waitForStream(m.stream),
-				)
+				if m.inAgenticLoop {
+					// Use agentic loop command
+					return m, tea.Batch(
+						m.spinner.Tick,
+						runAgenticLoopCommand(m.agent, input, m.stream),
+						waitForStream(m.stream),
+					)
+				} else {
+					// Use simple streaming command
+					return m, tea.Batch(
+						m.spinner.Tick,
+						streamCommand(m.agent, input, m.stream),
+						waitForStream(m.stream),
+					)
+				}
 
 			case "ctrl+c":
 				return m, tea.Quit
@@ -146,19 +157,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 
 		case chunkMsg:
-			m.streaming = false
-			m.fullResponse.WriteString(string(msg))
+			if m.inAgenticLoop {
+				// During agentic loop, accumulate chunks for each step
+				m.fullResponse.WriteString(string(msg))
+			} else {
+				// Simple streaming mode
+				m.streaming = false
+				m.fullResponse.WriteString(string(msg))
+			}
 			return m, waitForStream(m.stream)
 
 		case doneMsg:
-			resp := m.fullResponse.String()
+			if m.inAgenticLoop {
+				// Agentic loop completed - add the full response to messages
+				resp := m.fullResponse.String()
+				m.messages = append(m.messages, message{
+					role:    "assistant",
+					content: resp,
+				})
+				Logger.Info("Agentic loop completed", "response", resp)
+			} else {
+				// Simple streaming mode
+				resp := m.fullResponse.String()
+				m.messages = append(m.messages, message{
+					role:    "assistant",
+					content: resp,
+				})
 
-			m.messages = append(m.messages, message{
-				role:    "assistant",
-				content: resp,
-			})
-
-			Logger.Info("Streamed full response", "response", resp)
+				Logger.Info("Streamed full response", "response", resp)
+			}
 
 			m.state = stateInput
 			return m, nil
@@ -206,7 +233,10 @@ func (m model) View() tea.View {
 
 	// Render current streaming response (live)
 	if m.state == stateStreaming {
-		if m.streaming && m.fullResponse.Len() == 0 {
+		if m.inAgenticLoop {
+			// During agentic loop, show progress
+			sb.WriteString("\n" + m.spinner.View() + " Agent is working...\n")
+		} else if m.streaming && m.fullResponse.Len() == 0 {
 			sb.WriteString("\n" + m.spinner.View() + " Iris is thinking...\n")
 		} else {
 			content := lipgloss.NewStyle().

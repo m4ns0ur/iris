@@ -113,7 +113,18 @@ func NewClient(model string) *LLMClient {
 	}
 }
 
-func (c *LLMClient) Generate(systemPrompt string, userPrompt string, opts *LLMOptions) (string, error) {
+func (c *LLMClient) Generate(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string), onError func(error)) (string, error) {
+	if onChunk != nil || onError != nil {
+		err := c.GenerateStreamWithCallbacks(systemPrompt, userPrompt, opts, onChunk, onError)
+		if err != nil && onError != nil {
+			onError(err)
+		}
+		return "", err
+	}
+	return c.GenerateSync(systemPrompt, userPrompt, opts)
+}
+
+func (c *LLMClient) GenerateSync(systemPrompt string, userPrompt string, opts *LLMOptions) (string, error) {
 	payload := createPayload(c.Model, systemPrompt, userPrompt, opts)
 
 	LogLLMPayload(payload)
@@ -178,6 +189,72 @@ func (c *LLMClient) Generate(systemPrompt string, userPrompt string, opts *LLMOp
 }
 
 func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string)) error {
+	payload := createPayload(c.Model, systemPrompt, userPrompt, opts)
+	payload.Stream = true
+
+	LogLLMPayload(payload)
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", c.URL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", res.StatusCode)
+	}
+
+	reader := bufio.NewReader(res.Body)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		// OpenAI SSE lines start with "data: "
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data: ")) {
+			continue
+		}
+
+		data := bytes.TrimPrefix(line, []byte("data: "))
+
+		// Check for the [DONE] signal
+		if string(data) == "[DONE]" {
+			break
+		}
+
+		var chunk Chunk
+		if err := json.Unmarshal(data, &chunk); err != nil {
+			continue // Or handle error
+		}
+
+		if len(chunk.Choices) > 0 {
+			content := chunk.Choices[0].Delta.Content
+			if content != "" {
+				onChunk(content)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *LLMClient) GenerateStreamWithCallbacks(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string), onError func(error)) error {
 	payload := createPayload(c.Model, systemPrompt, userPrompt, opts)
 	payload.Stream = true
 

@@ -75,11 +75,17 @@ func (a *Agent) Stream(input string) (<-chan string, <-chan error) {
 	return outCh, errCh
 }
 
-func (a *Agent) Run(input string) error {
+// Run executes the agentic loop with streaming support
+func (a *Agent) Run(input string, onChunk func(string), onError func(error)) error {
 	a.reset()
 	// Initialize with system prompt and user input
 	a.history = append(a.history, Message{Role: "user", Content: input})
-	return a.loop()
+	return a.loop(onChunk, onError)
+}
+
+// RunSync is a convenience method for synchronous execution (backward compatible)
+func (a *Agent) RunSync(input string) error {
+	return a.Run(input, nil, nil)
 }
 
 func (a *Agent) reset() {
@@ -90,28 +96,28 @@ func (a *Agent) reset() {
 	a.history = []Message{}
 }
 
-func (a *Agent) loop() error {
+func (a *Agent) loop(onChunk func(string), onError func(error)) error {
 	for a.step < a.maxSteps {
 		Logger.Debug("Agent Loop", "step", a.step, "state", a.state, "currentTask", a.currentTask)
 
 		switch a.state {
 		case "idle":
-			if err := a.plan(); err != nil {
+			if err := a.plan(onChunk, onError); err != nil {
 				return err
 			}
 
 		case "planning":
-			if err := a.executePlan(); err != nil {
+			if err := a.executePlan(onChunk, onError); err != nil {
 				return err
 			}
 
 		case "executing":
-			if err := a.runTask(); err != nil {
+			if err := a.runTask(onChunk, onError); err != nil {
 				return err
 			}
 
 		case "reflecting":
-			if err := a.reflect(); err != nil {
+			if err := a.reflect(onChunk, onError); err != nil {
 				return err
 			}
 
@@ -132,6 +138,11 @@ func (a *Agent) loop() error {
 	}
 
 	return nil
+}
+
+// AppendUserMessage adds a user message to the agent's history
+func (a *Agent) AppendUserMessage(content string) {
+	a.history = append(a.history, Message{Role: "user", Content: content})
 }
 
 func (a *Agent) shouldStop() bool {
