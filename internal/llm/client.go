@@ -215,35 +215,36 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 
 	LogLLMPayload(payload)
 
+	var res *http.Response
+	var err error
+
+	retryDelay := 1 * time.Second
+
 	doRequest := func() (*http.Response, error) {
-		bodyBytes, err := json.Marshal(payload)
-		if err != nil {
-			return nil, err
+		bodyBytes, e := json.Marshal(payload)
+		if e != nil {
+			return nil, e
 		}
 
-		req, err := http.NewRequest("POST", c.URL, bytes.NewReader(bodyBytes))
-		if err != nil {
-			return nil, err
+		req, e := http.NewRequest("POST", c.URL, bytes.NewReader(bodyBytes))
+		if e != nil {
+			return nil, e
 		}
 		req.Header.Set("Content-Type", "application/json")
 
-		res, err := c.HTTP.Do(req)
-		if err != nil {
-			return nil, err
+		res, e = c.HTTP.Do(req)
+		if e != nil {
+			return nil, e
 		}
-		defer res.Body.Close()
 
+		// Don't close body here - caller will handle it via defer in main function
 		if res.StatusCode != http.StatusOK {
+			res.Body.Close()
 			return nil, fmt.Errorf("HTTP %d", res.StatusCode)
 		}
 
 		return res, nil
 	}
-
-	var res *http.Response
-	var err error
-
-	retryDelay := 1 * time.Second
 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
 		if attempt > 1 {
@@ -270,6 +271,13 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 		return fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
 	}
 
+	// Ensure response body is closed when we're done
+	defer func() {
+		if res != nil && res.Body != nil {
+			res.Body.Close()
+		}
+	}()
+
 	reader := bufio.NewReader(res.Body)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -277,7 +285,7 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 			if err == io.EOF {
 				break
 			}
-			return err
+			return fmt.Errorf("error reading stream: %w", err)
 		}
 
 		// OpenAI SSE lines start with "data: "
@@ -315,35 +323,36 @@ func (c *LLMClient) GenerateStreamWithCallbacks(systemPrompt string, userPrompt 
 
 	LogLLMPayload(payload)
 
+	var res *http.Response
+	var err error
+
+	retryDelay := 1 * time.Second
+
 	doRequest := func() (*http.Response, error) {
-		bodyBytes, err := json.Marshal(payload)
-		if err != nil {
-			return nil, err
+		bodyBytes, e := json.Marshal(payload)
+		if e != nil {
+			return nil, e
 		}
 
-		req, err := http.NewRequest("POST", c.URL, bytes.NewReader(bodyBytes))
-		if err != nil {
-			return nil, err
+		req, e := http.NewRequest("POST", c.URL, bytes.NewReader(bodyBytes))
+		if e != nil {
+			return nil, e
 		}
 		req.Header.Set("Content-Type", "application/json")
 
-		res, err := c.HTTP.Do(req)
-		if err != nil {
-			return nil, err
+		res, e = c.HTTP.Do(req)
+		if e != nil {
+			return nil, e
 		}
-		defer res.Body.Close()
 
+		// Don't close body here - caller will handle it via defer in main function
 		if res.StatusCode != http.StatusOK {
+			res.Body.Close()
 			return nil, fmt.Errorf("HTTP %d", res.StatusCode)
 		}
 
 		return res, nil
 	}
-
-	var res *http.Response
-	var err error
-
-	retryDelay := 1 * time.Second
 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
 		if attempt > 1 {
@@ -370,6 +379,13 @@ func (c *LLMClient) GenerateStreamWithCallbacks(systemPrompt string, userPrompt 
 		return fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
 	}
 
+	// Ensure response body is closed when we're done
+	defer func() {
+		if res != nil && res.Body != nil {
+			res.Body.Close()
+		}
+	}()
+
 	reader := bufio.NewReader(res.Body)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -377,7 +393,7 @@ func (c *LLMClient) GenerateStreamWithCallbacks(systemPrompt string, userPrompt 
 			if err == io.EOF {
 				break
 			}
-			return err
+			return fmt.Errorf("error reading stream: %w", err)
 		}
 
 		// OpenAI SSE lines start with "data: "
