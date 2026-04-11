@@ -206,10 +206,7 @@ func (m model) View() tea.View {
 
 	// Render current streaming response (live)
 	if m.state == stateStreaming {
-		if m.inAgenticLoop {
-			// During agentic loop, show progress
-			sb.WriteString("\n" + m.spinner.View() + " Agent is working...\n")
-		} else if m.streaming && m.fullResponse.Len() == 0 {
+		if m.streaming && m.fullResponse.Len() == 0 {
 			sb.WriteString("\n" + m.spinner.View() + " Iris is thinking...\n")
 		} else {
 			if strings.HasPrefix(m.fullResponse.String(), "Error: ") {

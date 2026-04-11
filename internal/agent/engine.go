@@ -50,6 +50,8 @@ func (a *Agent) Stream(input string) (<-chan string, <-chan error) {
 
 		err := a.client.GenerateStream(prompt.BuildSystemPrompt(), input, opts, func(chunk string) {
 			outCh <- chunk
+		}, func(err error) {
+			errCh <- err
 		})
 
 		if err != nil {

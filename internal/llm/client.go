@@ -117,7 +117,7 @@ func NewClient(model string) *LLMClient {
 
 func (c *LLMClient) Generate(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string), onError func(error)) (string, error) {
 	if onChunk != nil || onError != nil {
-		err := c.GenerateStreamWithCallbacks(systemPrompt, userPrompt, opts, onChunk, onError)
+		err := c.GenerateStream(systemPrompt, userPrompt, opts, onChunk, onError)
 		if err != nil && onError != nil {
 			onError(err)
 		}
@@ -209,7 +209,7 @@ func (c *LLMClient) GenerateSync(systemPrompt string, userPrompt string, opts *L
 	return llmResponse.Choices[0].Message.Content, nil
 }
 
-func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string)) error {
+func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string), onError func(error)) error {
 	payload := createPayload(c.Model, systemPrompt, userPrompt, opts)
 	payload.Stream = true
 
@@ -264,114 +264,6 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 			Logger.Warn("LLM streaming request failed", "attempt", attempt, "error", err)
 		} else {
 			Logger.Error("LLM streaming request failed after all retries", "error", err)
-		}
-	}
-
-	if res == nil || err != nil {
-		return fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
-	}
-
-	// Ensure response body is closed when we're done
-	defer func() {
-		if res != nil && res.Body != nil {
-			res.Body.Close()
-		}
-	}()
-
-	reader := bufio.NewReader(res.Body)
-	for {
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return fmt.Errorf("error reading stream: %w", err)
-		}
-
-		// OpenAI SSE lines start with "data: "
-		line = bytes.TrimSpace(line)
-		if !bytes.HasPrefix(line, []byte("data: ")) {
-			continue
-		}
-
-		data := bytes.TrimPrefix(line, []byte("data: "))
-
-		// Check for the [DONE] signal
-		if string(data) == "[DONE]" {
-			break
-		}
-
-		var chunk Chunk
-		if err := json.Unmarshal(data, &chunk); err != nil {
-			continue // Or handle error
-		}
-
-		if len(chunk.Choices) > 0 {
-			content := chunk.Choices[0].Delta.Content
-			if content != "" {
-				onChunk(content)
-			}
-		}
-	}
-
-	return nil
-}
-
-func (c *LLMClient) GenerateStreamWithCallbacks(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string), onError func(error)) error {
-	payload := createPayload(c.Model, systemPrompt, userPrompt, opts)
-	payload.Stream = true
-
-	LogLLMPayload(payload)
-
-	var res *http.Response
-	var err error
-
-	retryDelay := 1 * time.Second
-
-	doRequest := func() (*http.Response, error) {
-		bodyBytes, e := json.Marshal(payload)
-		if e != nil {
-			return nil, e
-		}
-
-		req, e := http.NewRequest("POST", c.URL, bytes.NewReader(bodyBytes))
-		if e != nil {
-			return nil, e
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		res, e = c.HTTP.Do(req)
-		if e != nil {
-			return nil, e
-		}
-
-		// Don't close body here - caller will handle it via defer in main function
-		if res.StatusCode != http.StatusOK {
-			res.Body.Close()
-			return nil, fmt.Errorf("HTTP %d", res.StatusCode)
-		}
-
-		return res, nil
-	}
-
-	for attempt := 1; attempt <= MaxRetries; attempt++ {
-		if attempt > 1 {
-			Logger.Warn("LLM streaming request with callbacks failed, retrying...", "attempt", attempt, "maxRetries", MaxRetries)
-			time.Sleep(retryDelay)
-		}
-
-		res, err = doRequest()
-		if err == nil && res != nil {
-			break
-		}
-
-		// Exponential backoff for retry delay
-		retryDelay *= 2
-
-		if attempt < MaxRetries {
-			Logger.Warn("LLM streaming request with callbacks failed", "attempt", attempt, "error", err)
-		} else {
-			Logger.Error("LLM streaming request with callbacks failed after all retries", "error", err)
 		}
 	}
 
