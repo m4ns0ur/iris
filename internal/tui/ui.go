@@ -266,12 +266,13 @@ func initialModel(agent *agent.Agent) model {
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	return model{
-		agent:        agent,
-		fullResponse: &strings.Builder{},
-		state:        stateInput,
-		input:        ta,
-		stream:       make(chan tea.Msg),
-		spinner:      sp,
-		streaming:    true,
+		agent:         agent,
+		fullResponse:  &strings.Builder{},
+		streaming:     true,
+		inAgenticLoop: true,
+		state:         stateInput,
+		input:         ta,
+		stream:        make(chan tea.Msg),
+		spinner:       sp,
 	}
 }

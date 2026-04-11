@@ -28,8 +28,6 @@ func init() {
 }
 
 func Execute() {
-	logger.SetDebug(debug)
-
 	err := rootCmd.Execute()
 	if err != nil {
 		Logger.Error("Failed to execute command", "error", err)
@@ -38,6 +36,8 @@ func Execute() {
 }
 
 func startTui(cmd *cobra.Command, args []string) {
+	logger.SetDebug(debug)
+
 	client := llm.NewClient("")
 	agent := agent.NewAgent(client, workdir)
 
