@@ -26,7 +26,7 @@ func (a *Agent) plan(onChunk func(string), onError func(error)) error {
 	a.state = "planning"
 
 	systemPrompt := prompt.BuildSystemPrompt()
-	userPrompt := prompt.BuildPlanningPrompt(a.goals)
+	userPrompt := prompt.BuildPlanningPromptWithContext(a.goals, a.history)
 
 	Logger.Debug("Planning phase", "systemPrompt", systemPrompt, "userPrompt", userPrompt)
 

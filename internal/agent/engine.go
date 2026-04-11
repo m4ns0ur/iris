@@ -19,10 +19,7 @@ type Agent struct {
 	workdir     string
 }
 
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
+type Message = prompt.Message
 
 func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 	return &Agent{

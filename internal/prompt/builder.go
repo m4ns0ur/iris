@@ -13,6 +13,11 @@ const (
 
 type Phase string
 
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 func BuildSystemPrompt() string {
 	return `You are Iris, an AI agent capable of planning and executing multi-step tasks. Your job is to:
 
@@ -39,6 +44,26 @@ func BuildPlanningPrompt(goals []string) string {
 %s
 
 Review your progress and determine if all tasks are complete or if adjustments are needed.`, strings.Join(goalList, "\n"))
+}
+
+// BuildPlanningPromptWithContext builds a planning prompt that includes user input history
+func BuildPlanningPromptWithContext(goals []string, history []Message) string {
+	userInput := ""
+	if len(history) > 0 {
+		for i, msg := range history {
+			if i > 0 {
+				userInput += "\n"
+			}
+			userInput += fmt.Sprintf("%s: %s", msg.Role, msg.Content)
+		}
+		userInput += "\n\n--- Planning Request ---"
+	}
+
+	prompt := BuildPlanningPrompt(goals)
+	if userInput != "" {
+		prompt += userInput
+	}
+	return prompt
 }
 
 func BuildExecutionPrompt(index int, task string) string {
