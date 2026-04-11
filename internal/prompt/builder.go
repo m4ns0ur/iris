@@ -5,13 +5,13 @@ import (
 	"strings"
 )
 
-type Phase string
-
 const (
 	Planning   Phase = "planning"
 	Executing  Phase = "executing"
 	Reflecting Phase = "reflecting"
 )
+
+type Phase string
 
 func BuildSystemPrompt() string {
 	return `You are Iris, an autonomous agent.

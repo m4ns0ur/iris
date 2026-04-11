@@ -10,9 +10,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var Logger = logger.Logger
-
 var (
+	Logger  = logger.Logger
 	debug   bool
 	workdir string
 )
@@ -29,13 +28,13 @@ func init() {
 }
 
 func Execute() {
+	logger.SetDebug(debug)
+
 	err := rootCmd.Execute()
 	if err != nil {
 		Logger.Error("Failed to execute command", "error", err)
 		os.Exit(1)
 	}
-
-	logger.SetDebug(debug)
 }
 
 func startTui(cmd *cobra.Command, args []string) {
@@ -47,35 +46,3 @@ func startTui(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 }
-
-//excute
-// temperature=0.25,
-// top_p=0.95,
-// top_k=40,
-// min_p=0.05,
-// presence_penalty=0.0,
-// repetition_penalty=1.1,
-
-// json utils
-// import json
-// import re
-// from typing import Any
-
-// def extract_json(text: str) -> Any:
-//     text = text.strip()
-
-//     # fast path
-//     if text.startswith("{") and text.endswith("}"):
-//         return json.loads(text)
-
-//     # remove markdown fences but keep content
-//     text = re.sub(r"```(?:json)?", "", text)
-//     text = text.replace("```", "")
-
-//     start = text.find("{")
-//     if start == -1:
-//         raise ValueError("No JSON found")
-
-//     decoder = json.JSONDecoder()
-//     obj, _ = decoder.raw_decode(text[start:])
-//     return obj

@@ -7,15 +7,6 @@ import (
 	"strings"
 )
 
-// ContextKey is a type for context keys.
-type ContextKey string
-
-// ToolContext is a helper struct for passing tool-related information in prompts.
-type ToolContext struct {
-	Registry *ToolRegistry
-	Workdir  string
-}
-
 const (
 	// ToolsContextKey holds the ToolRegistry in the context.
 	ToolsContextKey = ContextKey("tool_registry")
@@ -26,6 +17,9 @@ const (
 	// WorkdirContextKey holds the working directory for file operations.
 	WorkdirContextKey = ContextKey("workdir")
 )
+
+// ContextKey is a type for context keys.
+type ContextKey string
 
 // WithTools creates a new context with the tool registry attached.
 func WithTools(ctx context.Context, registry *ToolRegistry) context.Context {
@@ -83,6 +77,12 @@ func FromCurrentTool(ctx context.Context) (string, map[string]any, bool) {
 	}
 
 	return data.Name, data.Args, true
+}
+
+// ToolContext is a helper struct for passing tool-related information in prompts.
+type ToolContext struct {
+	Registry *ToolRegistry
+	Workdir  string
 }
 
 // BuildPrompt adds tool descriptions to a prompt for the LLM.

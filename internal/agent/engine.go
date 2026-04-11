@@ -6,6 +6,8 @@ import (
 	"github.com/m4ns0ur/iris/internal/prompt"
 )
 
+var Logger = logger.Logger
+
 type Agent struct {
 	client      *llm.LLMClient
 	state       string
@@ -21,19 +23,6 @@ type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
-
-type Plan struct {
-	Goals []string `json:"goals"`
-}
-
-type Adjustment struct {
-	Type        string `json:"type"`
-	TaskIndex   int    `json:"task_index,omitempty"`
-	TaskIndices []int  `json:"task_indices,omitempty"`
-	Description string `json:"description"`
-}
-
-var Logger = logger.Logger
 
 func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 	return &Agent{

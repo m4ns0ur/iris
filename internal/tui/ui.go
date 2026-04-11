@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -11,6 +10,13 @@ import (
 	"github.com/m4ns0ur/iris/internal/agent"
 	"github.com/m4ns0ur/iris/internal/logger"
 )
+
+const (
+	stateInput state = iota
+	stateStreaming
+)
+
+var Logger = logger.Logger
 
 type model struct {
 	agent         *agent.Agent
@@ -24,8 +30,9 @@ type model struct {
 	stream   chan tea.Msg
 	spinner  spinner.Model
 	messages []message
-	err      error
 }
+
+type state int
 
 type message struct {
 	role    string // "user" | "assistant"
@@ -37,43 +44,6 @@ type chunkMsg string
 type doneMsg struct{}
 
 type errMsg error
-
-type state int
-
-const (
-	stateInput state = iota
-	stateStreaming
-)
-
-var Logger = logger.Logger
-
-func Run(agent *agent.Agent) error {
-	p := tea.NewProgram(initialModel(agent))
-	_, err := p.Run()
-	return err
-}
-
-func initialModel(agent *agent.Agent) model {
-	ta := textarea.New()
-	ta.Placeholder = "Ask Iris..."
-	ta.Focus()
-	ta.SetHeight(2)
-	ta.ShowLineNumbers = false
-
-	sp := spinner.New()
-	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
-
-	return model{
-		agent:        agent,
-		fullResponse: &strings.Builder{},
-		state:        stateInput,
-		input:        ta,
-		stream:       make(chan tea.Msg),
-		spinner:      sp,
-		streaming:    true,
-	}
-}
 
 func (m model) Init() tea.Cmd {
 	return m.input.Focus()
@@ -168,22 +138,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, waitForStream(m.stream)
 
 		case doneMsg:
+			resp := m.fullResponse.String()
+			m.messages = append(m.messages, message{
+				role:    "assistant",
+				content: resp,
+			})
+
 			if m.inAgenticLoop {
-				// Agentic loop completed - add the full response to messages
-				resp := m.fullResponse.String()
-				m.messages = append(m.messages, message{
-					role:    "assistant",
-					content: resp,
-				})
 				Logger.Info("Agentic loop completed", "response", resp)
 			} else {
-				// Simple streaming mode
-				resp := m.fullResponse.String()
-				m.messages = append(m.messages, message{
-					role:    "assistant",
-					content: resp,
-				})
-
 				Logger.Info("Streamed full response", "response", resp)
 			}
 
@@ -191,7 +154,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case errMsg:
-			m.err = msg
+			m.messages = append(m.messages, message{
+				role:    "assistant",
+				content: "Error: " + msg.Error(),
+			})
 			m.state = stateInput
 			return m, nil
 		}
@@ -200,10 +166,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() tea.View {
-	if m.err != nil {
-		return tea.NewView(fmt.Sprintf("\nError: %v\n", m.err))
-	}
-
 	var sb strings.Builder
 
 	// Render history
@@ -215,19 +177,30 @@ func (m model) View() tea.View {
 					Foreground(lipgloss.Color("212")).
 					Render("You> "),
 			)
-			sb.WriteString(msg.content + "\n\n")
+			sb.WriteString(msg.content + "\n")
 
 		case "assistant":
-			content := lipgloss.NewStyle().
-				Width(m.width).
-				Render(msg.content)
+			// Show error message if there was an error
+			if strings.HasPrefix(msg.content, "Error: ") {
+				errorMsg := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("196")).
+					Bold(true).
+					MarginTop(2).
+					MarginBottom(1).
+					Render(msg.content)
+				sb.WriteString(errorMsg + "\n")
+			} else {
+				content := lipgloss.NewStyle().
+					Width(m.width).
+					Render(msg.content)
 
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.Color("86")).
-					Render("Iris> "),
-			)
-			sb.WriteString(content + "\n\n")
+				sb.WriteString(
+					lipgloss.NewStyle().
+						Foreground(lipgloss.Color("86")).
+						Render("Iris> "),
+				)
+				sb.WriteString(content + "\n")
+			}
 		}
 	}
 
@@ -239,16 +212,26 @@ func (m model) View() tea.View {
 		} else if m.streaming && m.fullResponse.Len() == 0 {
 			sb.WriteString("\n" + m.spinner.View() + " Iris is thinking...\n")
 		} else {
-			content := lipgloss.NewStyle().
-				Width(m.width).
-				Render(m.fullResponse.String())
+			if strings.HasPrefix(m.fullResponse.String(), "Error: ") {
+				errorMsg := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("196")).
+					Bold(true).
+					MarginTop(2).
+					MarginBottom(1).
+					Render(m.fullResponse.String())
+				sb.WriteString(errorMsg + "\n")
+			} else {
+				content := lipgloss.NewStyle().
+					Width(m.width).
+					Render(m.fullResponse.String())
 
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.Color("86")).
-					Render("Iris> "),
-			)
-			sb.WriteString(content + "\n\n")
+				sb.WriteString(
+					lipgloss.NewStyle().
+						Foreground(lipgloss.Color("86")).
+						Render("Iris> "),
+				)
+				sb.WriteString(content + "\n")
+			}
 		}
 	}
 
@@ -261,5 +244,34 @@ func (m model) View() tea.View {
 func waitForStream(ch chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		return <-ch
+	}
+}
+
+func Run(agent *agent.Agent) error {
+	m := initialModel(agent)
+	p := tea.NewProgram(m)
+	_, err := p.Run()
+	return err
+}
+
+func initialModel(agent *agent.Agent) model {
+	ta := textarea.New()
+	ta.Placeholder = "Ask Iris..."
+	ta.Focus()
+	ta.SetHeight(2)
+	ta.ShowLineNumbers = false
+
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
+	return model{
+		agent:        agent,
+		fullResponse: &strings.Builder{},
+		state:        stateInput,
+		input:        ta,
+		stream:       make(chan tea.Msg),
+		spinner:      sp,
+		streaming:    true,
 	}
 }

@@ -25,7 +25,7 @@ func (a *Agent) runTask(onChunk func(string), onError func(error)) error {
 	}
 
 	// Build prompt with available tools
-	registry := tool.DefaultRegistry()
+	registry := tool.NewDefaultRegistry()
 	toolContext := &tool.ToolContext{Registry: registry}
 	systemPrompt := prompt.BuildSystemPrompt() + "\n\n" + toolContext.BuildPrompt()
 
@@ -141,72 +141,6 @@ func (a *Agent) parseToolCall(response string) (string, map[string]any) {
 	// Last resort: return empty (no tool call detected)
 	Logger.Debug("No tool call pattern found in response")
 	return "", nil
-}
-
-func parseToolCallJSON(jsonStr string) (*tool.ToolDefinition, error) {
-	var def tool.ToolDefinition
-	err := json.Unmarshal([]byte(jsonStr), &def)
-	if err != nil {
-		// Try parsing as map[string]any first
-		var m map[string]any
-		err = json.Unmarshal([]byte(jsonStr), &m)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse JSON: %w", err)
-		}
-
-		// Extract name and args from map
-		name, ok := m["name"].(string)
-		if !ok || name == "" {
-			return nil, fmt.Errorf("missing 'name' field")
-		}
-
-		argsMap := make(map[string]any)
-		if params, ok := m["arguments"].(map[string]any); ok {
-			maps.Copy(argsMap, params)
-		} else if args, ok := m["args"].(map[string]any); ok {
-			maps.Copy(argsMap, args)
-		}
-
-		return &tool.ToolDefinition{
-			Name:       name,
-			Parameters: argsMap,
-		}, nil
-	}
-
-	return &def, err
-}
-
-func formatResult(result map[string]any) string {
-	if result == nil {
-		return "(no output)"
-	}
-
-	content, ok := result["content"].(string)
-	if ok && content != "" {
-		return truncateString(content, 500)
-	}
-
-	// Try to marshal as JSON if not a simple string
-	jsonBytes, err := json.MarshalIndent(result, "", "  ")
-	if err == nil {
-		return string(jsonBytes[:min(len(jsonBytes), 1000)]) + "..."
-	}
-
-	return fmt.Sprintf("%v", result)
-}
-
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func (a *Agent) isTaskComplete() bool {
@@ -420,4 +354,63 @@ func (a *Agent) extractSubtasks(response string) ([]string, error) {
 	}
 
 	return subtasks, nil
+}
+
+func parseToolCallJSON(jsonStr string) (*tool.ToolDefinition, error) {
+	var def tool.ToolDefinition
+	err := json.Unmarshal([]byte(jsonStr), &def)
+	if err != nil {
+		// Try parsing as map[string]any first
+		var m map[string]any
+		err = json.Unmarshal([]byte(jsonStr), &m)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		}
+
+		// Extract name and args from map
+		name, ok := m["name"].(string)
+		if !ok || name == "" {
+			return nil, fmt.Errorf("missing 'name' field")
+		}
+
+		argsMap := make(map[string]any)
+		if params, ok := m["arguments"].(map[string]any); ok {
+			maps.Copy(argsMap, params)
+		} else if args, ok := m["args"].(map[string]any); ok {
+			maps.Copy(argsMap, args)
+		}
+
+		return &tool.ToolDefinition{
+			Name:       name,
+			Parameters: argsMap,
+		}, nil
+	}
+
+	return &def, err
+}
+
+func formatResult(result map[string]any) string {
+	if result == nil {
+		return "(no output)"
+	}
+
+	content, ok := result["content"].(string)
+	if ok && content != "" {
+		return truncateString(content, 500)
+	}
+
+	// Try to marshal as JSON if not a simple string
+	jsonBytes, err := json.MarshalIndent(result, "", "  ")
+	if err == nil {
+		return string(jsonBytes[:min(len(jsonBytes), 1000)]) + "..."
+	}
+
+	return fmt.Sprintf("%v", result)
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

@@ -11,6 +11,17 @@ import (
 	"github.com/m4ns0ur/iris/internal/prompt"
 )
 
+type Plan struct {
+	Goals []string `json:"goals"`
+}
+
+type Adjustment struct {
+	Type        string `json:"type"`
+	TaskIndex   int    `json:"task_index,omitempty"`
+	TaskIndices []int  `json:"task_indices,omitempty"`
+	Description string `json:"description"`
+}
+
 func (a *Agent) plan(onChunk func(string), onError func(error)) error {
 	a.state = "planning"
 

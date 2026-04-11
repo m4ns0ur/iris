@@ -5,6 +5,11 @@ import (
 	"os"
 )
 
+var (
+	Logger   *slog.Logger
+	levelVar = new(slog.LevelVar)
+)
+
 type LLMMessage struct {
 	Role    any `json:"role"`
 	Content any `json:"content"`
@@ -13,9 +18,6 @@ type LLMMessage struct {
 type LLMChoice struct {
 	Message any `json:"message"`
 }
-
-var Logger *slog.Logger
-var levelVar = new(slog.LevelVar)
 
 func init() {
 	levelVar.Set(slog.LevelDebug)

@@ -10,9 +10,6 @@ import (
 // FileReadTool reads the contents of a file.
 type FileReadTool struct{}
 
-// FileWriteTool writes content to a file.
-type FileWriteTool struct{}
-
 func NewFileReadTool() *FileReadTool {
 	return &FileReadTool{}
 }
@@ -76,6 +73,13 @@ func (t *FileReadTool) resolvePath(ctx context.Context, path string) (string, er
 	return resolved, nil
 }
 
+// FileWriteTool writes content to a file.
+type FileWriteTool struct{}
+
+func NewFileWriteTool() *FileWriteTool {
+	return &FileWriteTool{}
+}
+
 // resolvePath resolves a path relative to workdir if provided in context, otherwise uses current working directory.
 func (t *FileWriteTool) resolvePath(ctx context.Context, path string) (string, error) {
 	workdir, hasWorkdir := FromWorkdir(ctx)
@@ -93,10 +97,6 @@ func (t *FileWriteTool) resolvePath(ctx context.Context, path string) (string, e
 	// Resolve relative to workdir (or current directory if not set)
 	resolved := filepath.Join(workdir, path)
 	return resolved, nil
-}
-
-func NewFileWriteTool() *FileWriteTool {
-	return &FileWriteTool{}
 }
 
 func (t *FileWriteTool) Name() string {

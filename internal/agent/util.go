@@ -6,9 +6,11 @@ import (
 	"strings"
 )
 
-var numberedListRegex = regexp.MustCompile(`^\d+\.\s+(.+)$`)
-var bulletListRegex = regexp.MustCompile(`^-\s+(.+)$`)
-var taskMarkerRegex = regexp.MustCompile(`^(?:Task|Goal):\s+(.+)$`)
+var (
+	numberedListRegex = regexp.MustCompile(`^\d+\.\s+(.+)$`)
+	bulletListRegex   = regexp.MustCompile(`^-\s+(.+)$`)
+	taskMarkerRegex   = regexp.MustCompile(`^(?:Task|Goal):\s+(.+)$`)
+)
 
 func extractJSONArray(text string) *[]string {
 	text = strings.TrimSpace(text)

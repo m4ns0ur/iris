@@ -13,27 +13,9 @@ import (
 	"github.com/m4ns0ur/iris/internal/logger"
 )
 
+const MaxRetries = 3
+
 var Logger = logger.Logger
-
-type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type ExtraBody struct {
-	TopK               int                `json:"top_k"`
-	MinP               float64            `json:"min_p"`
-	RepetitionPenalty  float64            `json:"repetition_penalty"`
-	ChatTemplateKwargs ChatTemplateKwargs `json:"chat_template_kwargs"`
-}
-
-type ChatTemplateKwargs struct {
-	EnableThinking bool `json:"enable_thinking"`
-}
-
-type ResponseFormat struct {
-	ResponseType string `json:"type"`
-}
 
 type Payload struct {
 	Model           string         `json:"model"`
@@ -47,6 +29,26 @@ type Payload struct {
 	ExtraBody       ExtraBody      `json:"extra_body"`
 }
 
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type ResponseFormat struct {
+	ResponseType string `json:"type"`
+}
+
+type ExtraBody struct {
+	TopK               int                `json:"top_k"`
+	MinP               float64            `json:"min_p"`
+	RepetitionPenalty  float64            `json:"repetition_penalty"`
+	ChatTemplateKwargs ChatTemplateKwargs `json:"chat_template_kwargs"`
+}
+
+type ChatTemplateKwargs struct {
+	EnableThinking bool `json:"enable_thinking"`
+}
+
 type LLMOptions struct {
 	Temperature       float64
 	TopP              float64
@@ -56,13 +58,19 @@ type LLMOptions struct {
 	RepetitionPenalty float64
 }
 
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+type LLMResponse struct {
+	Choices []Choice `json:"choices"`
+	Usage   Usage    `json:"usage"`
+	Timings Timings  `json:"timings"`
 }
 
 type Choice struct {
 	Message Message `json:"message"`
+}
+
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 type Usage struct {
@@ -75,22 +83,16 @@ type Timings struct {
 	PredictedPerSecond float64 `json:"predicted_per_second"`
 }
 
-type LLMResponse struct {
-	Choices []Choice `json:"choices"`
-	Usage   Usage    `json:"usage"`
-	Timings Timings  `json:"timings"`
-}
-
-type Delta struct {
-	Content string `json:"content"`
+type Chunk struct {
+	Choices []ChunkChoice `json:"choices"`
 }
 
 type ChunkChoice struct {
 	Delta Delta `json:"delta"`
 }
 
-type Chunk struct {
-	Choices []ChunkChoice `json:"choices"`
+type Delta struct {
+	Content string `json:"content"`
 }
 
 type LLMClient struct {
@@ -130,7 +132,6 @@ func (c *LLMClient) GenerateSync(systemPrompt string, userPrompt string, opts *L
 	LogLLMPayload(payload)
 
 	doRequest := func() (*http.Response, error) {
-
 		bodyBytes, err := json.Marshal(payload)
 		if err != nil {
 			return nil, err
@@ -161,14 +162,34 @@ func (c *LLMClient) GenerateSync(systemPrompt string, userPrompt string, opts *L
 		return res, nil
 	}
 
-	res, err := doRequest()
-	if err != nil {
-		Logger.Warn("LLM request failed, retrying once...", "error", err)
+	var res *http.Response
+	var err error
+
+	retryDelay := 1 * time.Second
+
+	for attempt := 1; attempt <= MaxRetries; attempt++ {
+		if attempt > 1 {
+			Logger.Warn("LLM request failed, retrying...", "attempt", attempt, "maxRetries", MaxRetries)
+			time.Sleep(retryDelay)
+		}
 
 		res, err = doRequest()
-		if err != nil {
-			return "", err
+		if err == nil {
+			break
 		}
+
+		// Exponential backoff for retry delay
+		retryDelay *= 2
+
+		if attempt < MaxRetries {
+			Logger.Warn("LLM request failed", "attempt", attempt, "error", err)
+		} else {
+			Logger.Error("LLM request failed after all retries", "error", err)
+		}
+	}
+
+	if res == nil || err != nil {
+		return "", fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
 	}
 	defer res.Body.Close()
 
@@ -194,25 +215,59 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 
 	LogLLMPayload(payload)
 
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return err
+	doRequest := func() (*http.Response, error) {
+		bodyBytes, err := json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+
+		req, err := http.NewRequest("POST", c.URL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		res, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer res.Body.Close()
+
+		if res.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("HTTP %d", res.StatusCode)
+		}
+
+		return res, nil
 	}
 
-	req, err := http.NewRequest("POST", c.URL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
+	var res *http.Response
+	var err error
 
-	res, err := c.HTTP.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
+	retryDelay := 1 * time.Second
 
-	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", res.StatusCode)
+	for attempt := 1; attempt <= MaxRetries; attempt++ {
+		if attempt > 1 {
+			Logger.Warn("LLM streaming request failed, retrying...", "attempt", attempt, "maxRetries", MaxRetries)
+			time.Sleep(retryDelay)
+		}
+
+		res, err = doRequest()
+		if err == nil && res != nil {
+			break
+		}
+
+		// Exponential backoff for retry delay
+		retryDelay *= 2
+
+		if attempt < MaxRetries {
+			Logger.Warn("LLM streaming request failed", "attempt", attempt, "error", err)
+		} else {
+			Logger.Error("LLM streaming request failed after all retries", "error", err)
+		}
+	}
+
+	if res == nil || err != nil {
+		return fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
 	}
 
 	reader := bufio.NewReader(res.Body)
@@ -260,25 +315,59 @@ func (c *LLMClient) GenerateStreamWithCallbacks(systemPrompt string, userPrompt 
 
 	LogLLMPayload(payload)
 
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return err
+	doRequest := func() (*http.Response, error) {
+		bodyBytes, err := json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+
+		req, err := http.NewRequest("POST", c.URL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		res, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer res.Body.Close()
+
+		if res.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("HTTP %d", res.StatusCode)
+		}
+
+		return res, nil
 	}
 
-	req, err := http.NewRequest("POST", c.URL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
+	var res *http.Response
+	var err error
 
-	res, err := c.HTTP.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
+	retryDelay := 1 * time.Second
 
-	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", res.StatusCode)
+	for attempt := 1; attempt <= MaxRetries; attempt++ {
+		if attempt > 1 {
+			Logger.Warn("LLM streaming request with callbacks failed, retrying...", "attempt", attempt, "maxRetries", MaxRetries)
+			time.Sleep(retryDelay)
+		}
+
+		res, err = doRequest()
+		if err == nil && res != nil {
+			break
+		}
+
+		// Exponential backoff for retry delay
+		retryDelay *= 2
+
+		if attempt < MaxRetries {
+			Logger.Warn("LLM streaming request with callbacks failed", "attempt", attempt, "error", err)
+		} else {
+			Logger.Error("LLM streaming request with callbacks failed after all retries", "error", err)
+		}
+	}
+
+	if res == nil || err != nil {
+		return fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
 	}
 
 	reader := bufio.NewReader(res.Body)
