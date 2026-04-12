@@ -51,12 +51,12 @@ func (a *Agent) runTask(onChunk func(string), onError func(error)) error {
 	toolCall, args := a.parseToolCall(resp)
 	if toolCall == "" {
 		// No tool needed - task is complete or needs reflection
-		Logger.Info("No tool required for task")
+		Logger.Debug("No tool required for task")
 		a.state = "reflecting"
 		return nil
 	}
 
-	Logger.Info("Executing tool", "toolName", toolCall, "args", args)
+	Logger.Debug("Executing tool", "toolName", toolCall, "args", args)
 
 	// Execute the tool with context including workdir
 	ctx := context.Background()
@@ -75,24 +75,6 @@ func (a *Agent) runTask(onChunk func(string), onError func(error)) error {
 	})
 
 	return nil
-}
-
-func (a *Agent) buildHistoryContext() string {
-	if len(a.history) < 2 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("\nConversation History:\n")
-
-	// Show last 5 messages or all if fewer than 5
-	start := max(len(a.history)-5, 0)
-
-	for i := start; i < len(a.history); i++ {
-		fmt.Fprintf(&sb, "\n%s: %s", a.history[i].Role, truncateString(a.history[i].Content, 200))
-	}
-
-	return sb.String()
 }
 
 func (a *Agent) parseToolCall(response string) (string, map[string]any) {
@@ -171,7 +153,7 @@ func (a *Agent) skipTask(taskIndex int, reason string) error {
 		return fmt.Errorf("invalid task index: %d", taskIndex)
 	}
 
-	Logger.Info("Skipping task", "index", taskIndex, "reason", reason)
+	Logger.Debug("Skipping task", "index", taskIndex, "reason", reason)
 	Logger.Debug("Task being skipped", "task", a.goals[taskIndex])
 
 	// Remove the task from the list (shift remaining tasks down by one index)
@@ -184,7 +166,7 @@ func (a *Agent) skipTask(taskIndex int, reason string) error {
 		a.currentTask--
 	}
 
-	Logger.Info("Task removed", "newCount", len(a.goals))
+	Logger.Debug("Task removed", "newCount", len(a.goals))
 
 	return nil
 }
@@ -194,7 +176,7 @@ func (a *Agent) reorderTasks(taskIndex int, reason string) error {
 		return fmt.Errorf("invalid task index: %d", taskIndex)
 	}
 
-	Logger.Info("Reordering tasks", "index", taskIndex, "reason", reason)
+	Logger.Debug("Reordering tasks", "index", taskIndex, "reason", reason)
 
 	currentTask := a.goals[taskIndex]
 
@@ -204,7 +186,7 @@ func (a *Agent) reorderTasks(taskIndex int, reason string) error {
 	// Insert at the beginning
 	a.goals = append([]string{currentTask}, a.goals...)
 
-	Logger.Info("Moved task to front", "index", taskIndex, "task", currentTask)
+	Logger.Debug("Moved task to front", "index", taskIndex, "task", currentTask)
 
 	return nil
 }
@@ -214,7 +196,7 @@ func (a *Agent) mergeTasks(taskIndices ...int) error {
 		return fmt.Errorf("need at least 2 tasks to merge")
 	}
 
-	Logger.Info("Merging tasks", "indices", taskIndices)
+	Logger.Debug("Merging tasks", "indices", taskIndices)
 
 	// Sort indices in descending order to remove from end first
 	sortedIndices := make([]int, len(taskIndices))
@@ -244,7 +226,7 @@ func (a *Agent) mergeTasks(taskIndices ...int) error {
 	mergedTask = strings.TrimSpace(mergedTask)
 	if mergedTask != "" {
 		a.goals = append(a.goals, mergedTask)
-		Logger.Info("Tasks merged successfully", "count", len(taskIndices), "newTotalGoals", len(a.goals))
+		Logger.Debug("Tasks merged successfully", "count", len(taskIndices), "newTotalGoals", len(a.goals))
 	}
 
 	// Adjust currentTask if we're on or past the merged tasks
@@ -264,7 +246,7 @@ func (a *Agent) splitTask(taskIndex int, reason string, onChunk func(string), on
 		return fmt.Errorf("invalid task index: %d", taskIndex)
 	}
 
-	Logger.Info("Splitting task", "index", taskIndex, "reason", reason)
+	Logger.Debug("Splitting task", "index", taskIndex, "reason", reason)
 
 	subtaskPrompt := prompt.BuildSplitTaskPrompt(taskIndex, a.goals[taskIndex])
 
@@ -286,7 +268,7 @@ func (a *Agent) splitTask(taskIndex int, reason string, onChunk func(string), on
 		return fmt.Errorf("failed to parse subtasks: %w", err)
 	}
 
-	Logger.Info("Subtasks extracted", "count", len(subtasks))
+	Logger.Debug("Subtasks extracted", "count", len(subtasks))
 
 	// Insert subtasks at the current task index, replacing the original task
 	if len(subtasks) > 0 {
@@ -296,7 +278,7 @@ func (a *Agent) splitTask(taskIndex int, reason string, onChunk func(string), on
 		// Insert subtasks in place of the original task
 		a.goals = append(a.goals, subtasks...)
 
-		Logger.Info("Task split successfully", "originalIndex", taskIndex, "subtaskCount", len(subtasks))
+		Logger.Debug("Task split successfully", "originalIndex", taskIndex, "subtaskCount", len(subtasks))
 
 		// Adjust currentTask if we're currently on this task or past it
 		if a.currentTask >= taskIndex {

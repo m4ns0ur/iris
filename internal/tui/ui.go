@@ -19,17 +19,15 @@ const (
 var Logger = logger.Logger
 
 type model struct {
-	agent         *agent.Agent
-	fullResponse  *strings.Builder
-	streaming     bool
-	inAgenticLoop bool
-
-	width    int
-	state    state
-	input    textarea.Model
-	stream   chan tea.Msg
-	spinner  spinner.Model
-	messages []message
+	agent        *agent.Agent
+	fullResponse *strings.Builder
+	streaming    bool
+	width        int
+	state        state
+	input        textarea.Model
+	stream       chan tea.Msg
+	spinner      spinner.Model
+	messages     []message
 }
 
 type state int
@@ -87,21 +85,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.streaming = true
 				m.state = stateStreaming
 
-				if m.inAgenticLoop {
-					// Use agentic loop command
-					return m, tea.Batch(
-						m.spinner.Tick,
-						runAgenticLoopCommand(m.agent, input, m.stream),
-						waitForStream(m.stream),
-					)
-				} else {
-					// Use simple streaming command
-					return m, tea.Batch(
-						m.spinner.Tick,
-						streamCommand(m.agent, input, m.stream),
-						waitForStream(m.stream),
-					)
-				}
+				return m, tea.Batch(
+					m.spinner.Tick,
+					runAgenticLoopCommand(m.agent, input, m.stream),
+					waitForStream(m.stream),
+				)
 
 			case "ctrl+c":
 				return m, tea.Quit
@@ -127,14 +115,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 
 		case chunkMsg:
-			if m.inAgenticLoop {
-				// During agentic loop, accumulate chunks for each step
-				m.fullResponse.WriteString(string(msg))
-			} else {
-				// Simple streaming mode
-				m.streaming = false
-				m.fullResponse.WriteString(string(msg))
-			}
+			m.fullResponse.WriteString(string(msg))
 			return m, waitForStream(m.stream)
 
 		case doneMsg:
@@ -144,11 +125,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				content: resp,
 			})
 
-			if m.inAgenticLoop {
-				Logger.Info("Agentic loop completed", "response", resp)
-			} else {
-				Logger.Info("Streamed full response", "response", resp)
-			}
+			Logger.Debug("Agentic loop completed", "response", resp)
 
 			m.state = stateInput
 			return m, nil
@@ -263,13 +240,12 @@ func initialModel(agent *agent.Agent) model {
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	return model{
-		agent:         agent,
-		fullResponse:  &strings.Builder{},
-		streaming:     true,
-		inAgenticLoop: true,
-		state:         stateInput,
-		input:         ta,
-		stream:        make(chan tea.Msg),
-		spinner:       sp,
+		agent:        agent,
+		fullResponse: &strings.Builder{},
+		streaming:    true,
+		state:        stateInput,
+		input:        ta,
+		stream:       make(chan tea.Msg),
+		spinner:      sp,
 	}
 }

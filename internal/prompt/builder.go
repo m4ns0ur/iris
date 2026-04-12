@@ -3,6 +3,8 @@ package prompt
 import (
 	"fmt"
 	"strings"
+
+	"github.com/m4ns0ur/iris/internal/tool"
 )
 
 const (
@@ -19,15 +21,37 @@ type Message struct {
 }
 
 func BuildSystemPrompt() string {
-	return `You are Iris, an AI agent capable of planning and executing multi-step tasks. Your job is to:
+	registry := tool.NewDefaultRegistry()
+	toolContext := &tool.ToolContext{Registry: registry}
+	toolPrompt := toolContext.BuildJSONPrompt()
 
-1. **Analyze** the user's request carefully
-2. **Plan** a step-by-step approach to accomplish it
-3. **Execute** each task using available tools (file operations, shell commands, etc.)
-4. **Reflect** on your progress and adjust if needed
-5. **Complete** the entire workflow until the goal is achieved
+	return `You are Iris, an AI agent capable of planning and executing multi-step tasks.
 
-You must NOT just generate plans - you MUST execute them step by step using tools to actually accomplish what the user asked for.`
+Role:
+- Analyze user requests and break them down into actionable steps
+- Execute tasks using available tools
+- Reflect on progress and adjust plans as needed to achieve goals
+
+Tools:
+` + toolPrompt + `
+
+Guidelines:
+- Be concise and efficient in your actions and responses. Focus on getting things done.
+- Always prioritize execution over planning. Do not get stuck in endless planning loops.
+- Use tools to accomplish tasks, do not just describe what you would do.
+- Continuously reflect on your progress and adjust your approach as needed.`
+}
+
+func BuildDecisionPrompt() string {
+	return `Check your current state and decide on the next action.
+
+Response format:
+` + "```json" + `{
+    "state": "respond|tool|done",
+	"response": "Your response to the user if decision is 'respond' or done.",
+	"tool_name": "Only include if decision is 'tool'.",
+	"tool_args": "Only include if decision is 'tool'. This must be a JSON object with the arguments for the tool."
+}` + "```"
 }
 
 func BuildPlanningPrompt(goals []string) string {

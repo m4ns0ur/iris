@@ -1,9 +1,14 @@
 package agent
 
 import (
+	"context"
+	"fmt"
+	"strings"
+
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/internal/prompt"
+	"github.com/m4ns0ur/iris/internal/tool"
 )
 
 var Logger = logger.Logger
@@ -17,6 +22,8 @@ type Agent struct {
 	history     []Message
 	maxSteps    int
 	workdir     string
+	toolName    string
+	toolArgs    map[string]any
 }
 
 type Message = prompt.Message
@@ -85,32 +92,59 @@ func (a *Agent) reset() {
 }
 
 func (a *Agent) loop(onChunk func(string), onError func(error)) error {
+	registry := tool.NewDefaultRegistry()
+
 	for a.step < a.maxSteps {
 		Logger.Debug("Agent Loop", "step", a.step, "state", a.state, "currentTask", a.currentTask)
 
+		// Decide next action based on current state and progress
+		a.decide(onChunk, onError)
+
 		switch a.state {
-		case "idle":
-			if err := a.plan(onChunk, onError); err != nil {
-				return err
+		case "respond":
+			// In respond state, we just wait for the next user input or completion
+			Logger.Debug("Agent is responding to user")
+			return nil
+
+		case "tool":
+			// Execute the tool with context including workdir
+			ctx := context.Background()
+			ctx = tool.WithWorkdir(ctx, a.workdir)
+			result, err := tool.ExecuteWithTools(ctx, registry, a.toolName, a.toolArgs)
+			if err != nil {
+				return fmt.Errorf("tool execution failed: %w", err)
 			}
 
-		case "planning":
-			if err := a.executePlan(onChunk, onError); err != nil {
-				return err
-			}
+			Logger.Debug("Tool result", "toolName", a.toolName, "result", result)
 
-		case "executing":
-			if err := a.runTask(onChunk, onError); err != nil {
-				return err
-			}
+			// Add result to conversation history
+			a.history = append(a.history, Message{
+				Role:    "assistant",
+				Content: fmt.Sprintf("Executed tool '%s': %s", a.toolName, formatResult(result)),
+			})
 
-		case "reflecting":
-			if err := a.reflect(onChunk, onError); err != nil {
-				return err
-			}
+		// case "idle":
+		// 	if err := a.plan(onChunk, onError); err != nil {
+		// 		return err
+		// 	}
+
+		// case "planning":
+		// 	if err := a.executePlan(onChunk, onError); err != nil {
+		// 		return err
+		// 	}
+
+		// case "executing":
+		// 	if err := a.runTask(onChunk, onError); err != nil {
+		// 		return err
+		// 	}
+
+		// case "reflecting":
+		// 	if err := a.reflect(onChunk, onError); err != nil {
+		// 		return err
+		// 	}
 
 		case "done":
-			Logger.Info("Agent loop completed")
+			Logger.Debug("Agent loop completed")
 			return nil
 
 		default:
@@ -119,7 +153,7 @@ func (a *Agent) loop(onChunk func(string), onError func(error)) error {
 		}
 
 		if a.shouldStop() {
-			Logger.Info("Stopping agent loop")
+			Logger.Debug("Stopping agent loop")
 			break
 		}
 
@@ -127,11 +161,6 @@ func (a *Agent) loop(onChunk func(string), onError func(error)) error {
 	}
 
 	return nil
-}
-
-// AppendUserMessage adds a user message to the agent's history
-func (a *Agent) AppendUserMessage(content string) {
-	a.history = append(a.history, Message{Role: "user", Content: content})
 }
 
 func (a *Agent) shouldStop() bool {
@@ -151,4 +180,22 @@ func (a *Agent) shouldStop() bool {
 	}
 
 	return false
+}
+
+func (a *Agent) buildHistoryContext() string {
+	if len(a.history) < 1 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\nConversation History:\n")
+
+	// Show last 5 messages or all if fewer than 5
+	start := max(len(a.history)-5, 0)
+
+	for i := start; i < len(a.history); i++ {
+		fmt.Fprintf(&sb, "\n%s: %s", a.history[i].Role, truncateString(a.history[i].Content, 200))
+	}
+
+	return sb.String()
 }

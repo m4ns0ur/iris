@@ -22,6 +22,61 @@ type Adjustment struct {
 	Description string `json:"description"`
 }
 
+func (a *Agent) decide(onChunk func(string), onError func(error)) error {
+	systemPrompt := prompt.BuildSystemPrompt()
+	decisionPrompt := prompt.BuildDecisionPrompt()
+	historyContext := a.buildHistoryContext()
+
+	Logger.Debug("Decision phase", "systemPrompt", systemPrompt, "decisionPrompt", decisionPrompt, "historyContext", historyContext)
+
+	resp, err := a.generateDecision(systemPrompt, decisionPrompt+historyContext, onChunk, onError)
+	if err != nil {
+		return err
+	}
+
+	decision := extractJSON(resp)
+
+	Logger.Debug("Decision received", "decision", decision)
+
+	if decision != nil {
+		if state, ok := (*decision)["state"].(string); ok {
+			Logger.Debug("State updated based on decision", "newState", a.state)
+			a.state = state
+		}
+		if response, ok := (*decision)["response"].(string); ok {
+			a.history = append(a.history, Message{Role: "assistant", Content: response})
+		}
+		if toolName, ok := (*decision)["tool_name"].(string); ok {
+			a.toolName = toolName
+			if toolArgs, ok := (*decision)["tool_args"].(map[string]any); ok {
+				a.toolArgs = toolArgs
+			}
+			Logger.Debug("Tool execution decision", "toolName", a.toolName, "toolArgs", a.toolArgs)
+		}
+	}
+
+	return nil
+}
+
+func (a *Agent) generateDecision(systemPrompt, decisionPrompt string, onChunk func(string), onError func(error)) (string, error) {
+	if a.client == nil {
+		return "", fmt.Errorf("LLM client is not initialized")
+	}
+
+	opts := &llm.LLMOptions{
+		Temperature:       0.1,
+		TopP:              0.9,
+		RepetitionPenalty: 1.05,
+	}
+
+	resp, err := a.client.Generate(systemPrompt, decisionPrompt, opts, onChunk, onError)
+	if err != nil {
+		return "", fmt.Errorf("LLM generation failed: %w", err)
+	}
+
+	return resp, nil
+}
+
 func (a *Agent) plan(onChunk func(string), onError func(error)) error {
 	a.state = "planning"
 
@@ -38,7 +93,7 @@ func (a *Agent) plan(onChunk func(string), onError func(error)) error {
 	a.goals = plan.Goals
 	a.currentTask = 0
 
-	Logger.Info("Planning complete", "goalsCount", len(a.goals))
+	Logger.Debug("Planning complete", "goalsCount", len(a.goals))
 	return nil
 }
 
@@ -67,7 +122,7 @@ func (a *Agent) generatePlan(systemPrompt, userPrompt string, onChunk func(strin
 		return nil, fmt.Errorf("failed to extract plan: %w", err)
 	}
 
-	Logger.Info("Plan generated", "goalsCount", len(plan.Goals))
+	Logger.Debug("Plan generated", "goalsCount", len(plan.Goals))
 
 	for i, goal := range plan.Goals {
 		Logger.Debug("Goal", "index", i, "goal", goal)
@@ -103,7 +158,7 @@ func (a *Agent) executePlan(onChunk func(string), onError func(error)) error {
 	a.state = "executing"
 	task := a.goals[a.currentTask]
 
-	Logger.Info("Executing task", "taskIndex", a.currentTask, "task", task)
+	Logger.Debug("Executing task", "taskIndex", a.currentTask, "task", task)
 
 	if err := a.runTask(onChunk, onError); err != nil {
 		return err
@@ -167,17 +222,10 @@ func (a *Agent) adjustPlan(onChunk func(string), onError func(error)) error {
 		return fmt.Errorf("LLM client is not initialized")
 	}
 
-	Logger.Info("Adjusting plan", "currentTask", a.currentTask, "totalGoals", len(a.goals))
+	Logger.Debug("Adjusting plan", "currentTask", a.currentTask, "totalGoals", len(a.goals))
 
 	reflectionPrompt := prompt.BuildReflectionPrompt(a.currentTask, len(a.goals))
-
-	var historyContext string
-	if len(a.history) >= 3 {
-		historyContext = "\n\nRecent conversation:\n"
-		for i := len(a.history) - 1; i >= len(a.history)-3 && i >= 0; i-- {
-			historyContext += fmt.Sprintf("%s: %s\n", a.history[i].Role, a.history[i].Content)
-		}
-	}
+	historyContext := a.buildHistoryContext()
 
 	opts := &llm.LLMOptions{
 		Temperature:       0.2,
@@ -197,7 +245,7 @@ func (a *Agent) adjustPlan(onChunk func(string), onError func(error)) error {
 		return fmt.Errorf("failed to parse adjustments: %w", err)
 	}
 
-	Logger.Info("Plan adjusted", "actions", len(adjustments))
+	Logger.Debug("Plan adjusted", "actions", len(adjustments))
 
 	for _, action := range adjustments {
 		switch action.Type {
