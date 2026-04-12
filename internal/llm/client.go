@@ -117,11 +117,11 @@ func NewClient(model string) *LLMClient {
 
 func (c *LLMClient) Generate(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string), onError func(error)) (string, error) {
 	if onChunk != nil || onError != nil {
-		err := c.GenerateStream(systemPrompt, userPrompt, opts, onChunk, onError)
+		fullResponse, err := c.GenerateStream(systemPrompt, userPrompt, opts, onChunk, onError)
 		if err != nil && onError != nil {
 			onError(err)
 		}
-		return "", err
+		return fullResponse, err
 	}
 	return c.GenerateSync(systemPrompt, userPrompt, opts)
 }
@@ -209,7 +209,7 @@ func (c *LLMClient) GenerateSync(systemPrompt string, userPrompt string, opts *L
 	return llmResponse.Choices[0].Message.Content, nil
 }
 
-func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string), onError func(error)) error {
+func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string), onError func(error)) (string, error) {
 	payload := createPayload(c.Model, systemPrompt, userPrompt, opts)
 	payload.Stream = true
 
@@ -268,7 +268,7 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 	}
 
 	if res == nil || err != nil {
-		return fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
+		return "", fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
 	}
 
 	// Ensure response body is closed when we're done
@@ -279,13 +279,14 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 	}()
 
 	reader := bufio.NewReader(res.Body)
+	var fullResponse string
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			return fmt.Errorf("error reading stream: %w", err)
+			return "", fmt.Errorf("error reading stream: %w", err)
 		}
 
 		// OpenAI SSE lines start with "data: "
@@ -309,12 +310,13 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 		if len(chunk.Choices) > 0 {
 			content := chunk.Choices[0].Delta.Content
 			if content != "" {
+				fullResponse += content
 				onChunk(content)
 			}
 		}
 	}
 
-	return nil
+	return fullResponse, nil
 }
 
 func createPayload(model, systemPrompt, userPrompt string, opts *LLMOptions) Payload {

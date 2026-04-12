@@ -48,7 +48,7 @@ func (a *Agent) Stream(input string) (<-chan string, <-chan error) {
 			RepetitionPenalty: 1.05,
 		}
 
-		err := a.client.GenerateStream(prompt.BuildSystemPrompt(), input, opts, func(chunk string) {
+		_, err := a.client.GenerateStream(prompt.BuildSystemPrompt(), input, opts, func(chunk string) {
 			outCh <- chunk
 		}, func(err error) {
 			errCh <- err
@@ -119,6 +119,7 @@ func (a *Agent) loop(onChunk func(string), onError func(error)) error {
 		}
 
 		if a.shouldStop() {
+			Logger.Info("Stopping agent loop")
 			break
 		}
 
@@ -135,6 +136,7 @@ func (a *Agent) AppendUserMessage(content string) {
 
 func (a *Agent) shouldStop() bool {
 	if a.state == "done" {
+		Logger.Debug("Agent state is done")
 		return true
 	}
 
@@ -144,6 +146,7 @@ func (a *Agent) shouldStop() bool {
 	}
 
 	if a.state == "executing" && !a.isTaskComplete() {
+		Logger.Debug("Task not complete, start reflecting")
 		a.state = "reflecting"
 	}
 

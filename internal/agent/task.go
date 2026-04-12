@@ -29,19 +29,18 @@ func (a *Agent) runTask(onChunk func(string), onError func(error)) error {
 	toolContext := &tool.ToolContext{Registry: registry}
 	systemPrompt := prompt.BuildSystemPrompt() + "\n\n" + toolContext.BuildPrompt()
 
-	// Add task context to prompt
+	// Include conversation history for context
+	historyContext := a.buildHistoryContext()
+	fullPrompt := systemPrompt + historyContext
+
+	Logger.Debug("Task prompt length", "length", len(fullPrompt))
+
 	taskPrompt := fmt.Sprintf(
 		"Current Task (%d/%d): %s\n\n",
 		a.currentTask+1, len(a.goals), task)
 
-	// Include conversation history for context
-	historyContext := a.buildHistoryContext()
-	fullPrompt := systemPrompt + taskPrompt + historyContext
-
-	Logger.Debug("Task prompt length", "length", len(fullPrompt))
-
 	// Generate response from LLM with streaming support
-	resp, err := a.client.Generate(fullPrompt, "", opts, onChunk, onError)
+	resp, err := a.client.Generate(fullPrompt, taskPrompt, opts, onChunk, onError)
 	if err != nil {
 		return fmt.Errorf("LLM generation failed: %w", err)
 	}
