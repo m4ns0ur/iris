@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/m4ns0ur/iris/internal/logger"
@@ -118,9 +119,6 @@ func NewClient(model string) *LLMClient {
 func (c *LLMClient) Generate(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string), onError func(error)) (string, error) {
 	if onChunk != nil || onError != nil {
 		fullResponse, err := c.GenerateStream(systemPrompt, userPrompt, opts, onChunk, onError)
-		if err != nil && onError != nil {
-			onError(err)
-		}
 		return fullResponse, err
 	}
 	return c.GenerateSync(systemPrompt, userPrompt, opts)
@@ -249,6 +247,7 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
 		if attempt > 1 {
 			Logger.Warn("LLM streaming request failed, retrying...", "attempt", attempt, "maxRetries", MaxRetries)
+			onError(fmt.Errorf("LLM streaming request failed on attempt %d: %w", attempt-1, err))
 			time.Sleep(retryDelay)
 		}
 
@@ -279,7 +278,7 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 	}()
 
 	reader := bufio.NewReader(res.Body)
-	var fullResponse string
+	var fullResponse strings.Builder
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
@@ -310,13 +309,13 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 		if len(chunk.Choices) > 0 {
 			content := chunk.Choices[0].Delta.Content
 			if content != "" {
-				fullResponse += content
+				fullResponse.WriteString(content)
 				onChunk(content)
 			}
 		}
 	}
 
-	return fullResponse, nil
+	return fullResponse.String(), nil
 }
 
 func createPayload(model, systemPrompt, userPrompt string, opts *LLMOptions) Payload {

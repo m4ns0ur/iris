@@ -16,15 +16,16 @@ const (
 	stateStreaming
 )
 
+const InputHeight = 2
+
 var Logger = logger.Logger
 
 type model struct {
 	agent        *agent.Agent
 	fullResponse *strings.Builder
-	streaming    bool
 	width        int
 	state        state
-	input        textarea.Model
+	inputText    textarea.Model
 	stream       chan tea.Msg
 	spinner      spinner.Model
 	messages     []message
@@ -33,7 +34,7 @@ type model struct {
 type state int
 
 type message struct {
-	role    string // "user" | "assistant"
+	role    string // "user" | "assistant" | "error"
 	content string
 }
 
@@ -41,40 +42,42 @@ type chunkMsg string
 
 type doneMsg struct{}
 
-type errMsg error
+type errMsg struct {
+	error
+}
+
+type fatalErrMsg struct {
+	error
+}
 
 func (m model) Init() tea.Cmd {
-	return m.input.Focus()
+	return m.inputText.Focus()
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
-		m.input.SetWidth(msg.Width - 2)
+		m.inputText.SetWidth(msg.Width - 2)
 	}
 
 	switch m.state {
-
 	case stateInput:
 		switch msg := msg.(type) {
-
 		case tea.KeyPressMsg:
 			switch msg.String() {
-
 			case "shift+enter":
-				m.input.InsertRune('\n')
-				// auto-resize AFTER update
-				m.input.SetHeight(min(10, strings.Count(m.input.Value(), "\n")+1))
+				m.inputText.InsertRune('\n')
+				m.inputText.SetHeight(m.inputText.Height() + 1)
 
 			case "enter":
-				input := m.input.Value()
+				input := m.inputText.Value()
 				if strings.TrimSpace(input) == "" {
 					return m, nil
 				}
 
-				m.input.SetHeight(2)
-				m.input.Reset()
+				m.inputText.SetHeight(InputHeight)
+				m.inputText.Reset()
 
 				m.messages = append(m.messages, message{
 					role:    "user",
@@ -82,7 +85,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 
 				m.fullResponse.Reset()
-				m.streaming = true
 				m.state = stateStreaming
 
 				return m, tea.Batch(
@@ -97,12 +99,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
+		m.inputText, cmd = m.inputText.Update(msg)
 		return m, cmd
 
 	case stateStreaming:
 		switch msg := msg.(type) {
-
 		case tea.KeyPressMsg:
 			switch msg.String() {
 			case "ctrl+c":
@@ -132,13 +133,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case errMsg:
 			m.messages = append(m.messages, message{
-				role:    "assistant",
-				content: "Error: " + msg.Error(),
+				role:    "error",
+				content: msg.Error(),
+			})
+			return m, waitForStream(m.stream)
+
+		case fatalErrMsg:
+			m.messages = append(m.messages, message{
+				role:    "error",
+				content: msg.Error(),
 			})
 			m.state = stateInput
 			return m, nil
 		}
 	}
+
 	return m, nil
 }
 
@@ -157,60 +166,49 @@ func (m model) View() tea.View {
 			sb.WriteString(msg.content + "\n")
 
 		case "assistant":
-			// Show error message if there was an error
-			if strings.HasPrefix(msg.content, "Error: ") {
-				errorMsg := lipgloss.NewStyle().
+			sb.WriteString(
+				lipgloss.NewStyle().
+					Foreground(lipgloss.Color("86")).
+					Render("Iris> "),
+			)
+			sb.WriteString(
+				lipgloss.NewStyle().
+					Width(m.width).
+					Render(msg.content) + "\n",
+			)
+
+		case "error":
+			sb.WriteString(
+				lipgloss.NewStyle().
 					Foreground(lipgloss.Color("196")).
 					Bold(true).
 					MarginTop(2).
 					MarginBottom(1).
-					Render(msg.content)
-				sb.WriteString(errorMsg + "\n")
-			} else {
-				content := lipgloss.NewStyle().
-					Width(m.width).
-					Render(msg.content)
-
-				sb.WriteString(
-					lipgloss.NewStyle().
-						Foreground(lipgloss.Color("86")).
-						Render("Iris> "),
-				)
-				sb.WriteString(content + "\n")
-			}
+					Render(msg.content) + "\n",
+			)
 		}
 	}
 
 	// Render current streaming response (live)
 	if m.state == stateStreaming {
-		if m.streaming && m.fullResponse.Len() == 0 {
+		if m.fullResponse.Len() == 0 {
 			sb.WriteString("\n" + m.spinner.View() + " Iris is thinking...\n")
 		} else {
-			if strings.HasPrefix(m.fullResponse.String(), "Error: ") {
-				errorMsg := lipgloss.NewStyle().
-					Foreground(lipgloss.Color("196")).
-					Bold(true).
-					MarginTop(2).
-					MarginBottom(1).
-					Render(m.fullResponse.String())
-				sb.WriteString(errorMsg + "\n")
-			} else {
-				content := lipgloss.NewStyle().
-					Width(m.width).
-					Render(m.fullResponse.String())
+			content := lipgloss.NewStyle().
+				Width(m.width).
+				Render(m.fullResponse.String())
 
-				sb.WriteString(
-					lipgloss.NewStyle().
-						Foreground(lipgloss.Color("86")).
-						Render("Iris> "),
-				)
-				sb.WriteString(content + "\n")
-			}
+			sb.WriteString(
+				lipgloss.NewStyle().
+					Foreground(lipgloss.Color("86")).
+					Render("Iris> "),
+			)
+			sb.WriteString(content + "\n")
 		}
 	}
 
-	// Always show input at bottom
-	sb.WriteString("\n" + m.input.View() + "\n")
+	// Always show input text area at bottom
+	sb.WriteString("\n" + m.inputText.View() + "\n")
 
 	return tea.NewView(sb.String())
 }
@@ -222,30 +220,29 @@ func waitForStream(ch chan tea.Msg) tea.Cmd {
 }
 
 func Run(agent *agent.Agent) error {
-	m := initialModel(agent)
-	p := tea.NewProgram(m)
-	_, err := p.Run()
+	model := initialModel(agent)
+	prg := tea.NewProgram(model)
+	_, err := prg.Run()
 	return err
 }
 
 func initialModel(agent *agent.Agent) model {
-	ta := textarea.New()
-	ta.Placeholder = "Ask Iris..."
-	ta.Focus()
-	ta.SetHeight(2)
-	ta.ShowLineNumbers = false
+	text := textarea.New()
+	text.Placeholder = "Ask Iris..."
+	text.Focus()
+	text.SetHeight(InputHeight)
+	text.ShowLineNumbers = false
 
-	sp := spinner.New()
-	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	spin := spinner.New()
+	spin.Spinner = spinner.Meter
+	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	return model{
 		agent:        agent,
 		fullResponse: &strings.Builder{},
-		streaming:    true,
 		state:        stateInput,
-		input:        ta,
+		inputText:    text,
 		stream:       make(chan tea.Msg),
-		spinner:      sp,
+		spinner:      spin,
 	}
 }

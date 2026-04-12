@@ -11,10 +11,10 @@ func runAgenticLoopCommand(agent *agent.Agent, input string, ch chan tea.Msg) te
 		err := agent.Run(input, func(chunk string) {
 			ch <- chunkMsg(chunk)
 		}, func(err error) {
-			ch <- errMsg(err)
+			ch <- errMsg{error: err}
 		})
 		if err != nil {
-			ch <- errMsg(err)
+			ch <- fatalErrMsg{error: err}
 			return nil
 		}
 

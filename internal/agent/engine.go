@@ -40,36 +40,6 @@ func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 	}
 }
 
-// Legacy streaming interface (kept for backward compatibility)
-func (a *Agent) Stream(input string) (<-chan string, <-chan error) {
-	outCh := make(chan string)
-	errCh := make(chan error, 1)
-
-	go func() {
-		defer close(outCh)
-		defer close(errCh)
-
-		opts := &llm.LLMOptions{
-			Temperature:       0.1,
-			TopP:              0.9,
-			RepetitionPenalty: 1.05,
-		}
-
-		_, err := a.client.GenerateStream(prompt.BuildSystemPrompt(), input, opts, func(chunk string) {
-			outCh <- chunk
-		}, func(err error) {
-			errCh <- err
-		})
-
-		if err != nil {
-			errCh <- err
-			return
-		}
-	}()
-
-	return outCh, errCh
-}
-
 // Run executes the agentic loop with streaming support
 func (a *Agent) Run(input string, onChunk func(string), onError func(error)) error {
 	a.reset()
@@ -98,7 +68,10 @@ func (a *Agent) loop(onChunk func(string), onError func(error)) error {
 		Logger.Debug("Agent Loop", "step", a.step, "state", a.state, "currentTask", a.currentTask)
 
 		// Decide next action based on current state and progress
-		a.decide(onChunk, onError)
+		err := a.decide(onChunk, onError)
+		if err != nil {
+			return err
+		}
 
 		switch a.state {
 		case "respond":
