@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
@@ -11,17 +12,18 @@ import (
 	"github.com/m4ns0ur/iris/internal/logger"
 )
 
+const InputHeight = 2
+
 const (
 	stateInput state = iota
 	stateStreaming
 )
 
-const InputHeight = 2
-
 var Logger = logger.Logger
 
 type model struct {
 	agent        *agent.Agent
+	fullReason   *strings.Builder
 	fullResponse *strings.Builder
 	width        int
 	state        state
@@ -34,11 +36,14 @@ type model struct {
 type state int
 
 type message struct {
-	role    string // "user" | "assistant" | "error"
+	role    string // "user" | "assistant" | "reasoning" | "error"
 	content string
 }
 
-type chunkMsg string
+type chunkMsg struct {
+	chunkType string // "reason" | "response"
+	content   string
+}
 
 type doneMsg struct{}
 
@@ -84,6 +89,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					content: input,
 				})
 
+				m.fullReason.Reset()
 				m.fullResponse.Reset()
 				m.state = stateStreaming
 
@@ -116,10 +122,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 
 		case chunkMsg:
-			m.fullResponse.WriteString(string(msg))
+			switch msg.chunkType {
+			case "reason":
+				m.fullReason.WriteString(msg.content)
+			case "response":
+				m.fullResponse.WriteString(msg.content)
+			}
 			return m, waitForStream(m.stream)
 
 		case doneMsg:
+			reason := m.fullReason.String()
+			if reason != "" {
+				m.messages = append(m.messages, message{
+					role:    "reasoning",
+					content: reason,
+				})
+			}
+
 			resp := m.fullResponse.String()
 			m.messages = append(m.messages, message{
 				role:    "assistant",
@@ -177,6 +196,20 @@ func (m model) View() tea.View {
 					Render(msg.content) + "\n",
 			)
 
+		case "reasoning":
+			sb.WriteString(
+				lipgloss.NewStyle().
+					Foreground(lipgloss.Color("86")).
+					Render("Reasoning> "),
+			)
+
+			reasonContent := lipgloss.NewStyle().
+				Width(m.width).
+				Italic(true).
+				Foreground(lipgloss.Color("241")).
+				Render(msg.content)
+			sb.WriteString(reasonContent + "\n")
+
 		case "error":
 			sb.WriteString(
 				lipgloss.NewStyle().
@@ -191,19 +224,38 @@ func (m model) View() tea.View {
 
 	// Render current streaming response (live)
 	if m.state == stateStreaming {
-		if m.fullResponse.Len() == 0 {
-			sb.WriteString("\n" + m.spinner.View() + " Iris is thinking...\n")
-		} else {
-			content := lipgloss.NewStyle().
-				Width(m.width).
-				Render(m.fullResponse.String())
+		if m.fullReason.Len() > 0 {
+			sb.WriteString(
+				lipgloss.NewStyle().
+					Foreground(lipgloss.Color("86")).
+					Render("Reasoning> "),
+			)
 
+			reasonContent := lipgloss.NewStyle().
+				Width(m.width).
+				Italic(true).
+				Foreground(lipgloss.Color("241")).
+				Render(m.fullReason.String())
+			sb.WriteString(reasonContent + "\n")
+		}
+
+		if m.fullResponse.Len() > 0 {
 			sb.WriteString(
 				lipgloss.NewStyle().
 					Foreground(lipgloss.Color("86")).
 					Render("Iris> "),
 			)
+
+			content := lipgloss.NewStyle().
+				Width(m.width).
+				Render(m.fullResponse.String())
 			sb.WriteString(content + "\n")
+		}
+
+		if m.fullReason.Len() == 0 && m.fullResponse.Len() == 0 {
+			sb.WriteString("\n" + m.spinner.View() + " Iris is thinking...\n")
+		} else if m.fullReason.Len() > 0 && m.fullResponse.Len() == 0 {
+			sb.WriteString("\n" + m.spinner.View() + " Iris is reasoning...\n")
 		}
 	}
 
@@ -234,11 +286,15 @@ func initialModel(agent *agent.Agent) model {
 	text.ShowLineNumbers = false
 
 	spin := spinner.New()
-	spin.Spinner = spinner.Meter
+	spin.Spinner = spinner.Spinner{
+		Frames: []string{"⊙", "⊚", "⊛", "⊜", "⦿", "◌", "○", "⦾", "◎", "◴", "◷", "◶", "◵", "◐", "◓", "◑", "◒", "◍", "◉", "●"},
+		FPS:    time.Second / 10,
+	}
 	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	return model{
 		agent:        agent,
+		fullReason:   &strings.Builder{},
 		fullResponse: &strings.Builder{},
 		state:        stateInput,
 		inputText:    text,

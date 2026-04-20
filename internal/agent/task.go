@@ -8,21 +8,14 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/prompt"
 	"github.com/m4ns0ur/iris/internal/tool"
 )
 
-func (a *Agent) runTask(onChunk func(string), onError func(error)) error {
+func (a *Agent) runTask(onChunk func(chunkType string, content string), onError func(error)) error {
 	task := a.goals[a.currentTask]
 
 	Logger.Debug("Running task", "taskIndex", a.currentTask, "task", task)
-
-	opts := &llm.LLMOptions{
-		Temperature:       0.1,
-		TopP:              0.9,
-		RepetitionPenalty: 1.05,
-	}
 
 	// Build prompt with available tools
 	registry := tool.NewDefaultRegistry()
@@ -40,7 +33,7 @@ func (a *Agent) runTask(onChunk func(string), onError func(error)) error {
 		a.currentTask+1, len(a.goals), task)
 
 	// Generate response from LLM with streaming support
-	resp, err := a.client.Generate(fullPrompt, taskPrompt, opts, onChunk, onError)
+	resp, err := a.client.Generate(fullPrompt, taskPrompt, nil, onChunk, onError)
 	if err != nil {
 		return fmt.Errorf("LLM generation failed: %w", err)
 	}
@@ -241,7 +234,7 @@ func (a *Agent) mergeTasks(taskIndices ...int) error {
 	return nil
 }
 
-func (a *Agent) splitTask(taskIndex int, reason string, onChunk func(string), onError func(error)) error {
+func (a *Agent) splitTask(taskIndex int, reason string, onChunk func(chunkType string, content string), onError func(error)) error {
 	if taskIndex < 0 || taskIndex >= len(a.goals) {
 		return fmt.Errorf("invalid task index: %d", taskIndex)
 	}
@@ -250,13 +243,7 @@ func (a *Agent) splitTask(taskIndex int, reason string, onChunk func(string), on
 
 	subtaskPrompt := prompt.BuildSplitTaskPrompt(taskIndex, a.goals[taskIndex])
 
-	opts := &llm.LLMOptions{
-		Temperature:       0.3,
-		TopP:              0.95,
-		RepetitionPenalty: 1.05,
-	}
-
-	resp, err := a.client.Generate(prompt.BuildSystemPrompt(), subtaskPrompt, opts, onChunk, onError)
+	resp, err := a.client.Generate(prompt.BuildSystemPrompt(), subtaskPrompt, nil, onChunk, onError)
 	if err != nil {
 		return fmt.Errorf("failed to generate subtasks: %w", err)
 	}

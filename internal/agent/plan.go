@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/prompt"
 )
 
@@ -22,7 +21,7 @@ type Adjustment struct {
 	Description string `json:"description"`
 }
 
-func (a *Agent) decide(onChunk func(string), onError func(error)) error {
+func (a *Agent) decide(onChunk func(chunkType string, content string), onError func(error)) error {
 	systemPrompt := prompt.BuildSystemPrompt()
 	decisionPrompt := prompt.BuildDecisionPrompt()
 	historyContext := a.buildHistoryContext()
@@ -58,18 +57,12 @@ func (a *Agent) decide(onChunk func(string), onError func(error)) error {
 	return nil
 }
 
-func (a *Agent) generateDecision(systemPrompt, decisionPrompt string, onChunk func(string), onError func(error)) (string, error) {
+func (a *Agent) generateDecision(systemPrompt, decisionPrompt string, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
 	if a.client == nil {
 		return "", fmt.Errorf("LLM client is not initialized")
 	}
 
-	opts := &llm.LLMOptions{
-		Temperature:       0.1,
-		TopP:              0.9,
-		RepetitionPenalty: 1.05,
-	}
-
-	resp, err := a.client.Generate(systemPrompt, decisionPrompt, opts, onChunk, onError)
+	resp, err := a.client.Generate(systemPrompt, decisionPrompt, nil, onChunk, onError)
 	if err != nil {
 		return "", fmt.Errorf("LLM generation failed: %w", err)
 	}
@@ -77,7 +70,7 @@ func (a *Agent) generateDecision(systemPrompt, decisionPrompt string, onChunk fu
 	return resp, nil
 }
 
-func (a *Agent) plan(onChunk func(string), onError func(error)) error {
+func (a *Agent) plan(onChunk func(chunkType string, content string), onError func(error)) error {
 	a.state = "planning"
 
 	systemPrompt := prompt.BuildSystemPrompt()
@@ -97,20 +90,14 @@ func (a *Agent) plan(onChunk func(string), onError func(error)) error {
 	return nil
 }
 
-func (a *Agent) generatePlan(systemPrompt, userPrompt string, onChunk func(string), onError func(error)) (*Plan, error) {
+func (a *Agent) generatePlan(systemPrompt, userPrompt string, onChunk func(chunkType string, content string), onError func(error)) (*Plan, error) {
 	if a.client == nil {
 		return nil, fmt.Errorf("LLM client is not initialized")
 	}
 
 	Logger.Debug("Generating plan", "systemPrompt", systemPrompt, "userPrompt", userPrompt)
 
-	opts := &llm.LLMOptions{
-		Temperature:       0.1,
-		TopP:              0.9,
-		RepetitionPenalty: 1.05,
-	}
-
-	resp, err := a.client.Generate(systemPrompt, userPrompt, opts, onChunk, onError)
+	resp, err := a.client.Generate(systemPrompt, userPrompt, nil, onChunk, onError)
 	if err != nil {
 		return nil, fmt.Errorf("LLM generation failed: %w", err)
 	}
@@ -131,7 +118,7 @@ func (a *Agent) generatePlan(systemPrompt, userPrompt string, onChunk func(strin
 	return plan, nil
 }
 
-func (a *Agent) reflect(onChunk func(string), onError func(error)) error {
+func (a *Agent) reflect(onChunk func(chunkType string, content string), onError func(error)) error {
 	a.state = "reflecting"
 
 	Logger.Debug("Reflection phase")
@@ -149,7 +136,7 @@ func (a *Agent) reflect(onChunk func(string), onError func(error)) error {
 	return nil
 }
 
-func (a *Agent) executePlan(onChunk func(string), onError func(error)) error {
+func (a *Agent) executePlan(onChunk func(chunkType string, content string), onError func(error)) error {
 	if a.currentTask >= len(a.goals) {
 		a.state = "done"
 		return nil
@@ -217,7 +204,7 @@ func (a *Agent) extractGoalsFromResponse(response string) (*Plan, error) {
 	return plan, nil
 }
 
-func (a *Agent) adjustPlan(onChunk func(string), onError func(error)) error {
+func (a *Agent) adjustPlan(onChunk func(chunkType string, content string), onError func(error)) error {
 	if a.client == nil {
 		return fmt.Errorf("LLM client is not initialized")
 	}
@@ -227,13 +214,7 @@ func (a *Agent) adjustPlan(onChunk func(string), onError func(error)) error {
 	reflectionPrompt := prompt.BuildReflectionPrompt(a.currentTask, len(a.goals))
 	historyContext := a.buildHistoryContext()
 
-	opts := &llm.LLMOptions{
-		Temperature:       0.2,
-		TopP:              0.95,
-		RepetitionPenalty: 1.05,
-	}
-
-	resp, err := a.client.Generate(prompt.BuildSystemPrompt(), reflectionPrompt+historyContext, opts, onChunk, onError)
+	resp, err := a.client.Generate(prompt.BuildSystemPrompt(), reflectionPrompt+historyContext, nil, onChunk, onError)
 	if err != nil {
 		return fmt.Errorf("LLM adjustment failed: %w", err)
 	}

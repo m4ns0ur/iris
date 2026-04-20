@@ -41,7 +41,7 @@ func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 }
 
 // Run executes the agentic loop with streaming support
-func (a *Agent) Run(input string, onChunk func(string), onError func(error)) error {
+func (a *Agent) Run(input string, onChunk func(chunkType string, chunk string), onError func(error)) error {
 	a.reset()
 	// Initialize with system prompt and user input
 	a.history = append(a.history, Message{Role: "user", Content: input})
@@ -61,7 +61,7 @@ func (a *Agent) reset() {
 	a.history = []Message{}
 }
 
-func (a *Agent) loop(onChunk func(string), onError func(error)) error {
+func (a *Agent) loop(onChunk func(chunkType string, chunk string), onError func(error)) error {
 	registry := tool.NewDefaultRegistry()
 
 	for a.step < a.maxSteps {

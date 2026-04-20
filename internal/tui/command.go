@@ -8,8 +8,8 @@ import (
 // runAgenticLoopCommand starts the agent's agentic loop and streams responses
 func runAgenticLoopCommand(agent *agent.Agent, input string, ch chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
-		err := agent.Run(input, func(chunk string) {
-			ch <- chunkMsg(chunk)
+		err := agent.Run(input, func(chunkType string, content string) {
+			ch <- chunkMsg{chunkType: chunkType, content: content}
 		}, func(err error) {
 			ch <- errMsg{error: err}
 		})

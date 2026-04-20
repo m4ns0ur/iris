@@ -89,11 +89,14 @@ type Chunk struct {
 }
 
 type ChunkChoice struct {
-	Delta Delta `json:"delta"`
+	FinishReason string `json:"finish_reason,omitempty"`
+	Index        int    `json:"index"`
+	Delta        Delta  `json:"delta"`
 }
 
 type Delta struct {
-	Content string `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Content          string `json:"content"`
 }
 
 type LLMClient struct {
@@ -116,7 +119,7 @@ func NewClient(model string) *LLMClient {
 	}
 }
 
-func (c *LLMClient) Generate(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string), onError func(error)) (string, error) {
+func (c *LLMClient) Generate(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
 	if onChunk != nil || onError != nil {
 		fullResponse, err := c.GenerateStream(systemPrompt, userPrompt, opts, onChunk, onError)
 		return fullResponse, err
@@ -207,7 +210,7 @@ func (c *LLMClient) GenerateSync(systemPrompt string, userPrompt string, opts *L
 	return llmResponse.Choices[0].Message.Content, nil
 }
 
-func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(string), onError func(error)) (string, error) {
+func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
 	payload := createPayload(c.Model, systemPrompt, userPrompt, opts)
 	payload.Stream = true
 
@@ -307,10 +310,15 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 		}
 
 		if len(chunk.Choices) > 0 {
+			reasoningContent := chunk.Choices[0].Delta.ReasoningContent
+			if reasoningContent != "" {
+				fullResponse.WriteString(reasoningContent)
+				onChunk("reason", reasoningContent)
+			}
 			content := chunk.Choices[0].Delta.Content
 			if content != "" {
 				fullResponse.WriteString(content)
-				onChunk(content)
+				onChunk("response", content)
 			}
 		}
 	}
@@ -319,56 +327,44 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 }
 
 func createPayload(model, systemPrompt, userPrompt string, opts *LLMOptions) Payload {
-	options := LLMOptions{
-		Temperature:       0.2,
-		TopP:              0.95,
-		TopK:              40,
-		MinP:              0.05,
-		PresencePenalty:   0.0,
-		RepetitionPenalty: 1.1,
-	}
-	if opts != nil {
-		if opts.Temperature != 0 {
-			options.Temperature = opts.Temperature
-		}
-		if opts.TopP != 0 {
-			options.TopP = opts.TopP
-		}
-		if opts.TopK != 0 {
-			options.TopK = opts.TopK
-		}
-		if opts.MinP != 0 {
-			options.MinP = opts.MinP
-		}
-		if opts.PresencePenalty != 0 {
-			options.PresencePenalty = opts.PresencePenalty
-		}
-		if opts.RepetitionPenalty != 0 {
-			options.RepetitionPenalty = opts.RepetitionPenalty
-		}
-	}
-
 	payload := Payload{
 		Model: model,
 		Messages: []ChatMessage{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		MaxTokens:       32768,
-		Temperature:     options.Temperature,
-		TopP:            options.TopP,
-		PresencePenalty: options.PresencePenalty,
-		ResponseFormat: ResponseFormat{
-			ResponseType: "json_object",
-		},
+		MaxTokens:   32768,
+		Temperature: 0.80,
+		// ResponseFormat: ResponseFormat{
+		// 	ResponseType: "json_object",
+		// },
 		ExtraBody: ExtraBody{
-			TopK:              options.TopK,
-			MinP:              options.MinP,
-			RepetitionPenalty: options.RepetitionPenalty,
 			ChatTemplateKwargs: ChatTemplateKwargs{
-				EnableThinking: false,
+				EnableThinking: true,
 			},
 		},
 	}
+
+	if opts != nil {
+		if opts.Temperature != 0 {
+			payload.Temperature = opts.Temperature
+		}
+		if opts.TopP != 0 {
+			payload.TopP = opts.TopP
+		}
+		if opts.PresencePenalty != 0 {
+			payload.PresencePenalty = opts.PresencePenalty
+		}
+		if opts.TopK != 0 {
+			payload.ExtraBody.TopK = opts.TopK
+		}
+		if opts.MinP != 0 {
+			payload.ExtraBody.MinP = opts.MinP
+		}
+		if opts.RepetitionPenalty != 0 {
+			payload.ExtraBody.RepetitionPenalty = opts.RepetitionPenalty
+		}
+	}
+
 	return payload
 }
