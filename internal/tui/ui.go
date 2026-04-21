@@ -124,8 +124,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case chunkMsg:
 			switch msg.chunkType {
 			case "reason":
+				if m.fullResponse.Len() > 0 {
+					resp := m.fullResponse.String()
+					m.messages = append(m.messages, message{
+						role:    "assistant",
+						content: resp,
+					})
+					m.fullResponse.Reset()
+				}
 				m.fullReason.WriteString(msg.content)
 			case "response":
+				if m.fullReason.Len() > 0 {
+					reason := m.fullReason.String()
+					m.messages = append(m.messages, message{
+						role:    "reasoning",
+						content: reason,
+					})
+					m.fullReason.Reset()
+				}
 				m.fullResponse.WriteString(msg.content)
 			}
 			return m, waitForStream(m.stream)
@@ -162,6 +178,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				role:    "error",
 				content: msg.Error(),
 			})
+
 			m.state = stateInput
 			return m, nil
 		}

@@ -41,7 +41,7 @@ func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 }
 
 // Run executes the agentic loop with streaming support
-func (a *Agent) Run(input string, onChunk func(chunkType string, chunk string), onError func(error)) error {
+func (a *Agent) Run(input string, onChunk func(chunkType string, content string), onError func(error)) error {
 	a.reset()
 	// Initialize with system prompt and user input
 	a.history = append(a.history, Message{Role: "user", Content: input})
@@ -61,7 +61,7 @@ func (a *Agent) reset() {
 	a.history = []Message{}
 }
 
-func (a *Agent) loop(onChunk func(chunkType string, chunk string), onError func(error)) error {
+func (a *Agent) loop(onChunk func(chunkType string, content string), onError func(error)) error {
 	registry := tool.NewDefaultRegistry()
 
 	for a.step < a.maxSteps {
@@ -84,16 +84,19 @@ func (a *Agent) loop(onChunk func(chunkType string, chunk string), onError func(
 			ctx := context.Background()
 			ctx = tool.WithWorkdir(ctx, a.workdir)
 			result, err := tool.ExecuteWithTools(ctx, registry, a.toolName, a.toolArgs)
-			if err != nil {
-				return fmt.Errorf("tool execution failed: %w", err)
+			resultStr := fmt.Sprintf("%v", result)
+			if err == nil {
+				resultStr = formatResult(result)
+			} else {
+				resultStr = fmt.Sprintf("tool execution failed: %v", err)
 			}
 
-			Logger.Debug("Tool result", "toolName", a.toolName, "result", result)
+			Logger.Debug("Tool result", "toolName", a.toolName, "result", resultStr)
 
 			// Add result to conversation history
 			a.history = append(a.history, Message{
 				Role:    "assistant",
-				Content: fmt.Sprintf("Executed tool '%s': %s", a.toolName, formatResult(result)),
+				Content: fmt.Sprintf("Executed tool '%s': %s", a.toolName, resultStr),
 			})
 
 		// case "idle":
