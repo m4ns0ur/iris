@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/logger"
@@ -19,14 +18,12 @@ type Agent struct {
 	step        int
 	goals       []string
 	currentTask int
-	history     []Message
+	history     []llm.ChatMessage
 	maxSteps    int
 	workdir     string
 	toolName    string
 	toolArgs    map[string]any
 }
-
-type Message = prompt.Message
 
 func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 	return &Agent{
@@ -34,7 +31,7 @@ func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 		state:       "idle",
 		goals:       []string{},
 		currentTask: -1,
-		history:     []Message{},
+		history:     []llm.ChatMessage{},
 		maxSteps:    50, // Prevent infinite loops
 		workdir:     workdir,
 	}
@@ -44,7 +41,8 @@ func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 func (a *Agent) Run(input string, onChunk func(chunkType string, content string), onError func(error)) error {
 	a.reset()
 	// Initialize with system prompt and user input
-	a.history = append(a.history, Message{Role: "user", Content: input})
+	a.history = append(a.history, llm.ChatMessage{Role: "system", Content: prompt.BuildSystemPrompt()})
+	a.history = append(a.history, llm.ChatMessage{Role: "user", Content: input})
 	return a.loop(onChunk, onError)
 }
 
@@ -58,7 +56,7 @@ func (a *Agent) reset() {
 	a.step = 0
 	a.goals = []string{}
 	a.currentTask = -1
-	a.history = []Message{}
+	a.history = []llm.ChatMessage{}
 }
 
 func (a *Agent) loop(onChunk func(chunkType string, content string), onError func(error)) error {
@@ -84,19 +82,19 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 			ctx := context.Background()
 			ctx = tool.WithWorkdir(ctx, a.workdir)
 			result, err := tool.ExecuteWithTools(ctx, registry, a.toolName, a.toolArgs)
-			resultStr := fmt.Sprintf("%v", result)
+			var resultStr string
 			if err == nil {
 				resultStr = formatResult(result)
 			} else {
-				resultStr = fmt.Sprintf("tool execution failed: %v", err)
+				resultStr = fmt.Sprintf("failed: %v", err)
 			}
 
 			Logger.Debug("Tool result", "toolName", a.toolName, "result", resultStr)
 
 			// Add result to conversation history
-			a.history = append(a.history, Message{
-				Role:    "assistant",
-				Content: fmt.Sprintf("Executed tool '%s': %s", a.toolName, resultStr),
+			a.history = append(a.history, llm.ChatMessage{
+				Role:    "tool",
+				Content: fmt.Sprintf("'%s': %s", a.toolName, resultStr),
 			})
 
 		// case "idle":
@@ -121,57 +119,25 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 
 		case "done":
 			Logger.Debug("Agent loop completed")
-			return nil
+			break
 
 		default:
 			Logger.Warn("Unknown state", "state", a.state)
 			a.state = "idle"
 		}
 
-		if a.shouldStop() {
-			Logger.Debug("Stopping agent loop")
+		if a.step >= a.maxSteps {
+			Logger.Warn("Max steps reached")
 			break
+		}
+
+		if a.state == "executing" && !a.isTaskComplete() {
+			Logger.Debug("Task not complete, start reflecting")
+			a.state = "reflecting"
 		}
 
 		a.step++
 	}
 
 	return nil
-}
-
-func (a *Agent) shouldStop() bool {
-	if a.state == "done" {
-		Logger.Debug("Agent state is done")
-		return true
-	}
-
-	if a.step >= a.maxSteps {
-		Logger.Warn("Max steps reached")
-		return true
-	}
-
-	if a.state == "executing" && !a.isTaskComplete() {
-		Logger.Debug("Task not complete, start reflecting")
-		a.state = "reflecting"
-	}
-
-	return false
-}
-
-func (a *Agent) buildHistoryContext() string {
-	if len(a.history) < 1 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("\nConversation History:\n")
-
-	// Show last 5 messages or all if fewer than 5
-	start := max(len(a.history)-5, 0)
-
-	for i := start; i < len(a.history); i++ {
-		fmt.Fprintf(&sb, "\n%s: %s", a.history[i].Role, truncateString(a.history[i].Content, 200))
-	}
-
-	return sb.String()
 }

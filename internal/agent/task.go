@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/prompt"
 	"github.com/m4ns0ur/iris/internal/tool"
 )
@@ -17,23 +18,14 @@ func (a *Agent) runTask(onChunk func(chunkType string, content string), onError 
 
 	Logger.Debug("Running task", "taskIndex", a.currentTask, "task", task)
 
-	// Build prompt with available tools
-	registry := tool.NewDefaultRegistry()
-	toolContext := &tool.ToolContext{Registry: registry}
-	systemPrompt := prompt.BuildSystemPrompt() + "\n\n" + toolContext.BuildPrompt()
+	a.history = append(a.history, llm.ChatMessage{
+		Role:    "assistant",
+		Content: fmt.Sprintf("Current Task (%d/%d): %s\n\n", a.currentTask+1, len(a.goals), task),
+	})
 
-	// Include conversation history for context
-	historyContext := a.buildHistoryContext()
-	fullPrompt := systemPrompt + historyContext
+	Logger.Debug("Execution phase", "history", a.history)
 
-	Logger.Debug("Task prompt length", "length", len(fullPrompt))
-
-	taskPrompt := fmt.Sprintf(
-		"Current Task (%d/%d): %s\n\n",
-		a.currentTask+1, len(a.goals), task)
-
-	// Generate response from LLM with streaming support
-	resp, err := a.client.Generate(fullPrompt, taskPrompt, nil, onChunk, onError)
+	resp, err := a.client.Generate(a.history, nil, onChunk, onError)
 	if err != nil {
 		return fmt.Errorf("LLM generation failed: %w", err)
 	}
@@ -52,19 +44,24 @@ func (a *Agent) runTask(onChunk func(chunkType string, content string), onError 
 	Logger.Debug("Executing tool", "toolName", toolCall, "args", args)
 
 	// Execute the tool with context including workdir
+	registry := tool.NewDefaultRegistry()
 	ctx := context.Background()
 	ctx = tool.WithWorkdir(ctx, a.workdir)
+
 	result, err := tool.ExecuteWithTools(ctx, registry, toolCall, args)
-	if err != nil {
-		return fmt.Errorf("tool execution failed: %w", err)
+	var resultStr string
+	if err == nil {
+		resultStr = formatResult(result)
+	} else {
+		resultStr = fmt.Sprintf("failed: %v", err)
 	}
 
-	Logger.Debug("Tool result", "toolName", toolCall, "result", result)
+	Logger.Debug("Tool result", "toolName", toolCall, "result", resultStr)
 
 	// Add result to conversation history
-	a.history = append(a.history, Message{
-		Role:    "assistant",
-		Content: fmt.Sprintf("Executed tool '%s': %s", toolCall, formatResult(result)),
+	a.history = append(a.history, llm.ChatMessage{
+		Role:    "tool",
+		Content: fmt.Sprintf("%s: %s", toolCall, resultStr),
 	})
 
 	return nil
@@ -241,9 +238,12 @@ func (a *Agent) splitTask(taskIndex int, reason string, onChunk func(chunkType s
 
 	Logger.Debug("Splitting task", "index", taskIndex, "reason", reason)
 
-	subtaskPrompt := prompt.BuildSplitTaskPrompt(taskIndex, a.goals[taskIndex])
+	a.history = append(a.history, llm.ChatMessage{
+		Role:    "assistant",
+		Content: prompt.BuildSplitTaskPrompt(taskIndex, a.goals[taskIndex]),
+	})
 
-	resp, err := a.client.Generate(prompt.BuildSystemPrompt(), subtaskPrompt, nil, onChunk, onError)
+	resp, err := a.client.Generate(a.history, nil, onChunk, onError)
 	if err != nil {
 		return fmt.Errorf("failed to generate subtasks: %w", err)
 	}

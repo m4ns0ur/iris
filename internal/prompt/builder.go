@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/tool"
 )
 
@@ -14,11 +15,6 @@ const (
 )
 
 type Phase string
-
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
 
 func BuildSystemPrompt() string {
 	registry := tool.NewDefaultRegistry()
@@ -71,7 +67,7 @@ Review your progress and determine if all tasks are complete or if adjustments a
 }
 
 // BuildPlanningPromptWithContext builds a planning prompt that includes user input history
-func BuildPlanningPromptWithContext(goals []string, history []Message) string {
+func BuildPlanningPromptWithContext(goals []string, history []llm.ChatMessage) string {
 	userInput := ""
 	if len(history) > 0 {
 		for i, msg := range history {

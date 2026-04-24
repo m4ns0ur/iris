@@ -119,16 +119,16 @@ func NewClient(model string) *LLMClient {
 	}
 }
 
-func (c *LLMClient) Generate(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
+func (c *LLMClient) Generate(messages []ChatMessage, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
 	if onChunk != nil || onError != nil {
-		fullResponse, err := c.GenerateStream(systemPrompt, userPrompt, opts, onChunk, onError)
+		fullResponse, err := c.GenerateStream(messages, opts, onChunk, onError)
 		return fullResponse, err
 	}
-	return c.GenerateSync(systemPrompt, userPrompt, opts)
+	return c.GenerateSync(messages, opts)
 }
 
-func (c *LLMClient) GenerateSync(systemPrompt string, userPrompt string, opts *LLMOptions) (string, error) {
-	payload := createPayload(c.Model, systemPrompt, userPrompt, opts)
+func (c *LLMClient) GenerateSync(messages []ChatMessage, opts *LLMOptions) (string, error) {
+	payload := createPayload(c.Model, messages, opts)
 
 	LogLLMPayload(payload)
 
@@ -210,8 +210,8 @@ func (c *LLMClient) GenerateSync(systemPrompt string, userPrompt string, opts *L
 	return llmResponse.Choices[0].Message.Content, nil
 }
 
-func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
-	payload := createPayload(c.Model, systemPrompt, userPrompt, opts)
+func (c *LLMClient) GenerateStream(messages []ChatMessage, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
+	payload := createPayload(c.Model, messages, opts)
 	payload.Stream = true
 
 	LogLLMPayload(payload)
@@ -326,13 +326,10 @@ func (c *LLMClient) GenerateStream(systemPrompt string, userPrompt string, opts 
 	return fullResponse.String(), nil
 }
 
-func createPayload(model, systemPrompt, userPrompt string, opts *LLMOptions) Payload {
+func createPayload(model string, messages []ChatMessage, opts *LLMOptions) Payload {
 	payload := Payload{
-		Model: model,
-		Messages: []ChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userPrompt},
-		},
+		Model:       model,
+		Messages:    messages,
 		MaxTokens:   32768,
 		Temperature: 0.80,
 		// ResponseFormat: ResponseFormat{

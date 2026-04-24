@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/prompt"
 )
 
@@ -22,15 +23,16 @@ type Adjustment struct {
 }
 
 func (a *Agent) decide(onChunk func(chunkType string, content string), onError func(error)) error {
-	systemPrompt := prompt.BuildSystemPrompt()
-	decisionPrompt := prompt.BuildDecisionPrompt()
-	historyContext := a.buildHistoryContext()
+	a.history = append(a.history, llm.ChatMessage{
+		Role:    "assistant",
+		Content: prompt.BuildDecisionPrompt(),
+	})
 
-	Logger.Debug("Decision phase", "systemPrompt", systemPrompt, "decisionPrompt", decisionPrompt, "historyContext", historyContext)
+	Logger.Debug("Decision phase", "history", a.history)
 
-	resp, err := a.generateDecision(systemPrompt, decisionPrompt+historyContext, onChunk, onError)
+	resp, err := a.client.Generate(a.history, nil, onChunk, onError)
 	if err != nil {
-		return err
+		return fmt.Errorf("LLM generation failed: %w", err)
 	}
 
 	decision := extractJSON(resp)
@@ -43,7 +45,7 @@ func (a *Agent) decide(onChunk func(chunkType string, content string), onError f
 			a.state = state
 		}
 		if response, ok := (*decision)["response"].(string); ok {
-			a.history = append(a.history, Message{Role: "assistant", Content: response})
+			a.history = append(a.history, llm.ChatMessage{Role: "assistant", Content: response})
 		}
 		if toolName, ok := (*decision)["tool_name"].(string); ok {
 			a.toolName = toolName
@@ -57,56 +59,26 @@ func (a *Agent) decide(onChunk func(chunkType string, content string), onError f
 	return nil
 }
 
-func (a *Agent) generateDecision(systemPrompt, decisionPrompt string, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
-	if a.client == nil {
-		return "", fmt.Errorf("LLM client is not initialized")
-	}
-
-	resp, err := a.client.Generate(systemPrompt, decisionPrompt, nil, onChunk, onError)
-	if err != nil {
-		return "", fmt.Errorf("LLM generation failed: %w", err)
-	}
-
-	return resp, nil
-}
-
 func (a *Agent) plan(onChunk func(chunkType string, content string), onError func(error)) error {
 	a.state = "planning"
 
-	systemPrompt := prompt.BuildSystemPrompt()
-	userPrompt := prompt.BuildPlanningPromptWithContext(a.goals, a.history)
+	a.history = append(a.history, llm.ChatMessage{
+		Role:    "assistant",
+		Content: prompt.BuildPlanningPromptWithContext(a.goals, a.history),
+	})
 
-	Logger.Debug("Planning phase", "systemPrompt", systemPrompt, "userPrompt", userPrompt)
+	Logger.Debug("Planning phase", "history", a.history)
 
-	plan, err := a.generatePlan(systemPrompt, userPrompt, onChunk, onError)
+	resp, err := a.client.Generate(a.history, nil, onChunk, onError)
 	if err != nil {
-		return err
-	}
-
-	a.goals = plan.Goals
-	a.currentTask = 0
-
-	Logger.Debug("Planning complete", "goalsCount", len(a.goals))
-	return nil
-}
-
-func (a *Agent) generatePlan(systemPrompt, userPrompt string, onChunk func(chunkType string, content string), onError func(error)) (*Plan, error) {
-	if a.client == nil {
-		return nil, fmt.Errorf("LLM client is not initialized")
-	}
-
-	Logger.Debug("Generating plan", "systemPrompt", systemPrompt, "userPrompt", userPrompt)
-
-	resp, err := a.client.Generate(systemPrompt, userPrompt, nil, onChunk, onError)
-	if err != nil {
-		return nil, fmt.Errorf("LLM generation failed: %w", err)
+		return fmt.Errorf("LLM generation failed: %w", err)
 	}
 
 	Logger.Debug("Plan response received", "length", len(resp))
 
 	plan, err := a.extractGoalsFromResponse(resp)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract plan: %w", err)
+		return fmt.Errorf("failed to extract plan: %w", err)
 	}
 
 	Logger.Debug("Plan generated", "goalsCount", len(plan.Goals))
@@ -115,7 +87,11 @@ func (a *Agent) generatePlan(systemPrompt, userPrompt string, onChunk func(chunk
 		Logger.Debug("Goal", "index", i, "goal", goal)
 	}
 
-	return plan, nil
+	a.goals = plan.Goals
+	a.currentTask = 0
+
+	Logger.Debug("Planning complete", "goalsCount", len(a.goals))
+	return nil
 }
 
 func (a *Agent) reflect(onChunk func(chunkType string, content string), onError func(error)) error {
@@ -205,16 +181,14 @@ func (a *Agent) extractGoalsFromResponse(response string) (*Plan, error) {
 }
 
 func (a *Agent) adjustPlan(onChunk func(chunkType string, content string), onError func(error)) error {
-	if a.client == nil {
-		return fmt.Errorf("LLM client is not initialized")
-	}
-
 	Logger.Debug("Adjusting plan", "currentTask", a.currentTask, "totalGoals", len(a.goals))
 
-	reflectionPrompt := prompt.BuildReflectionPrompt(a.currentTask, len(a.goals))
-	historyContext := a.buildHistoryContext()
+	a.history = append(a.history, llm.ChatMessage{
+		Role:    "assistant",
+		Content: prompt.BuildReflectionPrompt(a.currentTask, len(a.goals)),
+	})
 
-	resp, err := a.client.Generate(prompt.BuildSystemPrompt(), reflectionPrompt+historyContext, nil, onChunk, onError)
+	resp, err := a.client.Generate(a.history, nil, onChunk, onError)
 	if err != nil {
 		return fmt.Errorf("LLM adjustment failed: %w", err)
 	}
