@@ -1,10 +1,6 @@
 package prompt
 
 import (
-	"fmt"
-	"strings"
-
-	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/tool"
 )
 
@@ -35,94 +31,14 @@ Guidelines:
 - Be concise and efficient in your actions and responses. Focus on getting things done.
 - Always prioritize execution over planning. Do not get stuck in endless planning loops.
 - Use tools to accomplish tasks, do not just describe what you would do.
-- Continuously reflect on your progress and adjust your approach as needed.`
-}
+- Continuously reflect on your progress and adjust your approach as needed.
 
-func BuildDecisionPrompt() string {
-	return `Check your current state and decide on the next action.
-
-Response format:
+Response Format:
+When responding, always use the following JSON format:
 ` + "```json" + `{
     "state": "respond|tool|done",
 	"response": "Your response to the user if decision is 'respond' or done.",
 	"tool_name": "Only include if decision is 'tool'.",
 	"tool_args": "Only include if decision is 'tool'. This must be a JSON object with the arguments for the tool."
 }` + "```"
-}
-
-func BuildPlanningPrompt(goals []string) string {
-	if len(goals) == 0 {
-		return ""
-	}
-
-	goalList := make([]string, len(goals))
-	for i, goal := range goals {
-		goalList[i] = fmt.Sprintf("%d. %s", i+1, goal)
-	}
-
-	return fmt.Sprintf(`Current Goals:
-%s
-
-Review your progress and determine if all tasks are complete or if adjustments are needed.`, strings.Join(goalList, "\n"))
-}
-
-// BuildPlanningPromptWithContext builds a planning prompt that includes user input history
-func BuildPlanningPromptWithContext(goals []string, history []llm.ChatMessage) string {
-	userInput := ""
-	if len(history) > 0 {
-		for i, msg := range history {
-			if i > 0 {
-				userInput += "\n"
-			}
-			userInput += fmt.Sprintf("%s: %s", msg.Role, msg.Content)
-		}
-		userInput += "\n\n--- Planning Request ---"
-	}
-
-	prompt := BuildPlanningPrompt(goals)
-	if userInput != "" {
-		prompt += userInput
-	}
-	return prompt
-}
-
-func BuildExecutionPrompt(index int, task string) string {
-	return fmt.Sprintf(`You are currently working on Task #%d of your plan:
-
-%s
-
-IMPORTANT: You MUST execute this task using available tools (file_read, file_write, shell, etc.). Do not just describe what you would do - actually DO it!
-
-Use the appropriate tool to accomplish this specific step.`, index+1, task)
-}
-
-func BuildReflectionPrompt(currentTask int, totalTasks int) string {
-	if currentTask >= totalTasks {
-		return "All tasks completed successfully."
-	}
-
-	remaining := totalTasks - currentTask
-	progress := float64(remaining) / float64(totalTasks) * 100
-
-	return fmt.Sprintf(`Current Progress:
-- Task #%d of %d (%.0f%% complete)
-- Remaining tasks: %d
-
-IMPORTANT: After reflecting, you MUST continue executing the remaining tasks. Do not stop until all goals are accomplished.
-
-Evaluate your approach and decide if you should:
-1. Continue to the next task
-2. Split a complex task into smaller steps
-3. Merge related tasks
-4. Skip or reorder tasks if needed
-5. Adjust the plan based on what you've learned so far`, currentTask+1, totalTasks, progress, remaining)
-}
-
-func BuildSplitTaskPrompt(index int, task string) string {
-	return fmt.Sprintf(`Current Task #%d:
-%s
-
-This task is too complex to do in one step. Break it down into smaller, actionable subtasks that you can execute sequentially.
-
-Remember: After splitting, you MUST execute each subtask using tools.`, index+1, task)
 }
