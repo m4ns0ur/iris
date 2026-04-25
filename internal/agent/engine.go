@@ -12,7 +12,10 @@ import (
 	"github.com/m4ns0ur/iris/internal/tool"
 )
 
-var Logger = logger.Logger
+var (
+	Logger      = logger.Logger
+	toolContext *tool.ToolContext
+)
 
 type Agent struct {
 	client      *llm.LLMClient
@@ -28,6 +31,9 @@ type Agent struct {
 }
 
 func NewAgent(client *llm.LLMClient, workdir string) *Agent {
+	registry := tool.NewDefaultRegistry()
+	toolContext = &tool.ToolContext{Registry: registry, Workdir: workdir}
+
 	return &Agent{
 		client:      client,
 		state:       "idle",
@@ -43,7 +49,7 @@ func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 func (a *Agent) Run(input string, onChunk func(chunkType string, content string), onError func(error)) error {
 	a.reset()
 	// Initialize with system prompt and user input
-	a.history = append(a.history, llm.ChatMessage{Role: "system", Content: prompt.BuildSystemPrompt()})
+	a.history = append(a.history, llm.ChatMessage{Role: "system", Content: prompt.BuildSystemPrompt(toolContext)})
 	a.history = append(a.history, llm.ChatMessage{Role: "user", Content: input})
 	return a.loop(onChunk, onError)
 }
@@ -122,7 +128,8 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 func (a *Agent) next(onChunk func(chunkType string, content string), onError func(error)) error {
 	Logger.Debug("Decision phase", "history", a.history)
 
-	resp, err := a.client.Generate(a.history, nil, onChunk, onError)
+	tools := toolContext.Registry.List()
+	resp, err := a.client.Generate(a.history, tools, nil, onChunk, onError)
 	if err != nil {
 		return fmt.Errorf("LLM generation failed: %w", err)
 	}

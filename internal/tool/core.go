@@ -2,17 +2,19 @@
 //
 // The tool package includes:
 //   - ToolRegistry: A central registry to manage and retrieve tools
-//   - Built-in tools: file_read, file_write, file_list, shell, search, grep
+//   - Built-in tools: read, edit, write, shell
 //   - Context helpers: For passing tool information in prompts
 package tool
 
 import (
 	"context"
+
+	"github.com/m4ns0ur/iris/internal/llm"
 )
 
 // ToolRegistry manages and provides access to available tools.
 type ToolRegistry struct {
-	tasks map[string]Tool
+	tools map[string]Tool
 }
 
 // Tool represents an executable function that can be called by the agent.
@@ -23,42 +25,20 @@ type Tool interface {
 	// Description returns a human-readable description of what the tool does.
 	Description() string
 
+	// FullDescription returns a detailed description of the tool, including usage instructions.
+	FullDescription() string
+
 	// Parameters describes the input schema for this tool (optional).
-	Parameters() map[string]any
+	Parameters() llm.Parameters
 
 	// Execute runs the tool with the given arguments and context.
 	Execute(ctx context.Context, args map[string]any) (map[string]any, error)
 }
 
-// ToolDefinition holds metadata about a tool for LLM prompts.
-type ToolDefinition struct {
-	Name        string               `json:"name"`
-	Description string               `json:"description"`
-	Parameters  map[string]any       `json:"parameters,omitempty"`
-	Schema      *ToolParameterSchema `json:"schema,omitempty"`
-}
-
-// ToolParameterSchema defines the parameter schema for a tool.
-type ToolParameterSchema struct {
-	Type        string            `json:"type"`
-	Properties  map[string]*Param `json:"properties,omitempty"`
-	Required    []string          `json:"required,omitempty"`
-	Description string            `json:"description,omitempty"`
-}
-
-// Param defines a single parameter in the tool schema.
-type Param struct {
-	Type        string   `json:"type"`
-	Description string   `json:"description"`
-	Required    bool     `json:"required"`
-	Default     any      `json:"default,omitempty"`
-	Enum        []string `json:"enum,omitempty"`
-}
-
 // NewToolRegistry creates a new empty tool registry.
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{
-		tasks: make(map[string]Tool),
+		tools: make(map[string]Tool),
 	}
 }
 
@@ -67,10 +47,9 @@ func NewDefaultRegistry() *ToolRegistry {
 	reg := NewToolRegistry()
 
 	// Register built-in tools
-	reg.Register("file_read", NewFileReadTool())
-	reg.Register("file_write", NewFileWriteTool())
-	reg.Register("search", NewSearchTool())
-	reg.Register("grep", NewGrepTool())
+	reg.Register("read", NewFileReadTool())
+	reg.Register("edit", NewFileEditTool())
+	reg.Register("write", NewFileWriteTool())
 	reg.Register("shell", NewShellTool())
 
 	return reg
@@ -78,64 +57,31 @@ func NewDefaultRegistry() *ToolRegistry {
 
 // Register adds a tool to the registry. Panics if name already exists.
 func (r *ToolRegistry) Register(name string, t Tool) {
-	if r.tasks[name] != nil {
+	if r.tools[name] != nil {
 		panic("tool already registered: " + name)
 	}
-	r.tasks[name] = t
+	r.tools[name] = t
 }
 
 // Get retrieves a tool by name. Returns nil if not found.
 func (r *ToolRegistry) Get(name string) Tool {
-	return r.tasks[name]
-}
-
-// GetAll returns all registered tools as definitions.
-func (r *ToolRegistry) GetAll() []ToolDefinition {
-	defs := make([]ToolDefinition, 0, len(r.tasks))
-	for name, tool := range r.tasks {
-		defs = append(defs, ToolDefinition{
-			Name:        name,
-			Description: tool.Description(),
-			Parameters:  tool.Parameters(),
-		})
-	}
-	return defs
-}
-
-// Has checks if a tool with the given name exists.
-func (r *ToolRegistry) Has(name string) bool {
-	return r.tasks[name] != nil
+	return r.tools[name]
 }
 
 // List returns names of all registered tools.
-func (r *ToolRegistry) List() []string {
-	names := make([]string, 0, len(r.tasks))
-	for name := range r.tasks {
-		names = append(names, name)
+func (r *ToolRegistry) List() []llm.Tool {
+	tools := make([]llm.Tool, 0, len(r.tools))
+	for name, tool := range r.tools {
+		tools = append(tools, llm.Tool{
+			Type: "function",
+			Function: llm.Function{
+				Name:        name,
+				Description: tool.FullDescription(),
+				Parameters:  tool.Parameters(),
+			},
+		})
 	}
-	return names
-}
-
-// Call executes a tool and returns the result.
-func (r *ToolRegistry) Call(name string, args map[string]any) (map[string]any, error) {
-	tool := r.Get(name)
-	if tool == nil {
-		return nil, ErrToolNotFound
-	}
-
-	ctx := context.Background()
-	return tool.Execute(ctx, args)
-}
-
-// CallWithContext executes a tool with the given context.
-func (r *ToolRegistry) CallWithContext(ctx context.Context, name string, args map[string]any) (map[string]any, error) {
-	tool := r.Get(name)
-	if tool == nil {
-		return nil, ErrToolNotFound
-	}
-
-	ctx = WithCurrentTool(ctx, name, args)
-	return tool.Execute(ctx, args)
+	return tools
 }
 
 // ExecuteWithTools is a helper to execute a tool with proper context.
@@ -147,20 +93,4 @@ func ExecuteWithTools(ctx context.Context, registry *ToolRegistry, name string, 
 
 	ctx = WithCurrentTool(ctx, name, args)
 	return tool.Execute(ctx, args)
-}
-
-// ExecuteWithToolsAndContext is a helper to execute a tool with context and proper error handling.
-func ExecuteWithToolsAndContext(ctx context.Context, registry *ToolRegistry, name string, args map[string]any) (map[string]any, error) {
-	tool := registry.Get(name)
-	if tool == nil {
-		return nil, ErrToolNotFound
-	}
-
-	ctx = WithCurrentTool(ctx, name, args)
-	result, err := tool.Execute(ctx, args)
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
 }

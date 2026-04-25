@@ -22,6 +22,7 @@ type Payload struct {
 	Model           string         `json:"model"`
 	Stream          bool           `json:"stream"`
 	Messages        []ChatMessage  `json:"messages"`
+	Tools           []Tool         `json:"tools"`
 	MaxTokens       int            `json:"max_tokens"`
 	Temperature     float64        `json:"temperature"`
 	TopP            float64        `json:"top_p"`
@@ -33,6 +34,29 @@ type Payload struct {
 type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+type Tool struct {
+	Type     string   `json:"type"`
+	Function Function `json:"function"`
+}
+
+type Function struct {
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Parameters  Parameters `json:"parameters"`
+}
+
+type Parameters struct {
+	Type       string              `json:"type"`
+	Required   []string            `json:"required"`
+	Properties map[string]Property `json:"properties"`
+}
+
+type Property struct {
+	Type        string      `json:"type"`
+	Description string      `json:"description"`
+	Items       *Parameters `json:"items,omitempty"` // For array types
 }
 
 type ResponseFormat struct {
@@ -119,16 +143,16 @@ func NewClient(model string) *LLMClient {
 	}
 }
 
-func (c *LLMClient) Generate(messages []ChatMessage, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
+func (c *LLMClient) Generate(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
 	if onChunk != nil || onError != nil {
-		fullResponse, err := c.GenerateStream(messages, opts, onChunk, onError)
+		fullResponse, err := c.GenerateStream(messages, tools, opts, onChunk, onError)
 		return fullResponse, err
 	}
-	return c.GenerateSync(messages, opts)
+	return c.GenerateSync(messages, tools, opts)
 }
 
-func (c *LLMClient) GenerateSync(messages []ChatMessage, opts *LLMOptions) (string, error) {
-	payload := createPayload(c.Model, messages, opts)
+func (c *LLMClient) GenerateSync(messages []ChatMessage, tools []Tool, opts *LLMOptions) (string, error) {
+	payload := createPayload(c.Model, messages, tools, opts)
 
 	LogLLMPayload(payload)
 
@@ -210,8 +234,8 @@ func (c *LLMClient) GenerateSync(messages []ChatMessage, opts *LLMOptions) (stri
 	return llmResponse.Choices[0].Message.Content, nil
 }
 
-func (c *LLMClient) GenerateStream(messages []ChatMessage, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
-	payload := createPayload(c.Model, messages, opts)
+func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
+	payload := createPayload(c.Model, messages, tools, opts)
 	payload.Stream = true
 
 	LogLLMPayload(payload)
@@ -326,10 +350,11 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, opts *LLMOptions, onC
 	return fullResponse.String(), nil
 }
 
-func createPayload(model string, messages []ChatMessage, opts *LLMOptions) Payload {
+func createPayload(model string, messages []ChatMessage, tools []Tool, opts *LLMOptions) Payload {
 	payload := Payload{
 		Model:       model,
 		Messages:    messages,
+		Tools:       tools,
 		MaxTokens:   32768,
 		Temperature: 0.80,
 		// ResponseFormat: ResponseFormat{

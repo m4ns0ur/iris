@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/m4ns0ur/iris/internal/llm"
 )
 
 // ShellTool executes shell commands.
@@ -19,15 +21,22 @@ func (t *ShellTool) Name() string {
 }
 
 func (t *ShellTool) Description() string {
-	return "Execute a shell command and return its output. Use this for running system commands, scripts, etc."
+	return "Execute a shell command"
 }
 
-func (t *ShellTool) Parameters() map[string]any {
-	return map[string]any{
-		"command": map[string]any{
-			"type":        "string",
-			"description": "The shell command to execute",
-			"required":    true,
+func (t *ShellTool) FullDescription() string {
+	return "Execute a shell command in the current working directory and return its output. Output is truncated to last 1000 lines but the full output is saved to a temp file."
+}
+
+func (t *ShellTool) Parameters() llm.Parameters {
+	return llm.Parameters{
+		Type:     "object",
+		Required: []string{"command"},
+		Properties: map[string]llm.Property{
+			"command": {
+				Type:        "string",
+				Description: "The shell command to execute",
+			},
 		},
 	}
 }

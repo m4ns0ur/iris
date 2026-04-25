@@ -1,44 +1,39 @@
 package prompt
 
 import (
+	"runtime"
+	"time"
+
 	"github.com/m4ns0ur/iris/internal/tool"
 )
 
-const (
-	Planning   Phase = "planning"
-	Executing  Phase = "executing"
-	Reflecting Phase = "reflecting"
-)
+func BuildSystemPrompt(toolContext *tool.ToolContext) string {
+	toolPrompt := toolContext.BuildPrompt()
 
-type Phase string
-
-func BuildSystemPrompt() string {
-	registry := tool.NewDefaultRegistry()
-	toolContext := &tool.ToolContext{Registry: registry}
-	toolPrompt := toolContext.BuildJSONPrompt()
-
-	return `You are Iris, an AI agent capable of planning and executing multi-step tasks.
-
-Role:
-- Analyze user requests and break them down into actionable steps
-- Execute tasks using available tools
-- Reflect on progress and adjust plans as needed to achieve goals
+	return `You are Iris, an autonomous AI agent, expert in coding and software control. Your goal is to help the user by analyzing the requests, breaking them down into smaller steps if necessary, and executing tasks using the available tools.
 
 Tools:
 ` + toolPrompt + `
 
 Guidelines:
 - Be concise and efficient in your actions and responses. Focus on getting things done.
-- Always prioritize execution over planning. Do not get stuck in endless planning loops.
 - Use tools to accomplish tasks, do not just describe what you would do.
-- Continuously reflect on your progress and adjust your approach as needed.
+- Use read, write and edit tools for file operations. Use shell tool for the rest of file operations.
+- Use one edit tool call with multiple edits instead of multiple edit calls.
+- Keep edits as small as possible.
+- Use write tool to create a file or complete rewrite.
 
-Response Format:
-When responding, always use the following JSON format:
-` + "```json" + `{
-    "state": "respond|tool|done",
-	"response": "Your response to the user if decision is 'respond' or done.",
-	"tool_name": "Only include if decision is 'tool'.",
-	"tool_args": "Only include if decision is 'tool'. This must be a JSON object with the arguments for the tool."
-}` + "```"
+OS: ` + GetSimpleOS() + `
+Date: ` + time.Now().Local().Format("2006-01-02") + `
+Working Directory: ` + toolContext.Workdir + `
+`
+}
+
+func GetSimpleOS() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "mac"
+	default:
+		return runtime.GOOS
+	}
 }

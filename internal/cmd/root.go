@@ -38,6 +38,20 @@ func Execute() {
 func startTui(cmd *cobra.Command, args []string) {
 	logger.SetDebug(debug)
 
+	if workdir != "" {
+		if _, err := os.Stat(workdir); os.IsNotExist(err) {
+			Logger.Error("Specified working directory does not exist", "workdir", workdir)
+			os.Exit(1)
+		}
+	} else {
+		cwd, err := os.Getwd()
+		if err != nil {
+			Logger.Error("Failed to get current working directory", "error", err)
+			os.Exit(1)
+		}
+		workdir = cwd
+	}
+
 	client := llm.NewClient("")
 	agent := agent.NewAgent(client, workdir)
 
