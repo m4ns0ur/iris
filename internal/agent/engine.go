@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/logger"
@@ -73,6 +72,8 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 	for a.step < a.maxSteps {
 		Logger.Debug("Agent Loop", "step", a.step, "state", a.state, "currentTask", a.currentTask)
 
+		onChunk("next", fmt.Sprintf("%d", a.step))
+
 		// Decide next action based on current state and progress
 		err := a.next(onChunk, onError)
 		if err != nil {
@@ -129,69 +130,37 @@ func (a *Agent) next(onChunk func(chunkType string, content string), onError fun
 	Logger.Debug("Decision phase", "history", a.history)
 
 	tools := toolContext.Registry.List()
-	resp, err := a.client.Generate(a.history, tools, nil, onChunk, onError)
+	chunk, err := a.client.Generate(a.history, tools, nil, onChunk, onError)
 	if err != nil {
 		return fmt.Errorf("LLM generation failed: %w", err)
 	}
 
-	decision := extractJSON(resp)
+	Logger.Debug("next: LLM response received", "response", chunk)
 
-	Logger.Debug("Decision received", "decision", decision)
-
-	if decision != nil {
-		if state, ok := (*decision)["state"].(string); ok {
-			Logger.Debug("State updated based on decision", "newState", a.state)
-			a.state = state
-		}
-		if response, ok := (*decision)["response"].(string); ok {
-			a.history = append(a.history, llm.ChatMessage{Role: "assistant", Content: response})
-		}
-		if toolName, ok := (*decision)["tool_name"].(string); ok {
-			a.toolName = toolName
-			if toolArgs, ok := (*decision)["tool_args"].(map[string]any); ok {
-				a.toolArgs = toolArgs
+	if chunk.Choices[0].FinishReason == "stop" {
+		a.state = "done"
+		a.history = append(a.history, llm.ChatMessage{Role: "assistant", Content: chunk.Choices[0].Delta.Content})
+		return nil
+	}
+	if chunk.Choices[0].Delta.ToolCalls != nil {
+		function := chunk.Choices[0].Delta.ToolCalls[0]
+		Logger.Debug("Tool call decision", "function", function)
+		a.state = "tool"
+		a.toolName = function.Function.Name
+		if function.Function.Arguments != "" {
+			Logger.Debug("Function arguments", "arguments", function.Function.Arguments)
+			var argsMap map[string]any
+			err := json.Unmarshal([]byte(function.Function.Arguments), &argsMap)
+			if err != nil {
+				Logger.Error("Failed to parse tool arguments, using raw string", "error", err)
+				// TODO: handle error
 			}
-			Logger.Debug("Tool execution decision", "toolName", a.toolName, "toolArgs", a.toolArgs)
+			a.toolArgs = argsMap
 		}
+		Logger.Debug("Tool execution decision", "toolName", a.toolName, "toolArgs", a.toolArgs)
 	}
 
 	return nil
-}
-
-func extractJSON(text string) *map[string]any {
-	text = strings.TrimSpace(text)
-
-	start := strings.Index(text, "{")
-	if start == -1 {
-		return nil
-	}
-
-	depth := 0
-	end := -1
-	for i := start; i < len(text); i++ {
-		if text[i] == '{' {
-			depth++
-		} else if text[i] == '}' {
-			depth--
-			if depth == 0 {
-				end = i
-				break
-			}
-		}
-	}
-
-	if end == -1 {
-		return nil
-	}
-
-	jsonStr := text[start : end+1]
-	var result map[string]any
-	err := json.Unmarshal([]byte(jsonStr), &result)
-	if err != nil {
-		return nil
-	}
-
-	return &result
 }
 
 func formatResult(result map[string]any) string {

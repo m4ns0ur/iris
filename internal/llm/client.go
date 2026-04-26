@@ -119,8 +119,20 @@ type ChunkChoice struct {
 }
 
 type Delta struct {
-	ReasoningContent string `json:"reasoning_content,omitempty"`
-	Content          string `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	Content          string     `json:"content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+}
+
+type ToolCall struct {
+	Id       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function FunctionCall `json:"function"`
+}
+
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type LLMClient struct {
@@ -143,12 +155,13 @@ func NewClient(model string) *LLMClient {
 	}
 }
 
-func (c *LLMClient) Generate(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
+func (c *LLMClient) Generate(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
 	if onChunk != nil || onError != nil {
 		fullResponse, err := c.GenerateStream(messages, tools, opts, onChunk, onError)
 		return fullResponse, err
 	}
-	return c.GenerateSync(messages, tools, opts)
+	// return c.GenerateSync(messages, tools, opts)
+	return Chunk{}, fmt.Errorf("synchronous generation is not supported, onChunk or onError callback must be provided")
 }
 
 func (c *LLMClient) GenerateSync(messages []ChatMessage, tools []Tool, opts *LLMOptions) (string, error) {
@@ -231,10 +244,11 @@ func (c *LLMClient) GenerateSync(messages []ChatMessage, tools []Tool, opts *LLM
 
 	LogLLMResponse(llmResponse)
 
+	// TODO: handle reasoning content and tool calls in the response
 	return llmResponse.Choices[0].Message.Content, nil
 }
 
-func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (string, error) {
+func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
 	payload := createPayload(c.Model, messages, tools, opts)
 	payload.Stream = true
 
@@ -294,7 +308,7 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 	}
 
 	if res == nil || err != nil {
-		return "", fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
+		return Chunk{}, fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
 	}
 
 	// Ensure response body is closed when we're done
@@ -306,13 +320,25 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 
 	reader := bufio.NewReader(res.Body)
 	var fullResponse strings.Builder
+	var fullReasoning strings.Builder
+	var fullArguments strings.Builder
+	var toolCalls []ToolCall
+
+	finalChunk := Chunk{
+		Choices: []ChunkChoice{
+			{
+				Delta: Delta{},
+			},
+		},
+	}
+
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			return "", fmt.Errorf("error reading stream: %w", err)
+			return Chunk{}, fmt.Errorf("error reading stream: %w", err)
 		}
 
 		// OpenAI SSE lines start with "data: "
@@ -323,31 +349,60 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 
 		data := bytes.TrimPrefix(line, []byte("data: "))
 
+		Logger.Debug("Received stream chunk", "chunk", string(data))
+
 		// Check for the [DONE] signal
 		if string(data) == "[DONE]" {
+			// Logger.Debug("Received end of stream signal")
 			break
 		}
 
 		var chunk Chunk
 		if err := json.Unmarshal(data, &chunk); err != nil {
-			continue // Or handle error
+			Logger.Error("Failed to parse chunk as JSON", "error", err, "chunk", string(data))
+			continue // TODO: Or handle error
 		}
 
 		if len(chunk.Choices) > 0 {
+			finalChunk.Choices[0].FinishReason = chunk.Choices[0].FinishReason
+
 			reasoningContent := chunk.Choices[0].Delta.ReasoningContent
 			if reasoningContent != "" {
-				fullResponse.WriteString(reasoningContent)
+				// Logger.Debug("Received reasoning content in stream chunk", "reasoningContent", reasoningContent)
+				fullReasoning.WriteString(reasoningContent)
 				onChunk("reason", reasoningContent)
 			}
+
+			if len(chunk.Choices[0].Delta.ToolCalls) > 0 {
+				if toolCalls == nil {
+					toolCalls = chunk.Choices[0].Delta.ToolCalls
+				}
+				fullArguments.WriteString(chunk.Choices[0].Delta.ToolCalls[0].Function.Arguments)
+				toolCalls[0].Function.Arguments = fullArguments.String()
+				// Logger.Debug("Received tool call in stream chunk", "toolCalls", toolCalls)
+				onChunk("tool", chunk.Choices[0].Delta.ToolCalls[0].Function.Arguments)
+			}
+
 			content := chunk.Choices[0].Delta.Content
 			if content != "" {
+				// Logger.Debug("Received content in stream chunk", "content", content)
 				fullResponse.WriteString(content)
 				onChunk("response", content)
 			}
 		}
 	}
 
-	return fullResponse.String(), nil
+	finalChunk.Choices[0].Delta.Content = fullResponse.String()
+	finalChunk.Choices[0].Delta.ReasoningContent = fullReasoning.String()
+
+	if len(toolCalls) > 0 {
+		// Logger.Debug("Finalizing tool call with full arguments", "fullArguments", fullArguments.String())
+		finalChunk.Choices[0].Delta.ToolCalls = toolCalls
+	}
+
+	// Logger.Debug("Full response from stream", "response", fullResponse.String())
+
+	return finalChunk, nil
 }
 
 func createPayload(model string, messages []ChatMessage, tools []Tool, opts *LLMOptions) Payload {

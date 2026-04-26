@@ -45,7 +45,7 @@ func (t *FileReadTool) Parameters() llm.Parameters {
 			},
 			"max": {
 				Type:        "number",
-				Description: "Maximum number of bytes to read (for large files)",
+				Description: "Maximum number of lines to read",
 			},
 		},
 	}

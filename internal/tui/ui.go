@@ -24,6 +24,7 @@ var Logger = logger.Logger
 type model struct {
 	agent        *agent.Agent
 	fullReason   *strings.Builder
+	fullToolCall *strings.Builder
 	fullResponse *strings.Builder
 	width        int
 	state        state
@@ -123,25 +124,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case chunkMsg:
 			switch msg.chunkType {
-			case "reason":
-				if m.fullResponse.Len() > 0 {
-					resp := m.fullResponse.String()
-					m.messages = append(m.messages, message{
-						role:    "assistant",
-						content: resp,
-					})
-					m.fullResponse.Reset()
-				}
-				m.fullReason.WriteString(msg.content)
-			case "response":
+			case "next":
 				if m.fullReason.Len() > 0 {
-					reason := m.fullReason.String()
 					m.messages = append(m.messages, message{
 						role:    "reasoning",
-						content: reason,
+						content: m.fullReason.String(),
 					})
 					m.fullReason.Reset()
 				}
+				if m.fullToolCall.Len() > 0 {
+					m.messages = append(m.messages, message{
+						role:    "tool",
+						content: m.fullToolCall.String(),
+					})
+					m.fullToolCall.Reset()
+				}
+				if m.fullResponse.Len() > 0 {
+					m.messages = append(m.messages, message{
+						role:    "assistant",
+						content: m.fullResponse.String(),
+					})
+					m.fullResponse.Reset()
+				}
+			case "reason":
+				m.fullReason.WriteString(msg.content)
+			case "tool":
+				m.fullToolCall.WriteString(msg.content)
+			case "response":
 				m.fullResponse.WriteString(msg.content)
 			}
 			return m, waitForStream(m.stream)
@@ -227,6 +236,20 @@ func (m model) View() tea.View {
 				Render(msg.content)
 			sb.WriteString(reasonContent + "\n")
 
+		case "tool":
+			sb.WriteString(
+				lipgloss.NewStyle().
+					Foreground(lipgloss.Color("86")).
+					Render("Tool> "),
+			)
+
+			toolContent := lipgloss.NewStyle().
+				Width(m.width).
+				Italic(true).
+				Foreground(lipgloss.Color("241")).
+				Render(msg.content)
+			sb.WriteString(toolContent + "\n")
+
 		case "error":
 			sb.WriteString(
 				lipgloss.NewStyle().
@@ -256,6 +279,21 @@ func (m model) View() tea.View {
 			sb.WriteString(reasonContent + "\n")
 		}
 
+		if m.fullToolCall.Len() > 0 {
+			sb.WriteString(
+				lipgloss.NewStyle().
+					Foreground(lipgloss.Color("86")).
+					Render("Tool> "),
+			)
+
+			toolContent := lipgloss.NewStyle().
+				Width(m.width).
+				Italic(true).
+				Foreground(lipgloss.Color("241")).
+				Render(m.fullToolCall.String())
+			sb.WriteString(toolContent + "\n")
+		}
+
 		if m.fullResponse.Len() > 0 {
 			sb.WriteString(
 				lipgloss.NewStyle().
@@ -269,10 +307,12 @@ func (m model) View() tea.View {
 			sb.WriteString(content + "\n")
 		}
 
-		if m.fullReason.Len() == 0 && m.fullResponse.Len() == 0 {
+		if m.fullReason.Len() == 0 && m.fullResponse.Len() == 0 && m.fullToolCall.Len() == 0 {
 			sb.WriteString("\n" + m.spinner.View() + " Iris is thinking...\n")
 		} else if m.fullReason.Len() > 0 && m.fullResponse.Len() == 0 {
 			sb.WriteString("\n" + m.spinner.View() + " Iris is reasoning...\n")
+		} else if m.fullToolCall.Len() > 0 && m.fullResponse.Len() == 0 {
+			sb.WriteString("\n" + m.spinner.View() + " Iris is calling a tool...\n")
 		}
 	}
 
@@ -312,6 +352,7 @@ func initialModel(agent *agent.Agent) model {
 	return model{
 		agent:        agent,
 		fullReason:   &strings.Builder{},
+		fullToolCall: &strings.Builder{},
 		fullResponse: &strings.Builder{},
 		state:        stateInput,
 		inputText:    text,
