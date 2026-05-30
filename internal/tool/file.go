@@ -27,7 +27,7 @@ func (t *FileReadTool) Description() string {
 }
 
 func (t *FileReadTool) FullDescription() string {
-	return "Read the contents of a file. Output is truncated to 1000 lines. You can read a large file in parts by specifying 'start' and 'max' parameters."
+	return "Read a file. Output is limited to 1000 lines or 20 KB; use start/max to read parts."
 }
 
 func (t *FileReadTool) Parameters() llm.Parameters {
@@ -37,15 +37,15 @@ func (t *FileReadTool) Parameters() llm.Parameters {
 		Properties: map[string]llm.Property{
 			"path": {
 				Type:        "string",
-				Description: "Path to the file to read",
+				Description: "File path",
 			},
 			"start": {
 				Type:        "number",
-				Description: "Start line number for partial reads (0-indexed)",
+				Description: "Starting line (1-based)",
 			},
 			"max": {
 				Type:        "number",
-				Description: "Maximum number of lines to read",
+				Description: "Maximum lines to read",
 			},
 		},
 	}
@@ -57,20 +57,19 @@ func (t *FileReadTool) Execute(ctx context.Context, args map[string]any) (map[st
 		return nil, fmt.Errorf("missing required parameter: path")
 	}
 
-	// Resolve path relative to workdir if provided in context
-	resolvedPath, err := t.resolvePath(ctx, path)
+	resolvedPath, err := resolvePath(ctx, path)
 	if err != nil {
 		return nil, err
 	}
 
-	start := 0
-	if s, ok := args["start"].(float64); ok && s >= 0 {
+	start := 1
+	if s, ok := args["start"].(float64); ok && s > 0 {
 		start = int(s)
 	}
 
-	max := 1000 * 1024 // 1000 KB
+	maxBytes := 20 * 1024
 	if m, ok := args["max"].(float64); ok && m > 0 {
-		max = int(m)
+		maxBytes = int(m)
 	}
 
 	fi, err := os.Stat(resolvedPath)
@@ -88,48 +87,34 @@ func (t *FileReadTool) Execute(ctx context.Context, args map[string]any) (map[st
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	var contentBuilder strings.Builder
-	lineNum := 0
-	bytesRead := 0
+
+	var b strings.Builder
+	line := 1
+	read := 0
+
 	for scanner.Scan() {
-		if lineNum >= start {
-			line := scanner.Text()
-			lineBytes := len(line) + 1 // +1 for newline
-			if bytesRead+lineBytes > max {
+		if line >= start {
+			txt := scanner.Text()
+			n := len(txt) + 1
+
+			if read+n > maxBytes {
 				break
 			}
-			contentBuilder.WriteString(line + "\n")
-			bytesRead += lineBytes
+
+			b.WriteString(txt)
+			b.WriteByte('\n')
+			read += n
 		}
-		lineNum++
+		line++
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading file %q: %w", resolvedPath, err)
+		return nil, fmt.Errorf("read error %q: %w", resolvedPath, err)
 	}
 
 	return map[string]any{
-		"content": contentBuilder.String(),
+		"content": b.String(),
 	}, nil
-}
-
-// resolvePath resolves a path relative to workdir if provided in context, otherwise uses current working directory.
-func (t *FileReadTool) resolvePath(ctx context.Context, path string) (string, error) {
-	workdir, hasWorkdir := FromWorkdir(ctx)
-
-	// If no workdir is set, use the current working directory
-	if !hasWorkdir || workdir == "" {
-		workdir = "."
-	}
-
-	// If path is absolute, use it directly
-	if filepath.IsAbs(path) {
-		return path, nil
-	}
-
-	// Resolve relative to workdir (or current directory if not set)
-	resolved := filepath.Join(workdir, path)
-	return resolved, nil
 }
 
 // FileWriteTool writes content to a file.
@@ -145,11 +130,11 @@ func (t *FileWriteTool) Name() string {
 }
 
 func (t *FileWriteTool) Description() string {
-	return "Write to a file"
+	return "Write a file"
 }
 
 func (t *FileWriteTool) FullDescription() string {
-	return "Write content to a file. If the file already exists, it will be overwritten."
+	return "Write content to a file. Creates parent directories as needed. Overwrites existing files."
 }
 
 func (t *FileWriteTool) Parameters() llm.Parameters {
@@ -159,11 +144,11 @@ func (t *FileWriteTool) Parameters() llm.Parameters {
 		Properties: map[string]llm.Property{
 			"path": {
 				Type:        "string",
-				Description: "Relative or absolute path to the file to write",
+				Description: "File path",
 			},
 			"content": {
 				Type:        "string",
-				Description: "Content to write to the file",
+				Description: "File content",
 			},
 		},
 	}
@@ -180,39 +165,22 @@ func (t *FileWriteTool) Execute(ctx context.Context, args map[string]any) (map[s
 		return nil, fmt.Errorf("missing required parameter: content")
 	}
 
-	// Resolve path relative to workdir if provided in context
-	resolvedPath, err := t.resolvePath(ctx, path)
+	resolvedPath, err := resolvePath(ctx, path)
 	if err != nil {
 		return nil, err
 	}
 
-	err = os.WriteFile(resolvedPath, []byte(content), 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to write file %q: %w", resolvedPath, err)
+	if err := os.MkdirAll(filepath.Dir(resolvedPath), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create dirs: %w", err)
+	}
+
+	if err := os.WriteFile(resolvedPath, []byte(content), 0644); err != nil {
+		return nil, fmt.Errorf("write failed %q: %w", resolvedPath, err)
 	}
 
 	return map[string]any{
 		"success": true,
 	}, nil
-}
-
-// resolvePath resolves a path relative to workdir if provided in context, otherwise uses current working directory.
-func (t *FileWriteTool) resolvePath(ctx context.Context, path string) (string, error) {
-	workdir, hasWorkdir := FromWorkdir(ctx)
-
-	// If no workdir is set, use the current working directory
-	if !hasWorkdir || workdir == "" {
-		workdir = "."
-	}
-
-	// If path is absolute, use it directly
-	if filepath.IsAbs(path) {
-		return path, nil
-	}
-
-	// Resolve relative to workdir (or current directory if not set)
-	resolved := filepath.Join(workdir, path)
-	return resolved, nil
 }
 
 // FileEditTool makes precise edits to a file based on exact text replacement.
@@ -228,11 +196,11 @@ func (t *FileEditTool) Name() string {
 }
 
 func (t *FileEditTool) Description() string {
-	return "Edit a file with precise text replacement"
+	return "Edit a file"
 }
 
 func (t *FileEditTool) FullDescription() string {
-	return "Edit a file by specifying exact text to find and its replacement. This allows for precise edits without needing to provide the full file content."
+	return "Edit a file via exact text replacements. Each find must uniquely match and not overlap with other edits. Merge related changes into a single edit."
 }
 
 func (t *FileEditTool) Parameters() llm.Parameters {
@@ -242,22 +210,22 @@ func (t *FileEditTool) Parameters() llm.Parameters {
 		Properties: map[string]llm.Property{
 			"path": {
 				Type:        "string",
-				Description: "Relative or absolute path to the file to edit",
+				Description: "File path",
 			},
 			"edits": {
 				Type:        "array",
-				Description: "List of edits to apply, each with 'find' and 'replace' fields for exact text replacement",
+				Description: "Replacements",
 				Items: &llm.Parameters{
 					Type:     "object",
 					Required: []string{"find", "replace"},
 					Properties: map[string]llm.Property{
 						"find": {
 							Type:        "string",
-							Description: "Exact text to find in the original file",
+							Description: "Exact text",
 						},
 						"replace": {
 							Type:        "string",
-							Description: "Text to replace the found text with",
+							Description: "Replacement text",
 						},
 					},
 				},
@@ -277,17 +245,17 @@ func (t *FileEditTool) Execute(ctx context.Context, args map[string]any) (map[st
 		return nil, fmt.Errorf("missing required parameter: edits")
 	}
 
-	// Resolve path relative to workdir if provided in context
-	resolvedPath, err := t.resolvePath(ctx, path)
+	resolvedPath, err := resolvePath(ctx, path)
 	if err != nil {
 		return nil, err
 	}
 
-	contentBytes, err := os.ReadFile(resolvedPath)
+	data, err := os.ReadFile(resolvedPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file %q: %w", resolvedPath, err)
+		return nil, fmt.Errorf("read failed %q: %w", resolvedPath, err)
 	}
-	content := string(contentBytes)
+
+	content := string(data)
 
 	for _, edit := range edits {
 		editMap, ok := edit.(map[string]any)
@@ -307,12 +275,11 @@ func (t *FileEditTool) Execute(ctx context.Context, args map[string]any) (map[st
 			return nil, fmt.Errorf("text to find not found in file: %q", find)
 		}
 
-		content = strings.ReplaceAll(content, find, replace)
+		content = strings.Replace(content, find, replace, 1)
 	}
 
-	err = os.WriteFile(resolvedPath, []byte(content), 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to write file %q: %w", resolvedPath, err)
+	if err := os.WriteFile(resolvedPath, []byte(content), 0644); err != nil {
+		return nil, fmt.Errorf("write failed %q: %w", resolvedPath, err)
 	}
 
 	return map[string]any{
@@ -320,21 +287,16 @@ func (t *FileEditTool) Execute(ctx context.Context, args map[string]any) (map[st
 	}, nil
 }
 
-// resolvePath resolves a path relative to workdir if provided in context, otherwise uses current working directory.
-func (t *FileEditTool) resolvePath(ctx context.Context, path string) (string, error) {
+func resolvePath(ctx context.Context, path string) (string, error) {
 	workdir, hasWorkdir := FromWorkdir(ctx)
 
-	// If no workdir is set, use the current working directory
 	if !hasWorkdir || workdir == "" {
 		workdir = "."
 	}
 
-	// If path is absolute, use it directly
 	if filepath.IsAbs(path) {
 		return path, nil
 	}
 
-	// Resolve relative to workdir (or current directory if not set)
-	resolved := filepath.Join(workdir, path)
-	return resolved, nil
+	return filepath.Join(workdir, path), nil
 }

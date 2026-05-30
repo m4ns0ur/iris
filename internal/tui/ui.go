@@ -344,8 +344,17 @@ func initialModel(agent *agent.Agent) model {
 
 	spin := spinner.New()
 	spin.Spinner = spinner.Spinner{
-		Frames: []string{"⊙", "⊚", "⊛", "⊜", "⦿", "◌", "○", "⦾", "◎", "◴", "◷", "◶", "◵", "◐", "◓", "◑", "◒", "◍", "◉", "●"},
-		FPS:    time.Second / 10,
+		Frames: []string{
+			"◎", "◉", // open and focus
+			"◑", "◑", "◉", // glance left
+			"◕", "◕", "◉", // glance right
+			"◔", "◔", "◉", // look up
+			"◒", "◒", "◉", // look down
+			"◕", "⌒", "⌒", "◕", "◉", // wink
+			"◕", "◔", "◑", "◒", "◈", "✺", "⊛", "◈", "◉", // dizzy spin
+			"◕", "●", "◕", "◔", "◯", "—", "◯", "◔", "◕", "◉", "◎", // full blink
+		},
+		FPS: time.Second / 10,
 	}
 	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 

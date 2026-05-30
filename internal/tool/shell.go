@@ -1,8 +1,10 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -21,11 +23,11 @@ func (t *ShellTool) Name() string {
 }
 
 func (t *ShellTool) Description() string {
-	return "Execute a shell command"
+	return "Run a shell command"
 }
 
 func (t *ShellTool) FullDescription() string {
-	return "Execute a shell command in the current working directory and return its output. Output is truncated to last 1000 lines but the full output is saved to a temp file."
+	return "Run a shell command in the current directory. Return its output (last 1000 lines or 20KB; full output saved to a temp file)."
 }
 
 func (t *ShellTool) Parameters() llm.Parameters {
@@ -35,7 +37,7 @@ func (t *ShellTool) Parameters() llm.Parameters {
 		Properties: map[string]llm.Property{
 			"command": {
 				Type:        "string",
-				Description: "The shell command to execute",
+				Description: "Shell command",
 			},
 		},
 	}
@@ -47,7 +49,6 @@ func (t *ShellTool) Execute(ctx context.Context, args map[string]any) (map[strin
 		return nil, fmt.Errorf("missing required parameter: command")
 	}
 
-	// Security: prevent dangerous commands
 	dangerousPatterns := []string{
 		"rm -rf", "mkfs", "dd if=", ":(){:|:&}", "/bin/sh -c", "/bin/bash -c",
 	}
@@ -57,30 +58,38 @@ func (t *ShellTool) Execute(ctx context.Context, args map[string]any) (map[strin
 		}
 	}
 
-	output, err := bash(ctx, command)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute command: %w", err)
-	}
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 
-	return map[string]any{
-		"output": output,
-	}, nil
-}
-
-// bash executes a shell command and returns its output.
-func bash(ctx context.Context, command string) (string, error) {
 	workdir, hasWorkdir := FromWorkdir(ctx)
-
-	cmd := exec.Command("bash", "-c", command)
-
 	if hasWorkdir && workdir != "" {
-		// Change to workdir before executing the command
 		cmd.Dir = workdir
 	} else {
-		// Use current working directory
 		cmd.Dir = "."
 	}
 
-	output, err := cmd.CombinedOutput()
-	return string(output), err
+	fullOutput, err := cmd.CombinedOutput()
+
+	tempFile, fileErr := os.CreateTemp("", "shell-output-*.log")
+	if fileErr == nil {
+		_, _ = tempFile.Write(fullOutput)
+		_ = tempFile.Close()
+	}
+
+	const maxBytes = 20 * 1024
+	out := fullOutput
+
+	if len(out) > maxBytes {
+		out = out[len(out)-maxBytes:]
+	}
+
+	lines := bytes.Split(out, []byte("\n"))
+	if len(lines) > 1000 {
+		lines = lines[len(lines)-1000:]
+		out = bytes.Join(lines, []byte("\n"))
+	}
+
+	return map[string]any{
+		"output": string(out),
+		"file":   tempFile.Name(),
+	}, err
 }
