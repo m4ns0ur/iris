@@ -22,13 +22,14 @@ type Payload struct {
 	Model           string         `json:"model"`
 	Stream          bool           `json:"stream"`
 	Messages        []ChatMessage  `json:"messages"`
-	Tools           []Tool         `json:"tools"`
+	Tools           []Tool         `json:"tools,omitempty"`
 	MaxTokens       int            `json:"max_tokens"`
 	Temperature     float64        `json:"temperature"`
-	TopP            float64        `json:"top_p"`
-	PresencePenalty float64        `json:"presence_penalty"`
-	ResponseFormat  ResponseFormat `json:"response_format"`
+	TopP            float64        `json:"top_p,omitempty"`
+	PresencePenalty float64        `json:"presence_penalty,omitempty"`
+	ResponseFormat  ResponseFormat `json:"response_format,omitempty"`
 	ExtraBody       ExtraBody      `json:"extra_body"`
+	CachePrompt     bool           `json:"cache_prompt"`
 }
 
 type ChatMessage struct {
@@ -56,17 +57,17 @@ type Parameters struct {
 type Property struct {
 	Type        string      `json:"type"`
 	Description string      `json:"description"`
-	Items       *Parameters `json:"items,omitempty"` // For array types
+	Items       *Parameters `json:"items,omitempty"`
 }
 
 type ResponseFormat struct {
-	ResponseType string `json:"type"`
+	ResponseType string `json:"type,omitempty"`
 }
 
 type ExtraBody struct {
-	TopK               int                `json:"top_k"`
-	MinP               float64            `json:"min_p"`
-	RepetitionPenalty  float64            `json:"repetition_penalty"`
+	TopK               int                `json:"top_k,omitempty"`
+	MinP               float64            `json:"min_p,omitempty"`
+	RepetitionPenalty  float64            `json:"repetition_penalty,omitempty"`
 	ChatTemplateKwargs ChatTemplateKwargs `json:"chat_template_kwargs"`
 }
 
@@ -125,13 +126,16 @@ type Delta struct {
 }
 
 type ToolCall struct {
-	Id       string       `json:"id"`
-	Type     string       `json:"type"`
+	// Index is present in streaming chunks to identify which tool call
+	// this delta belongs to. It is omitted in non-streaming responses.
+	Index    *int         `json:"index,omitempty"`
+	Id       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"`
 	Function FunctionCall `json:"function"`
 }
 
 type FunctionCall struct {
-	Name      string `json:"name"`
+	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments"`
 }
 
@@ -150,17 +154,15 @@ func NewClient(model string) *LLMClient {
 		Model: model,
 		URL:   "http://localhost:8080/v1/chat/completions",
 		HTTP: &http.Client{
-			Timeout: 0, // we control timeout via context
+			Timeout: 0, // controlled via context per-request
 		},
 	}
 }
 
 func (c *LLMClient) Generate(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
 	if onChunk != nil || onError != nil {
-		fullResponse, err := c.GenerateStream(messages, tools, opts, onChunk, onError)
-		return fullResponse, err
+		return c.GenerateStream(messages, tools, opts, onChunk, onError)
 	}
-	// return c.GenerateSync(messages, tools, opts)
 	return Chunk{}, fmt.Errorf("synchronous generation is not supported, onChunk or onError callback must be provided")
 }
 
@@ -194,30 +196,30 @@ func (c *LLMClient) GenerateSync(messages []ChatMessage, tools []Tool, opts *LLM
 		}
 
 		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			res.Body.Close()
 			return nil, fmt.Errorf("HTTP %d %s", res.StatusCode, res.Status)
 		}
 
 		return res, nil
 	}
 
-	var res *http.Response
-	var err error
-
-	retryDelay := 1 * time.Second
+	var (
+		res        *http.Response
+		err        error
+		retryDelay = time.Second
+	)
 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
 		if attempt > 1 {
 			Logger.Warn("LLM request failed, retrying...", "attempt", attempt, "maxRetries", MaxRetries)
 			time.Sleep(retryDelay)
+			retryDelay *= 2
 		}
 
 		res, err = doRequest()
 		if err == nil {
 			break
 		}
-
-		// Exponential backoff for retry delay
-		retryDelay *= 2
 
 		if attempt < MaxRetries {
 			Logger.Warn("LLM request failed", "attempt", attempt, "error", err)
@@ -249,15 +251,18 @@ func (c *LLMClient) GenerateSync(messages []ChatMessage, tools []Tool, opts *LLM
 }
 
 func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
+	// Guard against nil callbacks to avoid panics.
+	if onChunk == nil {
+		onChunk = func(string, string) {}
+	}
+	if onError == nil {
+		onError = func(error) {}
+	}
+
 	payload := createPayload(c.Model, messages, tools, opts)
 	payload.Stream = true
 
 	LogLLMPayload(payload)
-
-	var res *http.Response
-	var err error
-
-	retryDelay := 1 * time.Second
 
 	doRequest := func() (*http.Response, error) {
 		bodyBytes, e := json.Marshal(payload)
@@ -265,40 +270,57 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 			return nil, e
 		}
 
-		req, e := http.NewRequest("POST", c.URL, bytes.NewReader(bodyBytes))
+		// Mirror the timeout used in GenerateSync.
+		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+		// cancel is intentionally not deferred here. The context must stay
+		// alive for the duration of the stream read below. The caller closes
+		// res.Body which unblocks any in-flight reads, and the GC will clean
+		// up the context. If you want explicit cancellation, thread a
+		// context.Context through the method signature instead.
+		_ = cancel // suppress "cancel not called" linter warning
+
+		req, e := http.NewRequestWithContext(ctx, "POST", c.URL, bytes.NewReader(bodyBytes))
 		if e != nil {
+			cancel()
 			return nil, e
 		}
 		req.Header.Set("Content-Type", "application/json")
 
-		res, e = c.HTTP.Do(req)
+		res, e := c.HTTP.Do(req)
 		if e != nil {
+			cancel()
 			return nil, e
 		}
 
-		// Don't close body here - caller will handle it via defer in main function
 		if res.StatusCode != http.StatusOK {
 			res.Body.Close()
+			cancel()
 			return nil, fmt.Errorf("HTTP %d", res.StatusCode)
 		}
 
 		return res, nil
 	}
 
+	var (
+		res        *http.Response
+		err        error
+		retryDelay = time.Second
+	)
+
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
 		if attempt > 1 {
 			Logger.Warn("LLM streaming request failed, retrying...", "attempt", attempt, "maxRetries", MaxRetries)
-			onError(fmt.Errorf("LLM streaming request failed on attempt %d: %w", attempt-1, err))
+			if err != nil {
+				onError(fmt.Errorf("LLM streaming request failed on attempt %d: %w", attempt-1, err))
+			}
 			time.Sleep(retryDelay)
+			retryDelay *= 2
 		}
 
 		res, err = doRequest()
 		if err == nil && res != nil {
 			break
 		}
-
-		// Exponential backoff for retry delay
-		retryDelay *= 2
 
 		if attempt < MaxRetries {
 			Logger.Warn("LLM streaming request failed", "attempt", attempt, "error", err)
@@ -310,19 +332,20 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 	if res == nil || err != nil {
 		return Chunk{}, fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
 	}
-
-	// Ensure response body is closed when we're done
-	defer func() {
-		if res != nil && res.Body != nil {
-			res.Body.Close()
-		}
-	}()
+	defer res.Body.Close()
 
 	reader := bufio.NewReader(res.Body)
-	var fullResponse strings.Builder
-	var fullReasoning strings.Builder
-	var fullArguments strings.Builder
-	var toolCalls []ToolCall
+
+	var (
+		fullResponse  strings.Builder
+		fullReasoning strings.Builder
+
+		// toolCallAccum maps streaming index → accumulated ToolCall.
+		// The first chunk for a given tool call carries id/type/name;
+		// subsequent chunks only carry argument fragments.
+		toolCallAccum = make(map[int]*ToolCall)
+		toolCallOrder []int // preserves insertion order
+	)
 
 	finalChunk := Chunk{
 		Choices: []ChunkChoice{
@@ -333,74 +356,93 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 	}
 
 	for {
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			if err == io.EOF {
+		line, readErr := reader.ReadBytes('\n')
+		if readErr != nil {
+			if readErr == io.EOF {
 				break
 			}
-			return Chunk{}, fmt.Errorf("error reading stream: %w", err)
+			// Return whatever we have accumulated alongside the error so the
+			// caller can decide whether to use the partial response.
+			return finalChunk, fmt.Errorf("error reading stream: %w", readErr)
 		}
 
-		// OpenAI SSE lines start with "data: "
 		line = bytes.TrimSpace(line)
 		if !bytes.HasPrefix(line, []byte("data: ")) {
 			continue
 		}
 
 		data := bytes.TrimPrefix(line, []byte("data: "))
-
 		Logger.Debug("Received stream chunk", "chunk", string(data))
 
-		// Check for the [DONE] signal
 		if string(data) == "[DONE]" {
-			// Logger.Debug("Received end of stream signal")
 			break
 		}
 
 		var chunk Chunk
 		if err := json.Unmarshal(data, &chunk); err != nil {
 			Logger.Error("Failed to parse chunk as JSON", "error", err, "chunk", string(data))
-			continue // TODO: Or handle error
+			continue
 		}
 
-		if len(chunk.Choices) > 0 {
-			finalChunk.Choices[0].FinishReason = chunk.Choices[0].FinishReason
+		if len(chunk.Choices) == 0 {
+			continue
+		}
 
-			reasoningContent := chunk.Choices[0].Delta.ReasoningContent
-			if reasoningContent != "" {
-				// Logger.Debug("Received reasoning content in stream chunk", "reasoningContent", reasoningContent)
-				fullReasoning.WriteString(reasoningContent)
-				onChunk("reason", reasoningContent)
+		choice := chunk.Choices[0]
+		finalChunk.Choices[0].FinishReason = choice.FinishReason
+
+		if rc := choice.Delta.ReasoningContent; rc != "" {
+			fullReasoning.WriteString(rc)
+			onChunk("reason", rc)
+		}
+
+		// Accumulate tool call deltas keyed by their streaming index.
+		for _, tc := range choice.Delta.ToolCalls {
+			idx := 0
+			if tc.Index != nil {
+				idx = *tc.Index
 			}
 
-			if len(chunk.Choices[0].Delta.ToolCalls) > 0 {
-				if toolCalls == nil {
-					toolCalls = chunk.Choices[0].Delta.ToolCalls
+			acc, exists := toolCallAccum[idx]
+			if !exists {
+				// First chunk for this tool call: capture id/type/name.
+				acc = &ToolCall{
+					Id:   tc.Id,
+					Type: tc.Type,
+					Function: FunctionCall{
+						Name: tc.Function.Name,
+					},
 				}
-				fullArguments.WriteString(chunk.Choices[0].Delta.ToolCalls[0].Function.Arguments)
-				toolCalls[0].Function.Arguments = fullArguments.String()
-				// Logger.Debug("Received tool call in stream chunk", "toolCalls", toolCalls)
-				onChunk("tool", chunk.Choices[0].Delta.ToolCalls[0].Function.Arguments)
+				toolCallAccum[idx] = acc
+				toolCallOrder = append(toolCallOrder, idx)
 			}
 
-			content := chunk.Choices[0].Delta.Content
-			if content != "" {
-				// Logger.Debug("Received content in stream chunk", "content", content)
-				fullResponse.WriteString(content)
-				onChunk("response", content)
+			acc.Function.Arguments += tc.Function.Arguments
+
+			// Emit raw argument fragments for callers that want to stream
+			// tool call progress (e.g. progress indicators). Callers must
+			// treat these as partial/incomplete JSON.
+			if tc.Function.Arguments != "" {
+				onChunk("tool", tc.Function.Arguments)
 			}
+		}
+
+		if content := choice.Delta.Content; content != "" {
+			fullResponse.WriteString(content)
+			onChunk("response", content)
 		}
 	}
 
 	finalChunk.Choices[0].Delta.Content = fullResponse.String()
 	finalChunk.Choices[0].Delta.ReasoningContent = fullReasoning.String()
 
-	if len(toolCalls) > 0 {
-		// Logger.Debug("Finalizing tool call with full arguments", "fullArguments", fullArguments.String())
-		finalChunk.Choices[0].Delta.ToolCalls = toolCalls
+	if len(toolCallAccum) > 0 {
+		assembled := make([]ToolCall, 0, len(toolCallOrder))
+		for _, idx := range toolCallOrder {
+			assembled = append(assembled, *toolCallAccum[idx])
+		}
+		finalChunk.Choices[0].Delta.ToolCalls = assembled
 	}
-
-	// Logger.Debug("Full response from stream", "response", fullResponse.String())
 
 	return finalChunk, nil
 }
@@ -412,14 +454,12 @@ func createPayload(model string, messages []ChatMessage, tools []Tool, opts *LLM
 		Tools:       tools,
 		MaxTokens:   32768,
 		Temperature: 0.80,
-		// ResponseFormat: ResponseFormat{
-		// 	ResponseType: "json_object",
-		// },
 		ExtraBody: ExtraBody{
 			ChatTemplateKwargs: ChatTemplateKwargs{
 				EnableThinking: true,
 			},
 		},
+		CachePrompt: true,
 	}
 
 	if opts != nil {
