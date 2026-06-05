@@ -17,16 +17,21 @@ var (
 )
 
 type Agent struct {
-	client      *llm.LLMClient
-	state       string
-	step        int
-	goals       []string
-	currentTask int
-	history     []llm.ChatMessage
-	maxSteps    int
-	workdir     string
-	toolName    string
-	toolArgs    map[string]any
+	client           *llm.LLMClient
+	state            string
+	step             int
+	goals            []string
+	currentTask      int
+	history          []llm.ChatMessage
+	maxSteps         int
+	workdir          string
+	pendingToolCalls []PendingToolCall
+}
+
+type PendingToolCall struct {
+	ID   string
+	Name string
+	Args map[string]any
 }
 
 func NewAgent(client *llm.LLMClient, workdir string) *Agent {
@@ -49,7 +54,7 @@ func (a *Agent) Run(input string, onChunk func(chunkType string, content string)
 	a.reset()
 	// Initialize with system prompt and user input
 	a.history = append(a.history, llm.ChatMessage{Role: "system", Content: prompt.BuildSystemPrompt(toolContext)})
-	a.history = append(a.history, llm.ChatMessage{Role: "user", Content: input})
+	a.history = append(a.history, llm.ChatMessage{Role: "user", Content: []llm.Content{{Type: "text", Text: input}}})
 	return a.loop(onChunk, onError)
 }
 
@@ -74,37 +79,50 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 
 		onChunk("next", fmt.Sprintf("%d", a.step))
 
-		// Decide next action based on current state and progress
-		err := a.next(onChunk, onError)
-		if err != nil {
+		if err := a.next(onChunk, onError); err != nil {
 			return err
 		}
 
 		switch a.state {
 		case "respond":
-			// In respond state, we just wait for the next user input or completion
 			Logger.Debug("Agent is responding to user")
 			return nil
 
 		case "tool":
-			// Execute the tool with context including workdir
 			ctx := context.Background()
 			ctx = tool.WithWorkdir(ctx, a.workdir)
-			result, err := tool.ExecuteWithTools(ctx, registry, a.toolName, a.toolArgs)
-			var resultStr string
-			if err == nil {
-				resultStr = formatResult(result)
-			} else {
-				resultStr = fmt.Sprintf("failed: %v", err)
+
+			for _, call := range a.pendingToolCalls {
+				result, err := tool.ExecuteWithTools(
+					ctx,
+					registry,
+					call.Name,
+					call.Args,
+				)
+
+				var resultStr string
+				if err != nil {
+					resultStr = fmt.Sprintf("failed: %v", err)
+				} else {
+					resultStr = formatResult(result)
+				}
+
+				Logger.Debug(
+					"Tool result",
+					"toolName", call.Name,
+					"toolCallID", call.ID,
+					"result", resultStr,
+				)
+
+				a.history = append(a.history, llm.ChatMessage{
+					Role:       "tool",
+					Content:    resultStr,
+					ToolCallID: call.ID,
+				})
 			}
 
-			Logger.Debug("Tool result", "toolName", a.toolName, "result", resultStr)
-
-			// Add result to conversation history
-			a.history = append(a.history, llm.ChatMessage{
-				Role:    "tool",
-				Content: fmt.Sprintf("'%s': %s", a.toolName, resultStr),
-			})
+			a.pendingToolCalls = nil
+			a.state = "idle"
 
 		case "done":
 			Logger.Debug("Agent loop completed")
@@ -115,14 +133,10 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 			a.state = "idle"
 		}
 
-		if a.step >= a.maxSteps {
-			Logger.Warn("Max steps reached")
-			break
-		}
-
 		a.step++
 	}
 
+	Logger.Warn("Max steps reached", "maxSteps", a.maxSteps)
 	return nil
 }
 
@@ -130,34 +144,86 @@ func (a *Agent) next(onChunk func(chunkType string, content string), onError fun
 	Logger.Debug("Decision phase", "history", a.history)
 
 	tools := toolContext.Registry.List()
-	chunk, err := a.client.Generate(a.history, tools, nil, onChunk, onError)
+
+	chunk, err := a.client.Generate(
+		a.history,
+		tools,
+		nil,
+		onChunk,
+		onError,
+	)
 	if err != nil {
 		return fmt.Errorf("LLM generation failed: %w", err)
 	}
 
 	Logger.Debug("next: LLM response received", "response", chunk)
 
-	if chunk.Choices[0].FinishReason == "stop" {
-		a.state = "done"
-		a.history = append(a.history, llm.ChatMessage{Role: "assistant", Content: chunk.Choices[0].Delta.Content})
+	delta := chunk.Choices[0].Delta
+
+	msg := llm.ChatMessage{
+		Role:    "assistant",
+		Content: delta.Content,
+	}
+
+	if len(delta.ToolCalls) > 0 {
+		a.pendingToolCalls = nil
+
+		msg.ToolCalls = make([]llm.ToolCall, 0, len(delta.ToolCalls))
+
+		for _, tc := range delta.ToolCalls {
+			msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{
+				Id:   tc.Id,
+				Type: tc.Type,
+				Function: llm.FunctionCall{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			})
+
+			call := PendingToolCall{
+				ID:   tc.Id,
+				Name: tc.Function.Name,
+			}
+
+			if tc.Function.Arguments != "" {
+				var args map[string]any
+
+				if err := json.Unmarshal(
+					[]byte(tc.Function.Arguments),
+					&args,
+				); err != nil {
+					Logger.Error(
+						"Failed to parse tool arguments",
+						"tool", tc.Function.Name,
+						"error", err,
+					)
+					args = map[string]any{}
+				}
+
+				call.Args = args
+			}
+
+			a.pendingToolCalls = append(a.pendingToolCalls, call)
+		}
+
+		a.history = append(a.history, msg)
+
+		Logger.Debug(
+			"Tool execution decision",
+			"count", len(a.pendingToolCalls),
+		)
+
+		a.state = "tool"
 		return nil
 	}
-	if chunk.Choices[0].Delta.ToolCalls != nil {
-		function := chunk.Choices[0].Delta.ToolCalls[0]
-		Logger.Debug("Tool call decision", "function", function)
-		a.state = "tool"
-		a.toolName = function.Function.Name
-		if function.Function.Arguments != "" {
-			Logger.Debug("Function arguments", "arguments", function.Function.Arguments)
-			var argsMap map[string]any
-			err := json.Unmarshal([]byte(function.Function.Arguments), &argsMap)
-			if err != nil {
-				Logger.Error("Failed to parse tool arguments, using raw string", "error", err)
-				// TODO: handle error
-			}
-			a.toolArgs = argsMap
-		}
-		Logger.Debug("Tool execution decision", "toolName", a.toolName, "toolArgs", a.toolArgs)
+
+	if delta.Content != "" {
+		a.history = append(a.history, msg)
+	}
+
+	if chunk.Choices[0].FinishReason == "stop" {
+		a.state = "done"
+		return nil
 	}
 
 	return nil

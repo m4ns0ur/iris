@@ -21,6 +21,8 @@ var Logger = logger.Logger
 type Payload struct {
 	Model           string         `json:"model"`
 	Stream          bool           `json:"stream"`
+	StreamOptions   StreamOptions  `json:"stream_options,omitempty"`
+	Store           bool           `json:"store,omitempty"`
 	Messages        []ChatMessage  `json:"messages"`
 	Tools           []Tool         `json:"tools,omitempty"`
 	MaxTokens       int            `json:"max_tokens"`
@@ -32,9 +34,20 @@ type Payload struct {
 	CachePrompt     bool           `json:"cache_prompt"`
 }
 
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
+}
+
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    any        `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+type Content struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 type Tool struct {
@@ -261,6 +274,9 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 
 	payload := createPayload(c.Model, messages, tools, opts)
 	payload.Stream = true
+	payload.StreamOptions = StreamOptions{
+		IncludeUsage: true,
+	}
 
 	LogLLMPayload(payload)
 
@@ -450,6 +466,7 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 func createPayload(model string, messages []ChatMessage, tools []Tool, opts *LLMOptions) Payload {
 	payload := Payload{
 		Model:       model,
+		Store:       false,
 		Messages:    messages,
 		Tools:       tools,
 		MaxTokens:   32768,
