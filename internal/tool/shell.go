@@ -27,7 +27,7 @@ func (t *ShellTool) Description() string {
 }
 
 func (t *ShellTool) FullDescription() string {
-	return "Run a shell command in the current directory. Return its output (last 1000 lines or 20KB; full output saved to a temp file)."
+	return "Run a shell command in the current directory. Return its output (last 1000 lines or 25KB; full output saved to a temp file)."
 }
 
 func (t *ShellTool) Parameters() llm.Parameters {
@@ -75,7 +75,7 @@ func (t *ShellTool) Execute(ctx context.Context, args map[string]any) (map[strin
 		_ = tempFile.Close()
 	}
 
-	const maxBytes = 20 * 1024
+	const maxBytes = 25 * 1024
 	out := fullOutput
 
 	if len(out) > maxBytes {

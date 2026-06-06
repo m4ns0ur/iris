@@ -27,7 +27,7 @@ func (t *FileReadTool) Description() string {
 }
 
 func (t *FileReadTool) FullDescription() string {
-	return "Read a file. Output is limited to 1000 lines or 20 KB; use start/max to read parts."
+	return "Read a file. Output is limited to 1000 lines or 25KB; use start/max to read parts. Continue reading offsets until the full file is obtained."
 }
 
 func (t *FileReadTool) Parameters() llm.Parameters {
@@ -67,10 +67,12 @@ func (t *FileReadTool) Execute(ctx context.Context, args map[string]any) (map[st
 		start = int(s)
 	}
 
-	maxBytes := 20 * 1024
+	maxBytes := 25 * 1024
 	if m, ok := args["max"].(float64); ok && m > 0 {
 		maxBytes = int(m)
 	}
+
+	const maxLines = 1000
 
 	fi, err := os.Stat(resolvedPath)
 	if err != nil {
@@ -90,20 +92,23 @@ func (t *FileReadTool) Execute(ctx context.Context, args map[string]any) (map[st
 
 	var b strings.Builder
 	line := 1
-	read := 0
+	readBytes := 0
+	readLines := 0
 
 	for scanner.Scan() {
 		if line >= start {
 			txt := scanner.Text()
-			n := len(txt) + 1
+			n := len(txt) + 1 // include newline
 
-			if read+n > maxBytes {
+			if readBytes+n > maxBytes || readLines >= maxLines {
 				break
 			}
 
 			b.WriteString(txt)
 			b.WriteByte('\n')
-			read += n
+
+			readBytes += n
+			readLines++
 		}
 		line++
 	}
