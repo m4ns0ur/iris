@@ -160,7 +160,7 @@ type LLMClient struct {
 
 func NewClient(model string) *LLMClient {
 	if model == "" {
-		model = "bartowski/Qwen_Qwen3.5-9B-GGUF:Q5_K_M"
+		model = "unsloth/Qwen3.5-9B-GGUF:UD-Q5_K_XL"
 	}
 
 	return &LLMClient{
@@ -439,7 +439,10 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 			// tool call progress (e.g. progress indicators). Callers must
 			// treat these as partial/incomplete JSON.
 			if tc.Function.Arguments != "" {
-				onChunk("tool", tc.Function.Arguments)
+				b, err := json.Marshal(tc.Function)
+				if err == nil {
+					onChunk("tool", string(b))
+				}
 			}
 		}
 
