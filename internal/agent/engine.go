@@ -119,6 +119,11 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 					Content:    resultStr,
 					ToolCallID: call.ID,
 				})
+
+				if len(a.pendingToolCalls) > 1 {
+					a.step++
+					onChunk("next", fmt.Sprintf("%d", a.step))
+				}
 			}
 
 			a.pendingToolCalls = nil

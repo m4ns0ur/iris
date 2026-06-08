@@ -2,6 +2,9 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,25 +19,46 @@ import (
 
 const InputHeight = 2
 
+type state int
+
 const (
 	stateInput state = iota
 	stateStreaming
 )
 
+type component int
+
+const (
+	UserPrompt component = iota
+	User
+	IrisPrompt
+	Iris
+	ReasoningPrompt
+	Reasoning
+	ToolPrompt
+	ToolKey
+	ToolValue
+	ErrorPrompt
+	Error
+)
+
 var Logger = logger.Logger
 
 type model struct {
-	agent        *agent.Agent
-	fullReason   *strings.Builder
-	fullResponse *strings.Builder
-	toolName     string
-	toolArgs     *strings.Builder
-	width        int
-	state        state
-	inputText    textarea.Model
-	stream       chan tea.Msg
-	spinner      spinner.Model
-	messages     []message
+	agent          *agent.Agent
+	fullReason     *strings.Builder
+	fullResponse   *strings.Builder
+	toolName       string
+	toolArgs       *strings.Builder
+	previewPath    string
+	previewContent string
+	previewCommand string
+	width          int
+	state          state
+	inputText      textarea.Model
+	stream         chan tea.Msg
+	spinner        spinner.Model
+	messages       []message
 }
 
 type toolCallDelta struct {
@@ -42,13 +66,14 @@ type toolCallDelta struct {
 	Arguments string `json:"arguments"`
 }
 
-type state int
-
 type message struct {
-	role     string // "user" | "assistant" | "reasoning" | "error"
-	content  string
-	toolName string
-	toolArgs string
+	role           string // "user" | "assistant" | "reasoning" | "error"
+	content        string
+	toolName       string
+	toolArgs       string
+	previewPath    string
+	previewContent string
+	previewCommand string
 }
 
 type chunkMsg struct {
@@ -151,11 +176,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if m.toolArgs.Len() > 0 {
 					m.messages = append(m.messages, message{
-						role:     "tool",
-						toolName: m.toolName,
-						toolArgs: m.toolArgs.String(),
+						role:           "tool",
+						toolName:       m.toolName,
+						toolArgs:       m.toolArgs.String(),
+						previewPath:    m.previewPath,
+						previewContent: m.previewContent,
+						previewCommand: m.previewCommand,
 					})
+					m.toolName = ""
 					m.toolArgs.Reset()
+					m.previewPath = ""
+					m.previewContent = ""
+					m.previewCommand = ""
 				}
 			case "reason":
 				m.fullReason.WriteString(msg.content)
@@ -171,6 +203,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				if delta.Arguments != "" {
 					m.toolArgs.WriteString(delta.Arguments)
+				}
+
+				args := m.toolArgs.String()
+
+				if path, ok := extractStringField(args, "path"); ok {
+					m.previewPath = path
+				}
+
+				if content, ok := extractStringField(args, "content"); ok {
+					m.previewContent = content
+				}
+
+				if command, ok := extractStringField(args, "command"); ok {
+					m.previewCommand = command
 				}
 			case "response":
 				m.fullResponse.WriteString(msg.content)
@@ -225,116 +271,70 @@ func (m model) View() tea.View {
 	for _, msg := range m.messages {
 		switch msg.role {
 		case "user":
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.BrightMagenta).
-					Render("You> "),
-			)
-			sb.WriteString(m.renderMarkdown(msg.content) + "\n")
+			sb.WriteString(m.renderFor(UserPrompt, "You> "))
+			sb.WriteString(m.renderFor(User, msg.content))
 
 		case "assistant":
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.BrightBlue).
-					Render("Iris> "),
-			)
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Width(m.width).
-					Render(m.renderMarkdown(msg.content)) + "\n",
-			)
+			sb.WriteString(m.renderFor(IrisPrompt, "Iris> "))
+			sb.WriteString(m.renderFor(Iris, msg.content))
 
 		case "reasoning":
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.BrightMagenta).
-					Render("Reasoning> "),
-			)
-
-			reasonContent := lipgloss.NewStyle().
-				Width(m.width).
-				Italic(true).
-				Foreground(lipgloss.BrightBlue).
-				Render(m.renderMarkdown(msg.content))
-			sb.WriteString(reasonContent + "\n")
+			sb.WriteString(m.renderFor(ReasoningPrompt, "Reasoning> "))
+			sb.WriteString(m.renderFor(Reasoning, msg.content) + "\n")
 
 		case "tool":
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.BrightBlue).
-					Render("Tool> "),
-			)
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.BrightGreen).
-					Render(msg.toolName),
-			)
-			toolContent := lipgloss.NewStyle().
-				Width(m.width).
-				Italic(true).
-				Foreground(lipgloss.BrightBlue).
-				Render(m.renderMarkdown(msg.toolArgs))
-			sb.WriteString(toolContent + "\n")
+			sb.WriteString(m.renderFor(ToolPrompt, msg.toolName) + "\n")
+
+			if msg.previewPath != "" {
+				sb.WriteString(m.renderFor(ToolKey, "Path: "))
+				sb.WriteString(m.renderFor(ToolValue, msg.previewPath) + "\n")
+			}
+
+			if msg.previewContent != "" {
+				sb.WriteString(m.renderFor(ToolKey, "Content: "))
+				sb.WriteString(m.renderFor(ToolValue, msg.previewContent) + "\n")
+			}
+
+			if msg.previewCommand != "" {
+				sb.WriteString(m.renderFor(ToolKey, "Command: "))
+				sb.WriteString(m.renderFor(ToolValue, msg.previewCommand) + "\n")
+			}
 
 		case "error":
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.BrightRed).
-					Bold(true).
-					MarginTop(2).
-					MarginBottom(1).
-					Render(msg.content) + "\n",
-			)
+			sb.WriteString(m.renderFor(ErrorPrompt, "Error> "))
+			sb.WriteString(m.renderFor(Error, msg.content) + "\n")
 		}
 	}
 
 	// Render current streaming response (live)
 	if m.state == stateStreaming {
 		if m.fullReason.Len() > 0 {
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.BrightMagenta).
-					Render("Reasoning> "),
-			)
-
-			reasonContent := lipgloss.NewStyle().
-				Width(m.width).
-				Italic(true).
-				Foreground(lipgloss.BrightBlue).
-				Render(m.renderMarkdown(m.fullReason.String()))
-			sb.WriteString(reasonContent + "\n")
+			sb.WriteString(m.renderFor(ReasoningPrompt, "Reasoning> "))
+			sb.WriteString(m.renderFor(Reasoning, m.fullReason.String()) + "\n")
 		}
 
 		if m.fullResponse.Len() > 0 {
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.BrightBlue).
-					Render("Iris> "),
-			)
-
-			content := lipgloss.NewStyle().
-				Width(m.width).
-				Render(m.renderMarkdown(m.fullResponse.String()))
-			sb.WriteString(content + "\n")
+			sb.WriteString(m.renderFor(IrisPrompt, "Iris> "))
+			sb.WriteString(m.renderFor(Iris, m.fullResponse.String()))
 		}
 
 		if m.toolArgs.Len() > 0 {
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.BrightBlue).
-					Render("Tool> "),
-			)
-			sb.WriteString(
-				lipgloss.NewStyle().
-					Foreground(lipgloss.BrightGreen).
-					Render(m.toolName),
-			)
-			toolContent := lipgloss.NewStyle().
-				Width(m.width).
-				Italic(true).
-				Foreground(lipgloss.BrightBlue).
-				Render(m.renderMarkdown(m.toolArgs.String()))
-			sb.WriteString(toolContent + "\n")
+			sb.WriteString(m.renderFor(ToolPrompt, m.toolName) + "\n")
+
+			if m.previewPath != "" {
+				sb.WriteString(m.renderFor(ToolKey, "Path: "))
+				sb.WriteString(m.renderFor(ToolValue, m.previewPath) + "\n")
+			}
+
+			if m.previewContent != "" {
+				sb.WriteString(m.renderFor(ToolKey, "Content: "))
+				sb.WriteString(m.renderFor(ToolValue, m.previewContent) + "\n")
+			}
+
+			if m.previewCommand != "" {
+				sb.WriteString(m.renderFor(ToolKey, "Command: "))
+				sb.WriteString(m.renderFor(ToolValue, m.previewCommand) + "\n")
+			}
 		}
 
 		if m.fullReason.Len() == 0 && m.fullResponse.Len() == 0 && m.toolArgs.Len() == 0 {
@@ -353,6 +353,7 @@ func (m model) View() tea.View {
 }
 
 func (m model) renderMarkdown(content string) string {
+	// Themes: dark, light, notty, dracula, tokyo-night
 	r, err := glamour.NewTermRenderer(glamour.WithWordWrap(m.width), glamour.WithStylePath("dark"))
 	if err != nil {
 		return content
@@ -362,6 +363,37 @@ func (m model) renderMarkdown(content string) string {
 		return content
 	}
 	return out
+}
+
+func (m model) renderFor(component component, text string) string {
+	style := lipgloss.NewStyle()
+
+	switch component {
+	case UserPrompt:
+		return style.Foreground(lipgloss.Color("#BB9AF7")).Render(text)
+	case User:
+		return m.renderMarkdown(text)
+	case IrisPrompt:
+		return style.Foreground(lipgloss.Color("#7DCFFF")).Render(text)
+	case Iris:
+		return m.renderMarkdown(text)
+	case ReasoningPrompt:
+		return style.Foreground(lipgloss.Color("#2AC3DE")).Render(text)
+	case Reasoning:
+		return style.Foreground(lipgloss.Color("#565F89")).Italic(true).Width(m.width).Render(text)
+	case ToolPrompt:
+		return style.Foreground(lipgloss.Color("#9ECE6A")).Render(text)
+	case ToolKey:
+		return style.Foreground(lipgloss.Color("#E0AF68")).Render(text)
+	case ToolValue:
+		return style.Foreground(lipgloss.Color("#C0CAF5")).Width(m.width).Render(text)
+	case ErrorPrompt:
+		return style.Foreground(lipgloss.Color("#FF6E64")).Bold(true).Render(text)
+	case Error:
+		return style.Foreground(lipgloss.Color("#FF6E64")).Width(m.width).Render(text)
+	default:
+		return style.Width(m.width).Render(text)
+	}
 }
 
 func waitForStream(ch chan tea.Msg) tea.Cmd {
@@ -398,7 +430,7 @@ func initialModel(agent *agent.Agent) model {
 		},
 		FPS: time.Second / 10,
 	}
-	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta)
+	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF9E64"))
 
 	return model{
 		agent:        agent,
@@ -411,3 +443,21 @@ func initialModel(agent *agent.Agent) model {
 		spinner:      spin,
 	}
 }
+
+func extractStringField(partialJSON, field string) (string, bool) {
+	pattern := fmt.Sprintf(`"%s"\s*:\s*"((?:\\.|[^"])*)"`, regexp.QuoteMeta(field))
+	m := regexp.MustCompile(pattern).FindStringSubmatch(partialJSON)
+	if len(m) != 2 {
+		return "", false
+	}
+
+	s, err := strconv.Unquote(`"` + m[1] + `"`)
+	if err != nil {
+		return m[1], m[1] != ""
+	}
+
+	return s, s != ""
+}
+
+// | Background | Base | `#1a1b26` |
+// | Title bar | Darker base | `#16161e` |
