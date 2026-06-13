@@ -7,10 +7,11 @@ import (
 func LogLLMPayload(payload Payload) {
 	Logger.Debug("payload", "payload", payload)
 
-	Logger.Debug("meta",
+	Logger.Debug(
+		"Model parameters",
 		"model", payload.Model,
 		"temperature", payload.Temperature,
-		"max_tokens", payload.MaxTokens,
+		"maxTokens", payload.MaxTokens,
 	)
 
 	for i, msg := range payload.Messages {
@@ -22,34 +23,18 @@ func LogLLMPayload(payload Payload) {
 		switch v := msg.Content.(type) {
 		case string:
 			contentStr = v
-		case []any:
+		case []Content:
 			if len(v) > 0 {
-				// Assuming Content[0].Text equivalent structure in an array of maps
-				if firstItem, ok := v[0].(map[string]any); ok {
-					if textVal, exists := firstItem["text"].(string); exists {
-						contentStr = textVal
-					}
-				}
-			}
-		case []map[string]any: // Optional specific type variant depending on JSON unmarshaling setup
-			if len(v) > 0 {
-				if textVal, exists := v[0]["text"].(string); exists {
-					contentStr = textVal
-				}
+				contentStr = v[0].Text
 			}
 		}
 
-		var parsed any
-		if err := json.Unmarshal([]byte(contentStr), &parsed); err == nil {
-			Logger.Debug("Parsed JSON content", "content", parsed)
-		} else {
-			Logger.Debug("Content preview", "content", contentStr)
-		}
+		Logger.Debug("Content preview", "content", contentStr)
 	}
 }
 
 func LogLLMResponse(response LLMResponse) {
-	Logger.Debug("parsed", "parsed", response)
+	Logger.Debug("LLM Response", "response", response)
 
 	for i, choice := range response.Choices {
 		role := choice.Message.Role
@@ -68,5 +53,5 @@ func LogLLMResponse(response LLMResponse) {
 	Logger.Info("Usage", "usage", response.Usage)
 
 	tps := response.Timings.PredictedPerSecond
-	Logger.Info("Speed (tokens/sec)", "tps", float64(int(tps*100))/100)
+	Logger.Info("Speed", "tps", float64(int(tps*100))/100)
 }

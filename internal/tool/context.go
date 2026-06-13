@@ -58,7 +58,8 @@ func (tc *ToolContext) BuildPrompt() string {
 	var sb strings.Builder
 
 	for _, tool := range tc.Registry.List() {
-		sb.WriteString(tool.Function.Name + ": ")
+		sb.WriteString(tool.Function.Name)
+		sb.WriteString(": ")
 		sb.WriteString(tool.Function.Description)
 		sb.WriteString("\n")
 	}

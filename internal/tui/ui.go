@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ const (
 	ToolValue
 	ErrorPrompt
 	Error
+	Spinner
 )
 
 var Logger = logger.Logger
@@ -241,6 +243,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 
 			Logger.Debug("Agentic loop completed", "response", resp)
+			Logger.Debug(">>>>>", "messages", fmt.Sprintf("%+v", m.messages))
 
 			m.state = stateInput
 			return m, nil
@@ -338,11 +341,11 @@ func (m model) View() tea.View {
 		}
 
 		if m.fullReason.Len() == 0 && m.fullResponse.Len() == 0 && m.toolArgs.Len() == 0 {
-			sb.WriteString("\n" + m.spinner.View() + " Iris thinking...\n")
+			sb.WriteString("\n" + m.renderFor(Spinner, " Iris thinking...\n"))
 		} else if m.fullReason.Len() > 0 && m.fullResponse.Len() == 0 {
-			sb.WriteString("\n" + m.spinner.View() + " Iris reasoning...\n")
+			sb.WriteString("\n" + m.renderFor(Spinner, " Iris reasoning...\n"))
 		} else if m.toolArgs.Len() > 0 && m.fullResponse.Len() == 0 {
-			sb.WriteString("\n" + m.spinner.View() + " Iris tooling...\n")
+			sb.WriteString("\n" + m.renderFor(Spinner, " Iris tooling...\n"))
 		}
 	}
 
@@ -391,6 +394,17 @@ func (m model) renderFor(component component, text string) string {
 		return style.Foreground(lipgloss.Color("#CC310E")).Bold(true).Render(text)
 	case Error:
 		return style.Foreground(lipgloss.Color("#FF6E64")).Width(m.width).Render(text)
+	case Spinner:
+		var color string
+		if strings.Contains(text, "thinking") {
+			color = "#E3963E"
+		} else if strings.Contains(text, "reasoning") {
+			color = "#FFBF00"
+		} else if strings.Contains(text, "tooling") {
+			color = "#C678DD"
+		}
+		m.spinner.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+		return m.spinner.View() + m.spinner.Style.Render(text)
 	default:
 		return style.Width(m.width).Render(text)
 	}
@@ -430,7 +444,6 @@ func initialModel(agent *agent.Agent) model {
 		},
 		FPS: time.Second / 10,
 	}
-	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#E3963E"))
 
 	return model{
 		agent:        agent,

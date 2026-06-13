@@ -22,19 +22,13 @@ type LLMChoice struct {
 func init() {
 	levelVar.Set(slog.LevelDebug)
 
-	// consoleHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-	// 	Level: levelVar,
-	// })
-
 	file, err := os.OpenFile("iris_debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
 	if err != nil {
 		panic(err)
 	}
-	fileHandler := slog.NewJSONHandler(file, &slog.HandlerOptions{
-		Level: levelVar,
-	})
+	fileHandler := slog.NewJSONHandler(file, &slog.HandlerOptions{Level: levelVar})
 
-	Logger = slog.New(slog.NewMultiHandler( /*consoleHandler,*/ fileHandler))
+	Logger = slog.New(slog.NewMultiHandler(fileHandler))
 }
 
 func SetDebug(enable bool) {
@@ -43,5 +37,5 @@ func SetDebug(enable bool) {
 	} else {
 		levelVar.Set(slog.LevelInfo)
 	}
-	Logger.Debug("Debug mode", "enabled", enable)
+	Logger.Debug("Debug mode enabled")
 }

@@ -21,7 +21,6 @@ type Agent struct {
 	state            string
 	step             int
 	goals            []string
-	currentTask      int
 	history          []llm.ChatMessage
 	maxSteps         int
 	workdir          string
@@ -39,13 +38,12 @@ func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 	toolContext = &tool.ToolContext{Registry: registry, Workdir: workdir}
 
 	return &Agent{
-		client:      client,
-		state:       "idle",
-		goals:       []string{},
-		currentTask: -1,
-		history:     []llm.ChatMessage{},
-		maxSteps:    50, // Prevent infinite loops
-		workdir:     workdir,
+		client:   client,
+		state:    "idle",
+		goals:    []string{},
+		history:  []llm.ChatMessage{},
+		maxSteps: 100, // Prevent infinite loops
+		workdir:  workdir,
 	}
 }
 
@@ -64,18 +62,25 @@ func (a *Agent) RunSync(input string) error {
 }
 
 func (a *Agent) reset() {
+	Logger.Info("Resetting agent state")
+
 	a.state = "idle"
 	a.step = 0
 	a.goals = []string{}
-	a.currentTask = -1
 	a.history = []llm.ChatMessage{}
 }
 
 func (a *Agent) loop(onChunk func(chunkType string, content string), onError func(error)) error {
+	Logger.Info("Starting agentic loop")
+
 	registry := tool.NewDefaultRegistry()
 
 	for a.step < a.maxSteps {
-		Logger.Debug("Agent Loop", "step", a.step, "state", a.state, "currentTask", a.currentTask)
+		Logger.Debug(
+			"Agentic Loop",
+			"step", a.step,
+			"state", a.state,
+		)
 
 		onChunk("next", fmt.Sprintf("%d", a.step))
 
@@ -84,11 +89,10 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 		}
 
 		switch a.state {
-		case "respond":
-			Logger.Debug("Agent is responding to user")
-			return nil
-
 		case "tool":
+			Logger.Info("Agent is calling tools")
+			Logger.Debug("Tool calls", "count", len(a.pendingToolCalls))
+
 			ctx := context.Background()
 			ctx = tool.WithWorkdir(ctx, a.workdir)
 
@@ -104,7 +108,8 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 				if err != nil {
 					resultStr = fmt.Sprintf("failed: %v", err)
 				} else {
-					resultStr = formatResult(result)
+					jsonBytes, _ := json.Marshal(result)
+					resultStr = string(jsonBytes)
 				}
 
 				Logger.Debug(
@@ -130,11 +135,11 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 			a.state = "idle"
 
 		case "done":
-			Logger.Debug("Agent loop completed")
+			Logger.Info("Agentic loop completed")
 			return nil
 
 		default:
-			Logger.Warn("Unknown state", "state", a.state)
+			Logger.Error("Unknown state", "state", a.state)
 			a.state = "idle"
 		}
 
@@ -142,15 +147,18 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 	}
 
 	Logger.Warn("Max steps reached", "maxSteps", a.maxSteps)
+	onChunk("response", "max steps reached")
+
 	return nil
 }
 
 func (a *Agent) next(onChunk func(chunkType string, content string), onError func(error)) error {
-	Logger.Debug("Decision phase", "history", a.history)
+	Logger.Info("Generating next response from LLM")
+	Logger.Debug("Next response", "historyLength", len(a.history))
 
 	tools := toolContext.Registry.List()
 
-	chunk, err := a.client.Generate(
+	response, err := a.client.Generate(
 		a.history,
 		tools,
 		nil,
@@ -161,13 +169,18 @@ func (a *Agent) next(onChunk func(chunkType string, content string), onError fun
 		return fmt.Errorf("LLM generation failed: %w", err)
 	}
 
-	Logger.Debug("next: LLM response received", "response", chunk)
+	Logger.Debug("LLM response received", "response", response)
 
-	delta := chunk.Choices[0].Delta
+	delta := response.Choices[0].Delta
 
 	msg := llm.ChatMessage{
 		Role:    "assistant",
 		Content: delta.Content,
+	}
+
+	if delta.Content != "" {
+		Logger.Debug("Message added to history", "message", msg)
+		a.history = append(a.history, msg)
 	}
 
 	if len(delta.ToolCalls) > 0 {
@@ -211,51 +224,15 @@ func (a *Agent) next(onChunk func(chunkType string, content string), onError fun
 			a.pendingToolCalls = append(a.pendingToolCalls, call)
 		}
 
+		Logger.Debug("Message added to history", "message", msg)
 		a.history = append(a.history, msg)
-
-		Logger.Debug(
-			"Tool execution decision",
-			"count", len(a.pendingToolCalls),
-		)
-
 		a.state = "tool"
 		return nil
 	}
 
-	if delta.Content != "" {
-		a.history = append(a.history, msg)
-	}
-
-	if chunk.Choices[0].FinishReason == "stop" {
+	if response.Choices[0].FinishReason == "stop" {
 		a.state = "done"
-		return nil
 	}
 
 	return nil
-}
-
-func formatResult(result map[string]any) string {
-	if result == nil {
-		return "(no output)"
-	}
-
-	content, ok := result["content"].(string)
-	if ok && content != "" {
-		return truncateString(content, 500)
-	}
-
-	// Try to marshal as JSON if not a simple string
-	jsonBytes, err := json.MarshalIndent(result, "", "  ")
-	if err == nil {
-		return string(jsonBytes[:min(len(jsonBytes), 1000)]) + "..."
-	}
-
-	return fmt.Sprintf("%v", result)
-}
-
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }

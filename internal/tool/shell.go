@@ -89,7 +89,7 @@ func (t *ShellTool) Execute(ctx context.Context, args map[string]any) (map[strin
 	}
 
 	return map[string]any{
-		"output": string(out),
-		"file":   tempFile.Name(),
+		"output":           string(out),
+		"full_output_file": tempFile.Name(),
 	}, err
 }

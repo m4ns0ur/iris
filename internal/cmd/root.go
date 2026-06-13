@@ -30,12 +30,13 @@ func init() {
 func Execute() {
 	err := rootCmd.Execute()
 	if err != nil {
-		Logger.Error("Failed to execute command", "error", err)
+		Logger.Error("Failed to execute the root command", "error", err)
 		os.Exit(1)
 	}
 }
 
 func startTui(cmd *cobra.Command, args []string) {
+	Logger.Info("Starting TUI")
 	logger.SetDebug(debug)
 
 	if workdir != "" {
@@ -56,7 +57,7 @@ func startTui(cmd *cobra.Command, args []string) {
 	agent := agent.NewAgent(client, workdir)
 
 	if err := tui.Run(agent); err != nil {
-		Logger.Error("Bubble Tea program failed", "error", err)
+		Logger.Error("TUI failed to start", "error", err)
 		os.Exit(1)
 	}
 }

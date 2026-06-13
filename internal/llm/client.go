@@ -173,94 +173,11 @@ func NewClient(model string) *LLMClient {
 }
 
 func (c *LLMClient) Generate(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
+	Logger.Debug("Generating response from LLM", "messageCount", len(messages), "toolCount", len(tools))
 	if onChunk != nil || onError != nil {
 		return c.GenerateStream(messages, tools, opts, onChunk, onError)
 	}
 	return Chunk{}, fmt.Errorf("synchronous generation is not supported, onChunk or onError callback must be provided")
-}
-
-func (c *LLMClient) GenerateSync(messages []ChatMessage, tools []Tool, opts *LLMOptions) (string, error) {
-	payload := createPayload(c.Model, messages, tools, opts)
-
-	LogLLMPayload(payload)
-
-	doRequest := func() (*http.Response, error) {
-		bodyBytes, err := json.Marshal(payload)
-		if err != nil {
-			return nil, err
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
-		defer cancel()
-
-		req, err := http.NewRequestWithContext(ctx, "POST", c.URL, bytes.NewReader(bodyBytes))
-		if err != nil {
-			return nil, err
-		}
-
-		req.Header.Set("Content-Type", "application/json")
-
-		res, err := c.HTTP.Do(req)
-		if err != nil {
-			if ctx.Err() == context.DeadlineExceeded {
-				Logger.Error("Request timed out")
-			}
-			return nil, err
-		}
-
-		if res.StatusCode < 200 || res.StatusCode >= 300 {
-			res.Body.Close()
-			return nil, fmt.Errorf("HTTP %d %s", res.StatusCode, res.Status)
-		}
-
-		return res, nil
-	}
-
-	var (
-		res        *http.Response
-		err        error
-		retryDelay = time.Second
-	)
-
-	for attempt := 1; attempt <= MaxRetries; attempt++ {
-		if attempt > 1 {
-			Logger.Warn("LLM request failed, retrying...", "attempt", attempt, "maxRetries", MaxRetries)
-			time.Sleep(retryDelay)
-			retryDelay *= 2
-		}
-
-		res, err = doRequest()
-		if err == nil {
-			break
-		}
-
-		if attempt < MaxRetries {
-			Logger.Warn("LLM request failed", "attempt", attempt, "error", err)
-		} else {
-			Logger.Error("LLM request failed after all retries", "error", err)
-		}
-	}
-
-	if res == nil || err != nil {
-		return "", fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
-	}
-	defer res.Body.Close()
-
-	raw, err := io.ReadAll(res.Body)
-	if err != nil {
-		return "", err
-	}
-
-	var llmResponse LLMResponse
-	if err := json.Unmarshal(raw, &llmResponse); err != nil {
-		Logger.Error("Failed to parse LLM response as JSON", "error", err, "raw_response", string(raw))
-		return "", err
-	}
-
-	LogLLMResponse(llmResponse)
-
-	// TODO: handle reasoning content and tool calls in the response
-	return llmResponse.Choices[0].Message.Content, nil
 }
 
 func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
@@ -325,7 +242,11 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
 		if attempt > 1 {
-			Logger.Warn("LLM streaming request failed, retrying...", "attempt", attempt, "maxRetries", MaxRetries)
+			Logger.Warn(
+				"LLM streaming request failed, retrying...",
+				"attempt", attempt,
+				"maxRetries", MaxRetries,
+			)
 			if err != nil {
 				onError(fmt.Errorf("LLM streaming request failed on attempt %d: %w", attempt-1, err))
 			}
@@ -339,7 +260,11 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 		}
 
 		if attempt < MaxRetries {
-			Logger.Warn("LLM streaming request failed", "attempt", attempt, "error", err)
+			Logger.Warn(
+				"LLM streaming request failed",
+				"attempt", attempt,
+				"error", err,
+			)
 		} else {
 			Logger.Error("LLM streaming request failed after all retries", "error", err)
 		}
@@ -396,7 +321,11 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 
 		var chunk Chunk
 		if err := json.Unmarshal(data, &chunk); err != nil {
-			Logger.Error("Failed to parse chunk as JSON", "error", err, "chunk", string(data))
+			Logger.Error(
+				"Failed to parse chunk as JSON",
+				"error", err,
+				"chunk", string(data),
+			)
 			continue
 		}
 
@@ -473,7 +402,7 @@ func createPayload(model string, messages []ChatMessage, tools []Tool, opts *LLM
 		Messages:    messages,
 		Tools:       tools,
 		MaxTokens:   32768,
-		Temperature: 0.80,
+		Temperature: 1.0,
 		ExtraBody: ExtraBody{
 			ChatTemplateKwargs: ChatTemplateKwargs{
 				EnableThinking: true,
