@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/tree"
 	"github.com/m4ns0ur/iris/internal/agent"
 	"github.com/m4ns0ur/iris/internal/logger"
 )
@@ -53,6 +54,7 @@ type model struct {
 	previewContent string
 	previewCommand string
 	width          int
+	height         int
 	state          state
 	inputText      textarea.Model
 	stream         chan tea.Msg
@@ -98,6 +100,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 		m.inputText.SetWidth(msg.Width - 2)
 	}
 
@@ -282,22 +285,21 @@ func (m model) View() tea.View {
 			sb.WriteString(m.renderFor(Reasoning, msg.content) + "\n")
 
 		case "tool":
-			sb.WriteString(m.renderFor(ToolPrompt, msg.toolName) + "\n")
+			t := tree.Root(m.renderFor(ToolPrompt, msg.toolName))
 
 			if msg.previewPath != "" {
-				sb.WriteString(m.renderFor(ToolKey, "Path: "))
-				sb.WriteString(m.renderFor(ToolValue, msg.previewPath) + "\n")
+				t.Child(m.renderFor(ToolKey, "Path: ") + m.renderFor(ToolValue, msg.previewPath))
 			}
 
 			if msg.previewContent != "" {
-				sb.WriteString(m.renderFor(ToolKey, "Content: "))
-				sb.WriteString(m.renderFor(ToolValue, msg.previewContent) + "\n")
+				t.Child(m.renderFor(ToolKey, "Content: ") + m.renderFor(ToolValue, msg.previewContent))
 			}
 
 			if msg.previewCommand != "" {
-				sb.WriteString(m.renderFor(ToolKey, "Command: "))
-				sb.WriteString(m.renderFor(ToolValue, msg.previewCommand) + "\n")
+				t.Child(m.renderFor(ToolKey, "Command: ") + m.renderFor(ToolValue, msg.previewCommand))
 			}
+
+			sb.WriteString(t.String() + "\n")
 
 		case "error":
 			sb.WriteString(m.renderFor(ErrorPrompt, "Error> "))
@@ -318,30 +320,29 @@ func (m model) View() tea.View {
 		}
 
 		if m.toolArgs.Len() > 0 {
-			sb.WriteString(m.renderFor(ToolPrompt, m.toolName) + "\n")
+			t := tree.Root(m.renderFor(ToolPrompt, m.toolName))
 
 			if m.previewPath != "" {
-				sb.WriteString(m.renderFor(ToolKey, "Path: "))
-				sb.WriteString(m.renderFor(ToolValue, m.previewPath) + "\n")
+				t.Child(m.renderFor(ToolKey, "Path: ") + m.renderFor(ToolValue, m.previewPath))
 			}
 
 			if m.previewContent != "" {
-				sb.WriteString(m.renderFor(ToolKey, "Content: "))
-				sb.WriteString(m.renderFor(ToolValue, m.previewContent) + "\n")
+				t.Child(m.renderFor(ToolKey, "Content: ") + m.renderFor(ToolValue, m.previewContent))
 			}
 
 			if m.previewCommand != "" {
-				sb.WriteString(m.renderFor(ToolKey, "Command: "))
-				sb.WriteString(m.renderFor(ToolValue, m.previewCommand) + "\n")
+				t.Child(m.renderFor(ToolKey, "Command: ") + m.renderFor(ToolValue, m.previewCommand))
 			}
+
+			sb.WriteString(t.String() + "\n")
 		}
 
 		if m.fullReason.Len() == 0 && m.fullResponse.Len() == 0 && m.toolArgs.Len() == 0 {
-			sb.WriteString("\n" + m.spinner.View() + " Iris is thinking...\n")
+			sb.WriteString("\n" + m.spinner.View() + " Iris thinking...\n")
 		} else if m.fullReason.Len() > 0 && m.fullResponse.Len() == 0 {
-			sb.WriteString("\n" + m.spinner.View() + " Iris is reasoning...\n")
+			sb.WriteString("\n" + m.spinner.View() + " Iris reasoning...\n")
 		} else if m.toolArgs.Len() > 0 && m.fullResponse.Len() == 0 {
-			sb.WriteString("\n" + m.spinner.View() + " Iris is calling a tool...\n")
+			sb.WriteString("\n" + m.spinner.View() + " Iris tooling...\n")
 		}
 	}
 
@@ -369,25 +370,25 @@ func (m model) renderFor(component component, text string) string {
 
 	switch component {
 	case UserPrompt:
-		return style.Foreground(lipgloss.Color("#BB9AF7")).Render(text)
+		return style.Foreground(lipgloss.Color("#58A6FF")).Render(text)
 	case User:
 		return m.renderMarkdown(text)
 	case IrisPrompt:
-		return style.Foreground(lipgloss.Color("#7DCFFF")).Render(text)
+		return style.Foreground(lipgloss.Color("#E3963E")).PaddingTop(1).Render(text)
 	case Iris:
 		return m.renderMarkdown(text)
 	case ReasoningPrompt:
-		return style.Foreground(lipgloss.Color("#2AC3DE")).Render(text)
+		return style.Foreground(lipgloss.Color("#FFBF00")).PaddingTop(1).Render(text)
 	case Reasoning:
-		return style.Foreground(lipgloss.Color("#565F89")).Italic(true).Width(m.width).Render(text)
+		return style.Foreground(lipgloss.Color("#8B949E")).Italic(true).Width(m.width).Render(text)
 	case ToolPrompt:
-		return style.Foreground(lipgloss.Color("#9ECE6A")).Render(text)
+		return style.Foreground(lipgloss.Color("#C678DD")).PaddingTop(1).Render(text)
 	case ToolKey:
-		return style.Foreground(lipgloss.Color("#E0AF68")).Render(text)
+		return style.Foreground(lipgloss.Color("#9ECE6A")).Render(text)
 	case ToolValue:
-		return style.Foreground(lipgloss.Color("#C0CAF5")).Width(m.width).Render(text)
+		return style.Foreground(lipgloss.Color("#8B949E")).Width(m.width).Render(text)
 	case ErrorPrompt:
-		return style.Foreground(lipgloss.Color("#FF6E64")).Bold(true).Render(text)
+		return style.Foreground(lipgloss.Color("#CC310E")).Bold(true).Render(text)
 	case Error:
 		return style.Foreground(lipgloss.Color("#FF6E64")).Width(m.width).Render(text)
 	default:
@@ -429,7 +430,7 @@ func initialModel(agent *agent.Agent) model {
 		},
 		FPS: time.Second / 10,
 	}
-	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF9E64"))
+	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#E3963E"))
 
 	return model{
 		agent:        agent,
@@ -476,6 +477,3 @@ func extractStringField(partialJSON, field string) (string, bool) {
 
 	return "", false
 }
-
-// | Background | Base | `#1a1b26` |
-// | Title bar | Darker base | `#16161e` |
