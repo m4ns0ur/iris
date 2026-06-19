@@ -3,8 +3,6 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -162,6 +160,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 
 		case chunkMsg:
+			var cmds []tea.Cmd
 			switch msg.chunkType {
 			case "next":
 				if m.fullReason.Len() > 0 {
@@ -193,8 +192,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.previewContent = ""
 					m.previewCommand = ""
 				}
+
 			case "reason":
 				m.fullReason.WriteString(msg.content)
+
 			case "tool":
 				var delta toolCallDelta
 				if err := json.Unmarshal([]byte(msg.content), &delta); err != nil {
@@ -209,23 +210,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.toolArgs.WriteString(delta.Arguments)
 				}
 
-				args := m.toolArgs.String()
+				toolArgs := m.toolArgs.String()
 
-				if path, ok := extractStringField(args, "path"); ok {
+				if path, ok := partialJSONField(toolArgs, "path"); ok {
 					m.previewPath = path
 				}
 
-				if content, ok := extractStringField(args, "content"); ok {
+				if content, ok := partialJSONField(toolArgs, "content"); ok {
 					m.previewContent = content
 				}
 
-				if command, ok := extractStringField(args, "command"); ok {
+				if command, ok := partialJSONField(toolArgs, "command"); ok {
 					m.previewCommand = command
 				}
+
 			case "response":
 				m.fullResponse.WriteString(msg.content)
 			}
-			return m, waitForStream(m.stream)
+
+			cmds = append(cmds, waitForStream(m.stream))
+			return m, tea.Batch(cmds...)
 
 		case doneMsg:
 			reason := m.fullReason.String()
@@ -356,7 +360,6 @@ func (m model) View() tea.View {
 }
 
 func (m model) renderMarkdown(content string) string {
-	// Themes: dark, light, notty, dracula, tokyo-night
 	r, err := glamour.NewTermRenderer(glamour.WithWordWrap(m.width), glamour.WithStylePath("dark"))
 	if err != nil {
 		return content
@@ -455,38 +458,4 @@ func initialModel(agent *agent.Agent) model {
 		stream:       make(chan tea.Msg),
 		spinner:      spin,
 	}
-}
-
-func extractStringField(partialJSON, field string) (string, bool) {
-	// Both patterns share the same core: an escape sequence (\\.) takes
-	// priority over a plain non-quote char ([^"]), so escaped quotes inside
-	// the value are consumed rather than terminating the match.
-	//
-	// Complete: requires an unescaped closing quote at the end.
-	// We validate with Unquote because the greedy engine can still produce a
-	// spurious match when the buffer ends mid-escape (e.g. content ends with \\").
-	completeRe := regexp.MustCompile(
-		`"` + regexp.QuoteMeta(field) + `"` + `\s*:\s*"((?:\\.|[^"])*)"`,
-	)
-	for _, m := range completeRe.FindAllStringSubmatch(partialJSON, -1) {
-		if s, err := strconv.Unquote(`"` + m[1] + `"`); err == nil {
-			return s, s != ""
-		}
-	}
-
-	// Partial: value still open — no unescaped closing quote yet.
-	// [^"\\] excludes both quote and backslash so we never cross an escape
-	// boundary. The trailing \\? absorbs a lone \\ at end-of-buffer (the
-	// second byte of an escape pair hasn't arrived yet).
-	partialRe := regexp.MustCompile(
-		`"` + regexp.QuoteMeta(field) + `"` + `\s*:\s*"((?:\\.|[^"\\])*)\\?$`,
-	)
-	if m := partialRe.FindStringSubmatch(partialJSON); len(m) == 2 && m[1] != "" {
-		if s, err := strconv.Unquote(`"` + m[1] + `"`); err == nil {
-			return s, s != ""
-		}
-		return m[1], true
-	}
-
-	return "", false
 }
