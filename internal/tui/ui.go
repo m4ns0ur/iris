@@ -8,6 +8,7 @@ import (
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
@@ -16,13 +17,20 @@ import (
 	"github.com/m4ns0ur/iris/internal/logger"
 )
 
-const InputHeight = 2
+const (
+	InputHeight    = 1
+	InputHeightMax = 14
+	InputBorder    = 2
+	SpinnerHeight  = 1
+	StatusHeight   = 1
+	BottomHeight   = InputHeight + InputBorder + SpinnerHeight + StatusHeight
+)
 
 type state int
 
 const (
-	stateInput state = iota
-	stateStreaming
+	StateInput state = iota
+	StateStreaming
 )
 
 type component int
@@ -60,6 +68,8 @@ type model struct {
 	stream         chan tea.Msg
 	spinner        spinner.Model
 	messages       []message
+	viewport       viewport.Model
+	ready          bool
 }
 
 type toolCallDelta struct {
@@ -68,7 +78,7 @@ type toolCallDelta struct {
 }
 
 type message struct {
-	role           string // "user" | "assistant" | "reasoning" | "error"
+	role           string
 	content        string
 	toolName       string
 	toolArgs       string
@@ -78,18 +88,95 @@ type message struct {
 }
 
 type chunkMsg struct {
-	chunkType string // "reason" | "response"
+	chunkType string
 	content   string
 }
 
 type doneMsg struct{}
 
-type errMsg struct {
-	error
+type errMsg struct{ error }
+
+type fatalErrMsg struct{ error }
+
+func (m model) viewportHeight() int {
+	return max(m.height-BottomHeight, 1)
 }
 
-type fatalErrMsg struct {
-	error
+func (m model) contentWidth() int {
+	if m.width < 1 {
+		return 80
+	}
+	return m.width
+}
+
+func (m model) buildContent() string {
+	var sb strings.Builder
+	for _, msg := range m.messages {
+		sb.WriteString(m.renderMessage(msg))
+	}
+	if m.state == StateStreaming {
+		if m.fullReason.Len() > 0 {
+			sb.WriteString(m.renderFor(ReasoningPrompt, "Reasoning> "))
+			sb.WriteString(m.renderFor(Reasoning, m.fullReason.String()) + "\n")
+		}
+		if m.toolArgs.Len() > 0 {
+			t := tree.Root(m.renderFor(ToolPrompt, m.toolName))
+			if m.previewPath != "" {
+				t.Child(m.renderFor(ToolKey, "Path: ") + m.renderFor(ToolValue, m.previewPath))
+			}
+			if m.previewContent != "" {
+				t.Child(m.renderFor(ToolKey, "Content: ") + m.renderFor(ToolValue, m.previewContent))
+			}
+			if m.previewCommand != "" {
+				t.Child(m.renderFor(ToolKey, "Command: ") + m.renderFor(ToolValue, m.previewCommand))
+			}
+			sb.WriteString(t.String() + "\n")
+		}
+		if m.fullResponse.Len() > 0 {
+			sb.WriteString(m.renderFor(IrisPrompt, "Iris> "))
+			sb.WriteString(m.renderFor(Iris, m.fullResponse.String()))
+		}
+	}
+	return sb.String()
+}
+
+func (m model) renderMessage(msg message) string {
+	var sb strings.Builder
+	switch msg.role {
+	case "user":
+		sb.WriteString(m.renderFor(UserPrompt, "You> "))
+		sb.WriteString(m.renderFor(User, msg.content))
+	case "assistant":
+		sb.WriteString(m.renderFor(IrisPrompt, "Iris> "))
+		sb.WriteString(m.renderFor(Iris, msg.content))
+	case "reasoning":
+		sb.WriteString(m.renderFor(ReasoningPrompt, "Reasoning> "))
+		sb.WriteString(m.renderFor(Reasoning, msg.content) + "\n")
+	case "tool":
+		t := tree.Root(m.renderFor(ToolPrompt, msg.toolName))
+		if msg.previewPath != "" {
+			t.Child(m.renderFor(ToolKey, "Path: ") + m.renderFor(ToolValue, msg.previewPath))
+		}
+		if msg.previewContent != "" {
+			t.Child(m.renderFor(ToolKey, "Content: ") + m.renderFor(ToolValue, msg.previewContent))
+		}
+		if msg.previewCommand != "" {
+			t.Child(m.renderFor(ToolKey, "Command: ") + m.renderFor(ToolValue, msg.previewCommand))
+		}
+		sb.WriteString(t.String() + "\n")
+	case "error":
+		sb.WriteString(m.renderFor(ErrorPrompt, "Error> "))
+		sb.WriteString(m.renderFor(Error, msg.content) + "\n")
+	}
+	return sb.String()
+}
+
+func (m *model) syncViewport() {
+	atBottom := m.viewport.AtBottom()
+	m.viewport.SetContent(m.buildContent())
+	if atBottom {
+		m.viewport.GotoBottom()
+	}
 }
 
 func (m model) Init() tea.Cmd {
@@ -97,40 +184,55 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.inputText.SetWidth(msg.Width - 2)
+		m.inputText.SetWidth(m.width - 4)
+
+		if !m.ready {
+			m.viewport = viewport.New(
+				viewport.WithWidth(m.contentWidth()),
+				viewport.WithHeight(m.viewportHeight()),
+			)
+			m.viewport.SetContent(m.buildContent())
+			m.viewport.GotoBottom()
+			m.ready = true
+		} else {
+			m.viewport.SetWidth(m.contentWidth())
+			m.viewport.SetHeight(m.viewportHeight())
+			m.syncViewport()
+		}
 	}
 
 	switch m.state {
-	case stateInput:
+	case StateInput:
 		switch msg := msg.(type) {
 		case tea.KeyPressMsg:
 			switch msg.String() {
 			case "shift+enter":
 				m.inputText.InsertRune('\n')
-				m.inputText.SetHeight(m.inputText.Height() + 1)
+				if m.inputText.Height() < InputHeightMax {
+					m.inputText.SetHeight(m.inputText.Height() + 1)
+					m.viewport.SetHeight(m.viewport.Height() - 1)
+				}
+				return m, nil
 
 			case "enter":
 				input := m.inputText.Value()
 				if strings.TrimSpace(input) == "" {
 					return m, nil
 				}
-
 				m.inputText.SetHeight(InputHeight)
 				m.inputText.Reset()
-
-				m.messages = append(m.messages, message{
-					role:    "user",
-					content: input,
-				})
-
+				m.viewport.SetHeight(m.height - BottomHeight)
+				m.messages = append(m.messages, message{role: "user", content: input})
 				m.fullReason.Reset()
 				m.fullResponse.Reset()
-				m.state = stateStreaming
-
+				m.state = StateStreaming
+				m.syncViewport()
 				return m, tea.Batch(
 					m.spinner.Tick,
 					runAgenticLoopCommand(m.agent, input, m.stream),
@@ -139,19 +241,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case "ctrl+c":
 				return m, tea.Quit
+
+			case "pgup", "ctrl+u":
+				m.viewport, _ = m.viewport.Update(msg)
+				return m, nil
+
+			case "pgdown", "ctrl+d":
+				m.viewport, _ = m.viewport.Update(msg)
+				return m, nil
 			}
 		}
 
-		var cmd tea.Cmd
-		m.inputText, cmd = m.inputText.Update(msg)
-		return m, cmd
+		var vpCmd tea.Cmd
+		m.viewport, vpCmd = m.viewport.Update(msg)
+		cmds = append(cmds, vpCmd)
 
-	case stateStreaming:
+		var taCmd tea.Cmd
+		m.inputText, taCmd = m.inputText.Update(msg)
+		cmds = append(cmds, taCmd)
+
+		return m, tea.Batch(cmds...)
+
+	case StateStreaming:
 		switch msg := msg.(type) {
 		case tea.KeyPressMsg:
 			switch msg.String() {
 			case "ctrl+c":
 				return m, tea.Quit
+			case "pgup", "ctrl+u":
+				m.viewport, _ = m.viewport.Update(msg)
+				return m, nil
+			case "pgdown", "ctrl+d":
+				m.viewport, _ = m.viewport.Update(msg)
+				return m, nil
 			}
 
 		case spinner.TickMsg:
@@ -160,7 +282,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 
 		case chunkMsg:
-			var cmds []tea.Cmd
 			switch msg.chunkType {
 			case "next":
 				if m.fullReason.Len() > 0 {
@@ -169,13 +290,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						content: m.fullReason.String(),
 					})
 					m.fullReason.Reset()
-				}
-				if m.fullResponse.Len() > 0 {
-					m.messages = append(m.messages, message{
-						role:    "assistant",
-						content: m.fullResponse.String(),
-					})
-					m.fullResponse.Reset()
 				}
 				if m.toolArgs.Len() > 0 {
 					m.messages = append(m.messages, message{
@@ -192,175 +306,178 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.previewContent = ""
 					m.previewCommand = ""
 				}
-
 			case "reason":
 				m.fullReason.WriteString(msg.content)
-
 			case "tool":
 				var delta toolCallDelta
 				if err := json.Unmarshal([]byte(msg.content), &delta); err != nil {
 					break
 				}
-
 				if delta.Name != "" {
 					m.toolName = delta.Name
 				}
-
 				if delta.Arguments != "" {
 					m.toolArgs.WriteString(delta.Arguments)
 				}
-
 				toolArgs := m.toolArgs.String()
-
 				if path, ok := partialJSONField(toolArgs, "path"); ok {
 					m.previewPath = path
 				}
-
 				if content, ok := partialJSONField(toolArgs, "content"); ok {
 					m.previewContent = content
 				}
-
 				if command, ok := partialJSONField(toolArgs, "command"); ok {
 					m.previewCommand = command
 				}
-
 			case "response":
 				m.fullResponse.WriteString(msg.content)
 			}
 
+			m.syncViewport()
 			cmds = append(cmds, waitForStream(m.stream))
 			return m, tea.Batch(cmds...)
 
 		case doneMsg:
-			reason := m.fullReason.String()
-			if reason != "" {
+			if m.fullReason.Len() > 0 {
 				m.messages = append(m.messages, message{
 					role:    "reasoning",
-					content: reason,
+					content: m.fullReason.String(),
 				})
+				m.fullReason.Reset()
 			}
-
 			resp := m.fullResponse.String()
-			m.messages = append(m.messages, message{
-				role:    "assistant",
-				content: resp,
-			})
-
+			m.fullResponse.Reset()
+			m.messages = append(m.messages, message{role: "assistant", content: resp})
 			Logger.Debug("Agentic loop completed", "response", resp)
 			Logger.Debug(">>>>>", "messages", fmt.Sprintf("%+v", m.messages))
-
-			m.state = stateInput
+			m.state = StateInput
+			m.syncViewport()
 			return m, nil
 
 		case errMsg:
-			m.messages = append(m.messages, message{
-				role:    "error",
-				content: msg.Error(),
-			})
+			m.messages = append(m.messages, message{role: "error", content: msg.Error()})
+			m.syncViewport()
 			return m, waitForStream(m.stream)
 
 		case fatalErrMsg:
-			m.messages = append(m.messages, message{
-				role:    "error",
-				content: msg.Error(),
-			})
-
-			m.state = stateInput
+			m.messages = append(m.messages, message{role: "error", content: msg.Error()})
+			m.state = StateInput
+			m.syncViewport()
 			return m, nil
 		}
+
+		var vpCmd tea.Cmd
+		m.viewport, vpCmd = m.viewport.Update(msg)
+		cmds = append(cmds, vpCmd)
+		return m, tea.Batch(cmds...)
 	}
 
 	return m, nil
 }
 
 func (m model) View() tea.View {
-	var sb strings.Builder
+	var v tea.View
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 
-	// Render history
-	for _, msg := range m.messages {
-		switch msg.role {
-		case "user":
-			sb.WriteString(m.renderFor(UserPrompt, "You> "))
-			sb.WriteString(m.renderFor(User, msg.content))
+	if !m.ready {
+		v.SetContent("Initializing Iris...")
+		return v
+	}
 
-		case "assistant":
-			sb.WriteString(m.renderFor(IrisPrompt, "Iris> "))
-			sb.WriteString(m.renderFor(Iris, msg.content))
+	v.SetContent(strings.Join([]string{
+		m.viewport.View(),
+		m.spinnerBar(),
+		m.inputBox(),
+		m.statusLine(),
+	}, "\n"))
+	return v
+}
 
-		case "reasoning":
-			sb.WriteString(m.renderFor(ReasoningPrompt, "Reasoning> "))
-			sb.WriteString(m.renderFor(Reasoning, msg.content) + "\n")
+func (m model) spinnerBar() string {
+	w := m.contentWidth()
 
-		case "tool":
-			t := tree.Root(m.renderFor(ToolPrompt, msg.toolName))
+	if m.state == StateStreaming {
+		var color, label string
+		switch {
+		case m.fullReason.Len() > 0 && m.fullResponse.Len() == 0:
+			color, label = ColorYellow, " Iris reasoning..."
+		case m.toolArgs.Len() > 0 && m.fullResponse.Len() == 0:
+			color, label = ColorPurple, " Iris tooling..."
+		default:
+			color, label = ColorOrange, " Iris thinking..."
+		}
+		m.spinner.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+		left := m.spinner.View() + lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(label)
 
-			if msg.previewPath != "" {
-				t.Child(m.renderFor(ToolKey, "Path: ") + m.renderFor(ToolValue, msg.previewPath))
+		if !m.viewport.AtBottom() {
+			hint := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorMuted)).Render("↓ pgdn")
+			gap := w - lipgloss.Width(left) - lipgloss.Width(hint)
+			if gap > 0 {
+				left += strings.Repeat(" ", gap) + hint
 			}
+		}
+		return lipgloss.NewStyle().Width(w).Render(left)
+	}
 
-			if msg.previewContent != "" {
-				t.Child(m.renderFor(ToolKey, "Content: ") + m.renderFor(ToolValue, msg.previewContent))
-			}
+	if !m.viewport.AtBottom() {
+		hint := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorMuted)).Render(fmt.Sprintf("↓ %f2%% — pgup/pgdn to scroll", m.viewport.ScrollPercent()*100))
+		return lipgloss.NewStyle().Width(w).Render(hint)
+	}
+	return lipgloss.NewStyle().Width(w).Render("")
+}
 
-			if msg.previewCommand != "" {
-				t.Child(m.renderFor(ToolKey, "Command: ") + m.renderFor(ToolValue, msg.previewCommand))
-			}
+func (m model) inputBox() string {
+	w := m.contentWidth()
+	borderColor := lipgloss.Color(ColorBorder)
+	if m.state == StateInput {
+		borderColor = lipgloss.Color(ColorBorderFocus)
+	}
 
-			sb.WriteString(t.String() + "\n")
+	bc := lipgloss.NewStyle().Foreground(borderColor)
+	innerW := w - 2
+	fillW := max(innerW, 0)
+	topBar := bc.Render("╭") + bc.Render(strings.Repeat("─", fillW)) + bc.Render("╮")
+	bottomBar := bc.Render("╰" + strings.Repeat("─", innerW) + "╯")
 
-		case "error":
-			sb.WriteString(m.renderFor(ErrorPrompt, "Error> "))
-			sb.WriteString(m.renderFor(Error, msg.content) + "\n")
+	bodyStyle := lipgloss.NewStyle().Foreground(borderColor)
+	taView := m.inputText.View()
+	lines := strings.Split(taView, "\n")
+
+	var body strings.Builder
+	for _, line := range lines {
+		body.WriteString(bodyStyle.Render("│") + " " + line + "\n")
+	}
+
+	bodyStr := strings.TrimSuffix(body.String(), "\n")
+
+	bodyLines := strings.Split(bodyStr, "\n")
+	var finalBody strings.Builder
+	for i, line := range bodyLines {
+		visibleW := lipgloss.Width(line)
+		pad := max(innerW-visibleW, 0)
+		finalBody.WriteString(line + strings.Repeat(" ", pad) + bodyStyle.Render(" │"))
+		if i < len(bodyLines)-1 {
+			finalBody.WriteString("\n")
 		}
 	}
 
-	// Render current streaming response (live)
-	if m.state == stateStreaming {
-		if m.fullReason.Len() > 0 {
-			sb.WriteString(m.renderFor(ReasoningPrompt, "Reasoning> "))
-			sb.WriteString(m.renderFor(Reasoning, m.fullReason.String()) + "\n")
-		}
+	return strings.Join([]string{topBar, finalBody.String(), bottomBar}, "\n")
+}
 
-		if m.fullResponse.Len() > 0 {
-			sb.WriteString(m.renderFor(IrisPrompt, "Iris> "))
-			sb.WriteString(m.renderFor(Iris, m.fullResponse.String()))
-		}
-
-		if m.toolArgs.Len() > 0 {
-			t := tree.Root(m.renderFor(ToolPrompt, m.toolName))
-
-			if m.previewPath != "" {
-				t.Child(m.renderFor(ToolKey, "Path: ") + m.renderFor(ToolValue, m.previewPath))
-			}
-
-			if m.previewContent != "" {
-				t.Child(m.renderFor(ToolKey, "Content: ") + m.renderFor(ToolValue, m.previewContent))
-			}
-
-			if m.previewCommand != "" {
-				t.Child(m.renderFor(ToolKey, "Command: ") + m.renderFor(ToolValue, m.previewCommand))
-			}
-
-			sb.WriteString(t.String() + "\n")
-		}
-
-		if m.fullReason.Len() == 0 && m.fullResponse.Len() == 0 && m.toolArgs.Len() == 0 {
-			sb.WriteString("\n" + m.renderFor(Spinner, " Iris thinking...\n"))
-		} else if m.fullReason.Len() > 0 && m.fullResponse.Len() == 0 {
-			sb.WriteString("\n" + m.renderFor(Spinner, " Iris reasoning...\n"))
-		} else if m.toolArgs.Len() > 0 && m.fullResponse.Len() == 0 {
-			sb.WriteString("\n" + m.renderFor(Spinner, " Iris tooling...\n"))
-		}
+func (m model) statusLine() string {
+	style := lipgloss.NewStyle().Width(m.contentWidth()).Foreground(lipgloss.Color(ColorDim))
+	if m.state == StateStreaming {
+		return style.Render("ctrl+c: quit   pgup/pgdn: scroll")
 	}
-
-	// Always show input text area at bottom
-	sb.WriteString("\n" + m.inputText.View() + "\n")
-
-	return tea.NewView(sb.String())
+	return style.Render("enter: send   shift+enter: newline   pgup/pgdn: scroll   ctrl+c: quit")
 }
 
 func (m model) renderMarkdown(content string) string {
-	r, err := glamour.NewTermRenderer(glamour.WithWordWrap(m.width), glamour.WithStylePath("dark"))
+	r, err := glamour.NewTermRenderer(
+		glamour.WithWordWrap(m.contentWidth()),
+		glamour.WithStylePath("dark"),
+	)
 	if err != nil {
 		return content
 	}
@@ -371,81 +488,29 @@ func (m model) renderMarkdown(content string) string {
 	return out
 }
 
-func (m model) renderFor(component component, text string) string {
-	style := lipgloss.NewStyle()
-
-	switch component {
-	case UserPrompt:
-		return style.Foreground(lipgloss.Color("#58A6FF")).Render(text)
-	case User:
-		return m.renderMarkdown(text)
-	case IrisPrompt:
-		return style.Foreground(lipgloss.Color("#E3963E")).PaddingTop(1).Render(text)
-	case Iris:
-		return m.renderMarkdown(text)
-	case ReasoningPrompt:
-		return style.Foreground(lipgloss.Color("#FFBF00")).PaddingTop(1).Render(text)
-	case Reasoning:
-		return style.Foreground(lipgloss.Color("#8B949E")).Italic(true).Width(m.width).Render(text)
-	case ToolPrompt:
-		return style.Foreground(lipgloss.Color("#C678DD")).PaddingTop(1).Render(text)
-	case ToolKey:
-		return style.Foreground(lipgloss.Color("#9ECE6A")).Render(text)
-	case ToolValue:
-		return style.Foreground(lipgloss.Color("#8B949E")).Width(m.width).Render(text)
-	case ErrorPrompt:
-		return style.Foreground(lipgloss.Color("#CC310E")).Bold(true).Render(text)
-	case Error:
-		return style.Foreground(lipgloss.Color("#FF6E64")).Width(m.width).Render(text)
-	case Spinner:
-		var color string
-		if strings.Contains(text, "thinking") {
-			color = "#E3963E"
-		} else if strings.Contains(text, "reasoning") {
-			color = "#FFBF00"
-		} else if strings.Contains(text, "tooling") {
-			color = "#C678DD"
-		}
-		m.spinner.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(color))
-		return m.spinner.View() + m.spinner.Style.Render(text)
-	default:
-		return style.Width(m.width).Render(text)
-	}
-}
-
 func waitForStream(ch chan tea.Msg) tea.Cmd {
-	return func() tea.Msg {
-		return <-ch
-	}
+	return func() tea.Msg { return <-ch }
 }
 
 func Run(agent *agent.Agent) error {
-	model := initialModel(agent)
-	prg := tea.NewProgram(model)
+	m := initialModel(agent)
+	prg := tea.NewProgram(m)
 	_, err := prg.Run()
 	return err
 }
 
 func initialModel(agent *agent.Agent) model {
-	text := textarea.New()
-	text.Placeholder = "Ask Iris..."
-	text.Focus()
-	text.SetHeight(InputHeight)
-	text.ShowLineNumbers = false
+	ta := textarea.New()
+	ta.Placeholder = "Ask Iris..."
+	ta.SetHeight(InputHeight)
+	ta.ShowLineNumbers = false
+	ta.Prompt = ""
+	ta.Focus()
 
 	spin := spinner.New()
 	spin.Spinner = spinner.Spinner{
-		Frames: []string{
-			"◎", "◉", // open and focus
-			"◑", "◑", "◉", // glance left
-			"◕", "◕", "◉", // glance right
-			"◔", "◔", "◉", // look up
-			"◒", "◒", "◉", // look down
-			"◕", "⌒", "⌒", "◕", "◉", // wink
-			"◕", "◔", "◑", "◒", "◈", "✺", "⊛", "◈", "◉", // dizzy spin
-			"◕", "●", "◕", "◔", "◯", "—", "◯", "◔", "◕", "◉", "◎", // full blink
-		},
-		FPS: time.Second / 10,
+		Frames: SpinnerFrames,
+		FPS:    time.Second / 10,
 	}
 
 	return model{
@@ -453,8 +518,8 @@ func initialModel(agent *agent.Agent) model {
 		fullReason:   &strings.Builder{},
 		fullResponse: &strings.Builder{},
 		toolArgs:     &strings.Builder{},
-		state:        stateInput,
-		inputText:    text,
+		state:        StateInput,
+		inputText:    ta,
 		stream:       make(chan tea.Msg),
 		spinner:      spin,
 	}
