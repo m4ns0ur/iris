@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -18,12 +19,13 @@ import (
 )
 
 const (
-	InputHeight    = 1
-	InputHeightMax = 14
-	InputBorder    = 2
-	SpinnerHeight  = 1
-	StatusHeight   = 1
-	BottomHeight   = InputHeight + InputBorder + SpinnerHeight + StatusHeight
+	InputHeight           = 1
+	InputHeightMax        = 14
+	InputContentHeightMax = 1000
+	InputBorder           = 2
+	SpinnerHeight         = 1
+	StatusHeight          = 1
+	BottomHeight          = InputHeight + InputBorder + SpinnerHeight + StatusHeight
 )
 
 type state int
@@ -171,17 +173,6 @@ func (m model) renderMessage(msg message) string {
 	return sb.String()
 }
 
-func (m *model) syncViewport() {
-	atBottom := m.viewport.AtBottom()
-
-	m.viewport.SetWidth(m.contentWidth())
-	m.viewport.SetContent(m.buildContent())
-
-	if atBottom {
-		m.viewport.GotoBottom()
-	}
-}
-
 func (m model) Init() tea.Cmd {
 	return m.inputText.Focus()
 }
@@ -201,13 +192,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				viewport.WithWidth(m.contentWidth()),
 				viewport.WithHeight(m.viewportHeight()),
 			)
+			m.viewport.SoftWrap = true
 			m.viewport.SetContent(m.buildContent())
 			m.viewport.GotoBottom()
+			m.viewport.FillHeight = true
+			m.viewport.KeyMap = viewport.KeyMap{
+				PageDown: key.NewBinding(key.WithKeys("pgdown")),
+				PageUp:   key.NewBinding(key.WithKeys("pgup")),
+			}
 			m.ready = true
 		} else {
 			m.viewport.SetWidth(m.contentWidth())
 			m.viewport.SetHeight(m.viewportHeight())
-			m.syncViewport()
+			m.resizeLayout()
+			m.viewport.GotoBottom()
 		}
 	}
 
@@ -216,25 +214,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg := msg.(type) {
 		case tea.KeyPressMsg:
 			switch msg.String() {
-			case "shift+enter":
-				m.inputText.InsertRune('\n')
-
-				if m.inputText.Height() < InputHeightMax {
-					m.inputText.SetHeight(m.inputText.Height() + 1)
-				}
-
-				m.viewport.SetHeight(m.viewportHeight())
-				return m, nil
-
 			case "enter":
-				input := m.inputText.Value()
-				if strings.TrimSpace(input) == "" {
+				input := strings.TrimSpace(m.inputText.Value())
+				if input == "" {
 					return m, nil
 				}
 
-				m.inputText.SetHeight(InputHeight)
 				m.inputText.Reset()
-				m.viewport.SetHeight(m.viewportHeight())
 
 				m.messages = append(m.messages, message{
 					role:    "user",
@@ -244,7 +230,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.fullReason.Reset()
 				m.fullResponse.Reset()
 				m.state = StateStreaming
-				m.syncViewport()
+				m.resizeLayout()
+				m.viewport.GotoBottom()
 
 				return m, tea.Batch(
 					m.spinner.Tick,
@@ -255,13 +242,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				return m, tea.Quit
 
-			case "pgup", "ctrl+u":
-				m.viewport, _ = m.viewport.Update(msg)
-				return m, nil
-
-			case "pgdown", "ctrl+d":
-				m.viewport, _ = m.viewport.Update(msg)
-				return m, nil
+			case "pgup", "ctrl+u", "pgdown", "ctrl+d":
+				var cmd tea.Cmd
+				m.viewport, cmd = m.viewport.Update(msg)
+				return m, cmd
 			}
 		}
 
@@ -297,6 +281,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport, _ = m.viewport.Update(msg)
 				return m, nil
 			}
+
+		case tea.MouseWheelMsg:
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			return m, cmd
 
 		case spinner.TickMsg:
 			var cmd tea.Cmd
@@ -355,7 +344,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.fullResponse.WriteString(msg.content)
 			}
 
-			m.syncViewport()
+			m.resizeLayout()
+			m.viewport.GotoBottom()
 			cmds = append(cmds, waitForStream(m.stream))
 			return m, tea.Batch(cmds...)
 
@@ -373,18 +363,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Logger.Debug("Agentic loop completed", "response", resp)
 			Logger.Debug(">>>>>", "messages", fmt.Sprintf("%+v", m.messages))
 			m.state = StateInput
-			m.syncViewport()
+			m.resizeLayout()
+			m.viewport.GotoBottom()
 			return m, nil
 
 		case errMsg:
 			m.messages = append(m.messages, message{role: "error", content: msg.Error()})
-			m.syncViewport()
+			m.resizeLayout()
+			m.viewport.GotoBottom()
 			return m, waitForStream(m.stream)
 
 		case fatalErrMsg:
 			m.messages = append(m.messages, message{role: "error", content: msg.Error()})
 			m.state = StateInput
-			m.syncViewport()
+			m.resizeLayout()
+			m.viewport.GotoBottom()
 			return m, nil
 		}
 
@@ -399,7 +392,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() tea.View {
 	var v tea.View
-	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 
 	if !m.ready {
@@ -468,68 +460,31 @@ func (m model) spinnerBar() string {
 }
 
 func (m model) inputBox() string {
-	w := m.contentWidth()
-	borderColor := lipgloss.Color(ColorBorder)
-	if m.state == StateInput {
-		borderColor = lipgloss.Color(ColorBorderFocus)
+	body := lipgloss.NewStyle().Border(lipgloss.RoundedBorder(), false, true, true, true).BorderForeground(lipgloss.Color(ColorBorderFocus)).Padding(0, 1).Width(m.width).Render(m.inputText.View())
+	b := lipgloss.RoundedBorder()
+	bs := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorBorderFocus))
+
+	var status string
+	if n := m.inputText.ScrollYOffset(); n > 0 {
+		status = bs.Render(b.Top) + lipgloss.NewStyle().Foreground(lipgloss.Color(ColorDim)).Render(fmt.Sprintf(" ↑ %d ", n)) + bs.Render(b.Top)
 	}
 
-	bc := lipgloss.NewStyle().Foreground(borderColor)
-	innerW := w - 2
-
-	fillW := max(innerW, 0)
-
-	indicator := ""
-
-	if m.inputText.Height() >= InputHeightMax {
-		if hidden := m.hiddenInputLines(); hidden > 0 {
-			indicator = fmt.Sprintf(" ↑ %d", hidden)
-		}
-	}
-
-	indicatorStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorOrange))
-
-	indicatorW := lipgloss.Width(indicator)
-
-	topBar := bc.Render("╭") +
-		bc.Render(strings.Repeat("─", max(fillW-indicatorW, 0))) +
-		indicatorStyle.Render(indicator) +
-		bc.Render("╮")
-
-	bottomBar := bc.Render("╰" + strings.Repeat("─", innerW) + "╯")
-
-	bodyStyle := lipgloss.NewStyle().Foreground(borderColor)
-	taView := m.inputText.View()
-	lines := strings.Split(taView, "\n")
-
-	var body strings.Builder
-	for _, line := range lines {
-		body.WriteString(bodyStyle.Render("│") + " " + line + "\n")
-	}
-
-	bodyStr := strings.TrimSuffix(body.String(), "\n")
-
-	bodyLines := strings.Split(bodyStr, "\n")
-	var finalBody strings.Builder
-	for i, line := range bodyLines {
-		visibleW := lipgloss.Width(line)
-		pad := max(innerW-visibleW, 0)
-		finalBody.WriteString(line + strings.Repeat(" ", pad) + bodyStyle.Render("│"))
-		if i < len(bodyLines)-1 {
-			finalBody.WriteString("\n")
-		}
-	}
-
-	return strings.Join([]string{topBar, finalBody.String(), bottomBar}, "\n")
+	inner := m.width - 2
+	fillRight := 1
+	fillLeft := max(inner-lipgloss.Width(status)-fillRight, 0)
+	top := bs.Render(b.TopLeft) + bs.Render(strings.Repeat(b.Top, fillLeft)) + status + bs.Render(strings.Repeat(b.Top, fillRight)) + bs.Render(b.TopRight)
+	return top + "\n" + body
 }
 
 func (m model) statusLine() string {
-	style := lipgloss.NewStyle().Width(m.contentWidth()).Foreground(lipgloss.Color(ColorDim))
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorDim))
+	help := style.Render("enter: send · shift+enter: newline · pgup/pgdn: scroll · ctrl+c: quit")
 	if m.state == StateStreaming {
-		return style.Render("ctrl+c: quit   pgup/pgdn: scroll")
+		help = style.Render("pgup/pgdn: scroll · ctrl+c: quit")
 	}
-	return style.Render("enter: send   shift+enter: newline   pgup/pgdn: scroll   ctrl+c: quit")
+	pct := style.Render(fmt.Sprintf(" %3.0f%% ", m.viewport.ScrollPercent()*100))
+	gap := max(m.width-lipgloss.Width(help)-lipgloss.Width(pct), 1)
+	return help + strings.Repeat(" ", gap) + pct
 }
 
 func (m model) renderMarkdown(content string) string {
@@ -549,9 +504,21 @@ func (m model) renderMarkdown(content string) string {
 	return out
 }
 
-func (m model) hiddenInputLines() int {
-	lines := strings.Count(m.inputText.Value(), "\n") + 1
-	return max(lines-m.inputText.Height(), 0)
+func (m *model) resizeLayout() {
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+
+	m.inputText.SetWidth(m.width - 4)
+
+	inputHeight := lipgloss.Height(m.inputBox())
+	vpHeight := max(m.height-inputHeight-SpinnerHeight-StatusHeight, 1)
+	m.viewport.SetWidth(m.width)
+	m.viewport.SetHeight(vpHeight)
+	m.viewport.SetContent(m.buildContent())
+	if m.viewport.AtBottom() {
+		m.viewport.GotoBottom()
+	}
 }
 
 func waitForStream(ch chan tea.Msg) tea.Cmd {
@@ -571,6 +538,11 @@ func initialModel(agent *agent.Agent) model {
 	ta.SetHeight(InputHeight)
 	ta.ShowLineNumbers = false
 	ta.Prompt = ""
+	ta.DynamicHeight = true
+	ta.MinHeight = InputHeight
+	ta.MaxHeight = InputHeightMax
+	ta.MaxContentHeight = InputContentHeightMax
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"))
 	ta.Focus()
 
 	spin := spinner.New()
