@@ -174,8 +174,9 @@ func (a *Agent) next(onChunk func(chunkType string, content string), onError fun
 	delta := response.Choices[0].Delta
 
 	msg := llm.ChatMessage{
-		Role:    "assistant",
-		Content: delta.Content,
+		Role:             "assistant",
+		Content:          delta.Content,
+		ReasoningContent: delta.ReasoningContent,
 	}
 
 	if delta.Content != "" {
