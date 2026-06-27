@@ -264,6 +264,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.inputText.SetHeight(InputHeightMax)
 			}
 			m.viewport.SetHeight(m.viewportHeight())
+			m.viewport.GotoBottom()
 		}
 
 		return m, tea.Batch(cmds...)
