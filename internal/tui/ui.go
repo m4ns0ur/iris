@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
@@ -566,7 +565,7 @@ func initialModel(agent *agent.Agent) model {
 	spin := spinner.New()
 	spin.Spinner = spinner.Spinner{
 		Frames: SpinnerFrames,
-		FPS:    time.Second / 10,
+		FPS:    SpinnerFPS,
 	}
 
 	return model{

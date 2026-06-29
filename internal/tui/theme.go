@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 )
@@ -20,16 +21,13 @@ const (
 	ColorBorderFocus = "#58A6FF"
 )
 
+const IrisSymbol = "⦿"
+
 var SpinnerFrames = []string{
-	"◎", "◉", // open and focus
-	"◑", "◑", "◉", // glance left
-	"◕", "◕", "◉", // glance right
-	"◔", "◔", "◉", // look up
-	"◒", "◒", "◉", // look down
-	"◕", "⌒", "⌒", "◕", "◉", // wink
-	"◕", "◔", "◑", "◒", "◈", "✺", "⊛", "◈", "◉", // dizzy spin
-	"◕", "●", "◕", "◔", "◯", "—", "◯", "◔", "◕", "◉", "◎", // full blink
+	IrisSymbol, "⌒", "◑", "◒", "✺", "⊛", "◈", "●", "—", "◯", "◔", "◕", "◎", "◉",
 }
+
+var SpinnerFPS = time.Second / 10
 
 func (m *model) renderFor(c component, text string) string {
 	style := lipgloss.NewStyle()
