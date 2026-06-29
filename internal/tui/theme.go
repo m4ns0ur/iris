@@ -31,9 +31,8 @@ var SpinnerFrames = []string{
 	"◕", "●", "◕", "◔", "◯", "—", "◯", "◔", "◕", "◉", "◎", // full blink
 }
 
-func (m model) renderFor(c component, text string) string {
+func (m *model) renderFor(c component, text string) string {
 	style := lipgloss.NewStyle()
-	w := m.contentWidth()
 
 	switch c {
 	case UserPrompt:
@@ -47,17 +46,17 @@ func (m model) renderFor(c component, text string) string {
 	case ReasoningPrompt:
 		return style.Foreground(lipgloss.Color(ColorYellow)).PaddingTop(1).Render(text)
 	case Reasoning:
-		return style.Foreground(lipgloss.Color(ColorMuted)).Italic(true).Width(w).Render(text)
+		return style.Foreground(lipgloss.Color(ColorMuted)).Italic(true).Render(text)
 	case ToolPrompt:
 		return style.Foreground(lipgloss.Color(ColorPurple)).PaddingTop(1).Render(text)
 	case ToolKey:
 		return style.Foreground(lipgloss.Color(ColorGreen)).Render(text)
 	case ToolValue:
-		return style.Foreground(lipgloss.Color(ColorMuted)).Width(w).Render(text)
+		return style.Foreground(lipgloss.Color(ColorMuted)).Render(text)
 	case ErrorPrompt:
 		return style.Foreground(lipgloss.Color(ColorRed)).Bold(true).Render(text)
 	case Error:
-		return style.Foreground(lipgloss.Color(ColorRedSoft)).Width(w).Render(text)
+		return style.Foreground(lipgloss.Color(ColorRedSoft)).Render(text)
 	case Spinner:
 		var color string
 		switch {
@@ -71,6 +70,6 @@ func (m model) renderFor(c component, text string) string {
 		m.spinner.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(color))
 		return m.spinner.View() + m.spinner.Style.Render(text)
 	default:
-		return style.Width(w).Render(text)
+		return style.Render(text)
 	}
 }

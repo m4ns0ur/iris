@@ -101,18 +101,18 @@ type errMsg struct{ error }
 
 type fatalErrMsg struct{ error }
 
-func (m model) viewportHeight() int {
+func (m *model) viewportHeight() int {
 	return max(m.height-m.inputText.Height()-InputBorder-SpinnerHeight-StatusHeight, 1)
 }
 
-func (m model) contentWidth() int {
+func (m *model) contentWidth() int {
 	if m.width < 1 {
 		return 80
 	}
-	return max(m.width-1, 20)
+	return max(m.width-1, 2)
 }
 
-func (m model) buildContent() string {
+func (m *model) buildContent() string {
 	var sb strings.Builder
 	for _, msg := range m.messages {
 		sb.WriteString(m.renderMessage(msg))
@@ -120,7 +120,11 @@ func (m model) buildContent() string {
 	if m.state == StateStreaming {
 		if m.fullReason.Len() > 0 {
 			sb.WriteString(m.renderFor(ReasoningPrompt, "Reasoning> "))
-			sb.WriteString(m.renderFor(Reasoning, m.fullReason.String()) + "\n")
+			sb.WriteString(m.renderFor(Reasoning, m.fullReason.String()))
+		}
+		if m.fullResponse.Len() > 0 {
+			sb.WriteString(m.renderFor(IrisPrompt, "Iris> "))
+			sb.WriteString(m.renderFor(Iris, m.fullResponse.String()))
 		}
 		if m.toolArgs.Len() > 0 {
 			t := tree.Root(m.renderFor(ToolPrompt, m.toolName))
@@ -135,26 +139,22 @@ func (m model) buildContent() string {
 			}
 			sb.WriteString(t.String() + "\n")
 		}
-		if m.fullResponse.Len() > 0 {
-			sb.WriteString(m.renderFor(IrisPrompt, "Iris> "))
-			sb.WriteString(m.renderFor(Iris, m.fullResponse.String()))
-		}
 	}
 	return sb.String()
 }
 
-func (m model) renderMessage(msg message) string {
+func (m *model) renderMessage(msg message) string {
 	var sb strings.Builder
 	switch msg.role {
 	case "user":
 		sb.WriteString(m.renderFor(UserPrompt, "You> "))
 		sb.WriteString(m.renderFor(User, msg.content))
+	case "reasoning":
+		sb.WriteString(m.renderFor(ReasoningPrompt, "Reasoning> "))
+		sb.WriteString(m.renderFor(Reasoning, msg.content))
 	case "assistant":
 		sb.WriteString(m.renderFor(IrisPrompt, "Iris> "))
 		sb.WriteString(m.renderFor(Iris, msg.content))
-	case "reasoning":
-		sb.WriteString(m.renderFor(ReasoningPrompt, "Reasoning> "))
-		sb.WriteString(m.renderFor(Reasoning, msg.content) + "\n")
 	case "tool":
 		t := tree.Root(m.renderFor(ToolPrompt, msg.toolName))
 		if msg.previewPath != "" {
@@ -174,11 +174,11 @@ func (m model) renderMessage(msg message) string {
 	return sb.String()
 }
 
-func (m model) Init() tea.Cmd {
+func (m *model) Init() tea.Cmd {
 	return m.inputText.Focus()
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -408,7 +408,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) View() tea.View {
+func (m *model) View() tea.View {
 	var v tea.View
 	v.MouseMode = tea.MouseModeCellMotion
 
@@ -426,7 +426,7 @@ func (m model) View() tea.View {
 	return v
 }
 
-func (m model) spinnerBar() string {
+func (m *model) spinnerBar() string {
 	w := m.contentWidth()
 
 	if m.state == StateStreaming {
@@ -477,7 +477,7 @@ func (m model) spinnerBar() string {
 	return lipgloss.NewStyle().Width(w).Render("")
 }
 
-func (m model) inputBox() string {
+func (m *model) inputBox() string {
 	body := lipgloss.NewStyle().Border(lipgloss.RoundedBorder(), false, true, true, true).BorderForeground(lipgloss.Color(ColorBorderFocus)).Padding(0, 1).Width(m.width).Render(m.inputText.View())
 	b := lipgloss.RoundedBorder()
 	bs := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorBorderFocus))
@@ -494,7 +494,7 @@ func (m model) inputBox() string {
 	return top + "\n" + body
 }
 
-func (m model) statusLine() string {
+func (m *model) statusLine() string {
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorDim))
 	help := style.Render("enter: send · shift+enter: newline · pgup/pgdn: scroll · ctrl+c: quit")
 	if m.state == StateStreaming {
@@ -505,9 +505,9 @@ func (m model) statusLine() string {
 	return help + strings.Repeat(" ", gap) + pct
 }
 
-func (m model) renderMarkdown(content string) string {
+func (m *model) renderMarkdown(content string) string {
 	r, err := glamour.NewTermRenderer(
-		glamour.WithWordWrap(max(m.contentWidth()-2, 20)),
+		glamour.WithWordWrap(max(m.contentWidth()-2, 2)),
 		glamour.WithStylePath("dark"),
 	)
 	if err != nil {
@@ -545,7 +545,7 @@ func waitForStream(ch chan tea.Msg) tea.Cmd {
 
 func Run(agent *agent.Agent) error {
 	m := initialModel(agent)
-	prg := tea.NewProgram(m)
+	prg := tea.NewProgram(&m)
 	_, err := prg.Run()
 	return err
 }
