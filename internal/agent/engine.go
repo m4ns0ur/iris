@@ -49,16 +49,15 @@ func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 
 // Run executes the agentic loop with streaming support
 func (a *Agent) Run(input string, onChunk func(chunkType string, content string), onError func(error)) error {
-	a.reset()
-	// Initialize with system prompt and user input
-	a.history = append(a.history, llm.ChatMessage{Role: "system", Content: prompt.BuildSystemPrompt(toolContext)})
 	a.history = append(a.history, llm.ChatMessage{Role: "user", Content: []llm.Content{{Type: "text", Text: input}}})
 	return a.loop(onChunk, onError)
 }
 
-// RunSync is a convenience method for synchronous execution (backward compatible)
-func (a *Agent) RunSync(input string) error {
-	return a.Run(input, nil, nil)
+func (a *Agent) RunFresh(input string, onChunk func(chunkType string, content string), onError func(error)) error {
+	a.reset()
+	// Initialize with system prompt and user input
+	a.history = append(a.history, llm.ChatMessage{Role: "system", Content: prompt.BuildSystemPrompt(toolContext)})
+	return a.Run(input, onChunk, onError)
 }
 
 func (a *Agent) reset() {

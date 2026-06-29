@@ -166,7 +166,7 @@ func NewClient(model string) *LLMClient {
 
 	return &LLMClient{
 		Model: model,
-		URL:   "http://localhost:8080/v1/chat/completions",
+		URL:   "http://127.0.0.1:8080/v1/chat/completions",
 		HTTP: &http.Client{
 			Timeout: 0, // controlled via context per-request
 		},

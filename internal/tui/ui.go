@@ -56,6 +56,7 @@ var Logger = logger.Logger
 
 type model struct {
 	agent          *agent.Agent
+	fresh          bool
 	fullReason     *strings.Builder
 	fullResponse   *strings.Builder
 	toolName       string
@@ -233,11 +234,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.resizeLayout()
 				m.viewport.GotoBottom()
 
-				return m, tea.Batch(
-					m.spinner.Tick,
-					runAgenticLoopCommand(m.agent, input, m.stream),
-					waitForStream(m.stream),
-				)
+				if m.fresh {
+					m.fresh = false
+					return m, tea.Batch(
+						m.spinner.Tick,
+						runFreshAgenticLoopCommand(m.agent, input, m.stream),
+						waitForStream(m.stream),
+					)
+				} else {
+					return m, tea.Batch(
+						m.spinner.Tick,
+						runAgenticLoopCommand(m.agent, input, m.stream),
+						waitForStream(m.stream),
+					)
+				}
 
 			case "ctrl+c":
 				return m, tea.Quit
@@ -302,6 +312,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						content: m.fullReason.String(),
 					})
 					m.fullReason.Reset()
+				}
+				if m.fullResponse.Len() > 0 {
+					m.messages = append(m.messages, message{
+						role:    "assistant",
+						content: m.fullResponse.String(),
+					})
+					m.fullResponse.Reset()
 				}
 				if m.toolArgs.Len() > 0 {
 					m.messages = append(m.messages, message{
@@ -554,6 +571,7 @@ func initialModel(agent *agent.Agent) model {
 
 	return model{
 		agent:        agent,
+		fresh:        true,
 		fullReason:   &strings.Builder{},
 		fullResponse: &strings.Builder{},
 		toolArgs:     &strings.Builder{},
