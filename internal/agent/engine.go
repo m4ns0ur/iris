@@ -42,7 +42,7 @@ func NewAgent(client *llm.LLMClient, workdir string) *Agent {
 		state:    "idle",
 		goals:    []string{},
 		history:  []llm.ChatMessage{},
-		maxSteps: 100, // Prevent infinite loops
+		maxSteps: 1000, // TODO: Prevent infinite loops
 		workdir:  workdir,
 	}
 }
