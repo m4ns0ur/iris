@@ -14,6 +14,7 @@ var (
 	Logger  = logger.Logger
 	debug   bool
 	workdir string
+	model   string
 )
 
 var rootCmd = &cobra.Command{
@@ -25,6 +26,7 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "Enable debug logging")
 	rootCmd.PersistentFlags().StringVarP(&workdir, "workdir", "w", "", "Set the working directory for the agent")
+	rootCmd.PersistentFlags().StringVarP(&model, "model", "m", "", "Set the LLM model name (e.g. unsloth/Qwen3.5-9B-GGUF:UD-Q5_K_XL)")
 }
 
 func Execute() {
@@ -53,7 +55,7 @@ func startTui(cmd *cobra.Command, args []string) {
 		workdir = cwd
 	}
 
-	client := llm.NewClient("")
+	client := llm.NewClient(model)
 	agent := agent.NewAgent(client, workdir)
 
 	if err := tui.Run(agent); err != nil {

@@ -160,10 +160,6 @@ type LLMClient struct {
 }
 
 func NewClient(model string) *LLMClient {
-	if model == "" {
-		model = "unsloth/Qwen3.5-9B-GGUF:UD-Q5_K_XL"
-	}
-
 	return &LLMClient{
 		Model: model,
 		URL:   "http://127.0.0.1:8080/v1/chat/completions",
