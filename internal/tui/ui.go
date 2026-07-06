@@ -477,8 +477,8 @@ func (m *model) spinnerBar() string {
 }
 
 func (m *model) inputBox() string {
-	body := lipgloss.NewStyle().Border(lipgloss.RoundedBorder(), false, true, true, true).BorderForeground(lipgloss.Color(ColorBorderFocus)).Padding(0, 1).Width(m.width).Render(m.inputText.View())
-	b := lipgloss.RoundedBorder()
+	body := lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, true, false).BorderForeground(lipgloss.Color(ColorBorderFocus)).Padding(0, 1).Width(m.width).Render(m.inputText.View())
+	b := lipgloss.NormalBorder()
 	bs := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorBorderFocus))
 
 	var status string
@@ -486,10 +486,10 @@ func (m *model) inputBox() string {
 		status = bs.Render(b.Top) + lipgloss.NewStyle().Foreground(lipgloss.Color(ColorDim)).Render(fmt.Sprintf(" ↑ %d ", n)) + bs.Render(b.Top)
 	}
 
-	inner := m.width - 2
+	inner := m.width
 	fillRight := 1
 	fillLeft := max(inner-lipgloss.Width(status)-fillRight, 0)
-	top := bs.Render(b.TopLeft) + bs.Render(strings.Repeat(b.Top, fillLeft)) + status + bs.Render(strings.Repeat(b.Top, fillRight)) + bs.Render(b.TopRight)
+	top := bs.Render(strings.Repeat(b.Top, fillLeft)) + status + bs.Render(strings.Repeat(b.Top, fillRight))
 	return top + "\n" + body
 }
 
