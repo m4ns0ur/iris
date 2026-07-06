@@ -11,27 +11,29 @@ import (
 	"strings"
 	"time"
 
+	"github.com/m4ns0ur/iris/internal/config"
 	"github.com/m4ns0ur/iris/internal/logger"
 )
-
-const MaxRetries = 3
 
 var Logger = logger.Logger
 
 type Payload struct {
-	Model           string         `json:"model"`
-	Stream          bool           `json:"stream"`
-	StreamOptions   StreamOptions  `json:"stream_options,omitempty"`
-	Store           bool           `json:"store,omitempty"`
-	Messages        []ChatMessage  `json:"messages"`
-	Tools           []Tool         `json:"tools,omitempty"`
-	MaxTokens       int            `json:"max_tokens"`
-	Temperature     float64        `json:"temperature"`
-	TopP            float64        `json:"top_p,omitempty"`
-	PresencePenalty float64        `json:"presence_penalty,omitempty"`
-	ResponseFormat  ResponseFormat `json:"response_format,omitempty"`
-	ExtraBody       ExtraBody      `json:"extra_body"`
-	CachePrompt     bool           `json:"cache_prompt"`
+	Model            string         `json:"model"`
+	Stream           bool           `json:"stream"`
+	StreamOptions    StreamOptions  `json:"stream_options,omitempty"`
+	Store            bool           `json:"store,omitempty"`
+	Messages         []ChatMessage  `json:"messages"`
+	Tools            []Tool         `json:"tools,omitempty"`
+	MaxTokens        int            `json:"max_tokens"`
+	Temperature      float32        `json:"temperature"`
+	TopP             float32        `json:"top_p,omitempty"`
+	TopK             int            `json:"top_k,omitempty"`
+	MinP             float32        `json:"min_p,omitempty"`
+	RepeatPenalty    float32        `json:"repeat_penalty,omitempty"`
+	PresencePenalty  float32        `json:"presence_penalty,omitempty"`
+	FrequencyPenalty float32        `json:"frequency_penalty,omitempty"`
+	ResponseFormat   ResponseFormat `json:"response_format,omitempty"`
+	CachePrompt      bool           `json:"cache_prompt"`
 }
 
 type StreamOptions struct {
@@ -76,26 +78,6 @@ type Property struct {
 
 type ResponseFormat struct {
 	ResponseType string `json:"type,omitempty"`
-}
-
-type ExtraBody struct {
-	TopK               int                `json:"top_k,omitempty"`
-	MinP               float64            `json:"min_p,omitempty"`
-	RepetitionPenalty  float64            `json:"repetition_penalty,omitempty"`
-	ChatTemplateKwargs ChatTemplateKwargs `json:"chat_template_kwargs"`
-}
-
-type ChatTemplateKwargs struct {
-	EnableThinking bool `json:"enable_thinking"`
-}
-
-type LLMOptions struct {
-	Temperature       float64
-	TopP              float64
-	TopK              int
-	MinP              float64
-	PresencePenalty   float64
-	RepetitionPenalty float64
 }
 
 type LLMResponse struct {
@@ -154,30 +136,32 @@ type FunctionCall struct {
 }
 
 type LLMClient struct {
-	Model string
-	URL   string
-	HTTP  *http.Client
+	URL        string
+	MaxRetries int
+	Model      string
+	HTTP       *http.Client
 }
 
-func NewClient(model string) *LLMClient {
+func NewClient() *LLMClient {
 	return &LLMClient{
-		Model: model,
-		URL:   "http://127.0.0.1:8080/v1/chat/completions",
+		URL:        config.GetConfig().BaseURL + "/chat/completions",
+		MaxRetries: config.GetConfig().MaxRetries,
+		Model:      config.GetConfig().DefaultModel,
 		HTTP: &http.Client{
 			Timeout: 0, // controlled via context per-request
 		},
 	}
 }
 
-func (c *LLMClient) Generate(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
+func (c *LLMClient) Generate(messages []ChatMessage, tools []Tool, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
 	Logger.Debug("Generating response from LLM", "messageCount", len(messages), "toolCount", len(tools))
 	if onChunk != nil || onError != nil {
-		return c.GenerateStream(messages, tools, opts, onChunk, onError)
+		return c.GenerateStream(messages, tools, onChunk, onError)
 	}
 	return Chunk{}, fmt.Errorf("synchronous generation is not supported, onChunk or onError callback must be provided")
 }
 
-func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *LLMOptions, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
+func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
 	// Guard against nil callbacks to avoid panics.
 	if onChunk == nil {
 		onChunk = func(string, string) {}
@@ -186,7 +170,7 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 		onError = func(error) {}
 	}
 
-	payload := createPayload(c.Model, messages, tools, opts)
+	payload := createPayload(c.Model, messages, tools)
 	payload.Stream = true
 	payload.StreamOptions = StreamOptions{
 		IncludeUsage: true,
@@ -223,9 +207,14 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 		}
 
 		if res.StatusCode != http.StatusOK {
+			bodyBytes, err := io.ReadAll(res.Body)
 			res.Body.Close()
 			cancel()
-			return nil, fmt.Errorf("HTTP %d", res.StatusCode)
+
+			if err != nil {
+				return nil, fmt.Errorf("HTTP %d (failed to read error body: %w)", res.StatusCode, err)
+			}
+			return nil, fmt.Errorf("HTTP %d: %s", res.StatusCode, string(bodyBytes))
 		}
 
 		return res, nil
@@ -237,12 +226,12 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 		retryDelay = time.Second
 	)
 
-	for attempt := 1; attempt <= MaxRetries; attempt++ {
+	for attempt := 1; attempt <= c.MaxRetries; attempt++ {
 		if attempt > 1 {
 			Logger.Warn(
 				"LLM streaming request failed, retrying...",
 				"attempt", attempt,
-				"maxRetries", MaxRetries,
+				"maxRetries", c.MaxRetries,
 			)
 			if err != nil {
 				onError(fmt.Errorf("LLM streaming request failed on attempt %d: %w", attempt-1, err))
@@ -256,7 +245,7 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 			break
 		}
 
-		if attempt < MaxRetries {
+		if attempt < c.MaxRetries {
 			Logger.Warn(
 				"LLM streaming request failed",
 				"attempt", attempt,
@@ -268,7 +257,7 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 	}
 
 	if res == nil || err != nil {
-		return Chunk{}, fmt.Errorf("failed to connect to LLM server after %d attempts: %w", MaxRetries, err)
+		return Chunk{}, fmt.Errorf("failed to connect to LLM server after %d attempts: %w", c.MaxRetries, err)
 	}
 	defer res.Body.Close()
 
@@ -392,41 +381,38 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, opts *L
 	return finalChunk, nil
 }
 
-func createPayload(model string, messages []ChatMessage, tools []Tool, opts *LLMOptions) Payload {
+func createPayload(model string, messages []ChatMessage, tools []Tool) Payload {
 	payload := Payload{
 		Model:       model,
 		Store:       false,
 		Messages:    messages,
 		Tools:       tools,
 		MaxTokens:   32768,
-		Temperature: 1.0,
-		ExtraBody: ExtraBody{
-			ChatTemplateKwargs: ChatTemplateKwargs{
-				EnableThinking: true,
-			},
-		},
+		Temperature: 0.6,
 		CachePrompt: true,
 	}
 
-	if opts != nil {
-		if opts.Temperature != 0 {
-			payload.Temperature = opts.Temperature
-		}
-		if opts.TopP != 0 {
-			payload.TopP = opts.TopP
-		}
-		if opts.PresencePenalty != 0 {
-			payload.PresencePenalty = opts.PresencePenalty
-		}
-		if opts.TopK != 0 {
-			payload.ExtraBody.TopK = opts.TopK
-		}
-		if opts.MinP != 0 {
-			payload.ExtraBody.MinP = opts.MinP
-		}
-		if opts.RepetitionPenalty != 0 {
-			payload.ExtraBody.RepetitionPenalty = opts.RepetitionPenalty
-		}
+	defaultModel := config.DefaultModel()
+	if defaultModel.Temperature != 0 {
+		payload.Temperature = defaultModel.Temperature
+	}
+	if defaultModel.TopP != 0 {
+		payload.TopP = defaultModel.TopP
+	}
+	if defaultModel.TopK != 0 {
+		payload.TopK = defaultModel.TopK
+	}
+	if defaultModel.MinP != 0 {
+		payload.MinP = defaultModel.MinP
+	}
+	if defaultModel.RepeatPenalty != 0 {
+		payload.RepeatPenalty = defaultModel.RepeatPenalty
+	}
+	if defaultModel.PresencePenalty != 0 {
+		payload.PresencePenalty = defaultModel.PresencePenalty
+	}
+	if defaultModel.FrequencyPenalty != 0 {
+		payload.FrequencyPenalty = defaultModel.FrequencyPenalty
 	}
 
 	return payload

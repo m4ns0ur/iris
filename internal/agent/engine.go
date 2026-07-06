@@ -160,7 +160,6 @@ func (a *Agent) next(onChunk func(chunkType string, content string), onError fun
 	response, err := a.client.Generate(
 		a.history,
 		tools,
-		nil,
 		onChunk,
 		onError,
 	)
