@@ -184,8 +184,7 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, onChunk
 			return nil, e
 		}
 
-		// Mirror the timeout used in GenerateSync.
-		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 		// cancel is intentionally not deferred here. The context must stay
 		// alive for the duration of the stream read below. The caller closes
 		// res.Body which unblocks any in-flight reads, and the GC will clean

@@ -1,10 +1,9 @@
 package config
 
 import (
-	"fmt"
-	"os"
 	"strings"
 
+	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/spf13/viper"
 )
 
@@ -29,13 +28,13 @@ type ModelSettings struct {
 	FrequencyPenalty float32 `mapstructure:"frequency_penalty"`
 }
 
-var cfg Config
+var (
+	Logger = logger.Logger
+	cfg    Config
+)
 
-func Load() {
-	if err := viper.Unmarshal(&cfg); err != nil {
-		fmt.Fprintln(os.Stderr, "error unmarshaling config:", err)
-		os.Exit(1)
-	}
+func Load() error {
+	return viper.Unmarshal(&cfg)
 }
 
 func GetConfig() Config {
@@ -48,7 +47,6 @@ func DefaultModel() ModelSettings {
 			return modelSettings
 		}
 	}
-	fmt.Fprintf(os.Stderr, "no settings found for default_model %q\n", cfg.DefaultModel)
-	os.Exit(1)
-	return ModelSettings{} // unreachable
+	Logger.Error("no settings found for default_model", "default_model", cfg.DefaultModel)
+	return ModelSettings{}
 }

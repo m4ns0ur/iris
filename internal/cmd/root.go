@@ -45,8 +45,8 @@ func init() {
 func initConfig() {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "cannot determine the home dir:", err)
-		os.Exit(1)
+		Logger.Error("cannot determine the home dir:", "error", err)
+		Exit()
 	}
 
 	configDir := filepath.Join(home, IrisHome)
@@ -63,26 +63,26 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 			if err := os.MkdirAll(configDir, 0o755); err != nil {
-				fmt.Fprintln(os.Stderr, "error creating config dir:", err)
-				os.Exit(1)
+				Logger.Error("error creating config dir:", "error", err)
+				Exit()
 			}
 
 			if err := viper.SafeWriteConfigAs(filepath.Join(configDir, "settings.toml")); err != nil {
 				if _, ok := err.(viper.ConfigFileAlreadyExistsError); !ok {
-					fmt.Fprintln(os.Stderr, "error writing default config:", err)
-					os.Exit(1)
+					Logger.Error("error writing default config:", "error", err)
+					Exit()
 				}
 			}
 
-			fmt.Fprintln(os.Stderr, "created default config")
+			Logger.Debug("created default config", "path", filepath.Join(configDir, "settings.toml"))
 
 			if err := viper.ReadInConfig(); err != nil {
-				fmt.Fprintln(os.Stderr, "error reading new config:", err)
-				os.Exit(1)
+				Logger.Error("error reading new config:", "error", err)
+				Exit()
 			}
 		} else {
-			fmt.Fprintln(os.Stderr, "error reading config:", err)
-			os.Exit(1)
+			Logger.Error("error reading config:", "error", err)
+			Exit()
 		}
 	}
 }
@@ -90,12 +90,15 @@ func initConfig() {
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		Logger.Error("Failed to execute the root command", "error", err)
-		os.Exit(1)
+		Exit()
 	}
 }
 
 func startTui(cmd *cobra.Command, args []string) {
-	config.Load()
+	if err := config.Load(); err != nil {
+		Logger.Error("error unmarshaling config", "error", err)
+		Exit()
+	}
 
 	Logger.Info("Starting TUI")
 	logger.SetDebug(debug)
@@ -103,14 +106,14 @@ func startTui(cmd *cobra.Command, args []string) {
 	if workdir != "" {
 		if _, err := os.Stat(workdir); os.IsNotExist(err) {
 			Logger.Error("Specified working directory does not exist", "workdir", workdir)
-			os.Exit(1)
+			Exit()
 		}
 	} else {
 		var err error
 		workdir, err = os.Getwd()
 		if err != nil {
 			Logger.Error("Failed to get current working directory", "error", err)
-			os.Exit(1)
+			Exit()
 		}
 	}
 
@@ -119,6 +122,11 @@ func startTui(cmd *cobra.Command, args []string) {
 
 	if err := tui.Run(agent); err != nil {
 		Logger.Error("TUI failed to start", "error", err)
-		os.Exit(1)
+		Exit()
 	}
+}
+
+func Exit() {
+	fmt.Fprintf(os.Stderr, "Iris cannot start.\nPlease check the logs for more details.\n")
+	os.Exit(1)
 }
