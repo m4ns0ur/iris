@@ -33,6 +33,14 @@ max_output_lines = 10
 max_capture_bytes = 4096
 temp_file_ttl_minutes = 30
 binary = "/bin/sh"
+
+[llm]
+request_timeout_seconds = 42
+
+[agent]
+max_turns = 7
+max_tool_calls = 11
+tool_timeout_seconds = 13
 `)); err != nil {
 		t.Fatalf("ReadConfig() error = %v", err)
 	}
@@ -67,6 +75,16 @@ binary = "/bin/sh"
 	}
 	if options.Shell.ShellBinary != "/bin/sh" {
 		t.Fatalf("binary = %q, want /bin/sh", options.Shell.ShellBinary)
+	}
+
+	if cfg.LLM.RequestTimeout() != 42*time.Second {
+		t.Fatalf("LLM request timeout = %v, want 42s", cfg.LLM.RequestTimeout())
+	}
+	if cfg.Agent.MaxTurns != 7 || cfg.Agent.MaxToolCalls != 11 {
+		t.Fatalf("agent limits = %+v, want 7 turns and 11 tool calls", cfg.Agent)
+	}
+	if cfg.Agent.ToolTimeout() != 13*time.Second {
+		t.Fatalf("tool timeout = %v, want 13s", cfg.Agent.ToolTimeout())
 	}
 }
 

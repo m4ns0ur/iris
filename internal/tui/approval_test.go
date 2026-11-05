@@ -207,3 +207,122 @@ func TestModelDoneWhilePendingRearmsApproval(t *testing.T) {
 		t.Fatal("no deny decision was sent when the agent finished")
 	}
 }
+
+func TestModelCanceledMessagePreservesPartialOutput(t *testing.T) {
+	m := newApprovalModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*model)
+	m.state = StateStreaming
+	m.canceling = true
+	m.fullResponse.WriteString("partial answer")
+
+	updated, _ = m.Update(canceledMsg{})
+	m = updated.(*model)
+
+	if m.state != StateInput {
+		t.Fatalf("state = %v, want StateInput", m.state)
+	}
+	if m.canceling {
+		t.Fatal("canceling = true, want false")
+	}
+	if m.fullResponse.Len() != 0 {
+		t.Fatalf("fullResponse was not reset: %q", m.fullResponse.String())
+	}
+
+	foundPartial := false
+	foundNotice := false
+	for _, message := range m.messages {
+		if message.role == "assistant" && message.content == "partial answer" {
+			foundPartial = true
+		}
+		if message.role == "notice" && message.content == "Canceled." {
+			foundNotice = true
+		}
+	}
+	if !foundPartial {
+		t.Fatal("partial assistant output was not preserved")
+	}
+	if !foundNotice {
+		t.Fatal("canceled notice was not appended")
+	}
+}
+
+func TestModelCanceledMessageResolvesPendingApproval(t *testing.T) {
+	m := newApprovalModel(t)
+	reply := make(chan policy.ApprovalDecision, 1)
+
+	updated, _ := m.Update(approvalRequestMsg{
+		request: policy.ApprovalRequest{Kind: "shell", Command: "echo hi"},
+		reply:   reply,
+	})
+	m = updated.(*model)
+	m.state = StateStreaming
+
+	updated, cmd := m.Update(canceledMsg{})
+	m = updated.(*model)
+
+	if m.pendingApproval != nil {
+		t.Fatal("pendingApproval was not cleared")
+	}
+	if cmd == nil {
+		t.Fatal("expected the approval listener to be re-armed")
+	}
+
+	select {
+	case decision := <-reply:
+		if decision.Allow {
+			t.Fatalf("decision = %+v, want deny", decision)
+		}
+	default:
+		t.Fatal("no deny decision was sent to the approver")
+	}
+}
+
+func TestQuitClosesLifecycleOnce(t *testing.T) {
+	m := newApprovalModel(t)
+
+	_ = m.quit()
+	_ = m.quit()
+
+	select {
+	case <-m.done():
+	default:
+		t.Fatal("lifecycle done channel was not closed")
+	}
+}
+
+func TestModelFatalErrorPreservesPartialOutput(t *testing.T) {
+	m := newApprovalModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*model)
+	m.state = StateStreaming
+	m.canceling = true
+	m.fullResponse.WriteString("partial answer")
+
+	updated, _ = m.Update(fatalErrMsg{error: errors.New("boom")})
+	m = updated.(*model)
+
+	if m.state != StateInput {
+		t.Fatalf("state = %v, want StateInput", m.state)
+	}
+	if m.canceling {
+		t.Fatal("canceling = true, want false")
+	}
+
+	foundPartial := false
+	foundError := false
+	for _, message := range m.messages {
+		if message.role == "assistant" && message.content == "partial answer" {
+			foundPartial = true
+		}
+		if message.role == "error" && strings.Contains(message.content, "boom") {
+			foundError = true
+		}
+	}
+	if !foundPartial {
+		t.Fatal("partial assistant output was not preserved")
+	}
+	if !foundError {
+		t.Fatal("fatal error message was not appended")
+	}
+}

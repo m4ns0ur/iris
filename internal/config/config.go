@@ -16,6 +16,8 @@ type Config struct {
 	DefaultModel string           `mapstructure:"default_model"`
 	Models       []ModelSettings  `mapstructure:"models"`
 	Security     SecuritySettings `mapstructure:"security"`
+	LLM          LLMSettings      `mapstructure:"llm"`
+	Agent        AgentSettings    `mapstructure:"agent"`
 }
 
 // ModelSettings represents one [models.'<name>'] block
@@ -29,6 +31,41 @@ type ModelSettings struct {
 	RepeatPenalty    float32 `mapstructure:"repeat_penalty"`
 	PresencePenalty  float32 `mapstructure:"presence_penalty"`
 	FrequencyPenalty float32 `mapstructure:"frequency_penalty"`
+}
+
+// LLMSettings controls LLM request lifecycle.
+type LLMSettings struct {
+	// RequestTimeoutSeconds bounds a complete LLM request, including retries
+	// and stream reading. Zero means "use the client default".
+	RequestTimeoutSeconds int `mapstructure:"request_timeout_seconds"`
+}
+
+// RequestTimeout converts the configured seconds to a duration.
+func (s LLMSettings) RequestTimeout() time.Duration {
+	if s.RequestTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(s.RequestTimeoutSeconds) * time.Second
+}
+
+// AgentSettings controls per-run execution budgets.
+type AgentSettings struct {
+	// MaxTurns bounds the number of LLM turns in one run.
+	MaxTurns int `mapstructure:"max_turns"`
+
+	// MaxToolCalls bounds the number of tool executions in one run.
+	MaxToolCalls int `mapstructure:"max_tool_calls"`
+
+	// ToolTimeoutSeconds bounds a single tool execution.
+	ToolTimeoutSeconds int `mapstructure:"tool_timeout_seconds"`
+}
+
+// ToolTimeout converts the configured seconds to a duration.
+func (s AgentSettings) ToolTimeout() time.Duration {
+	if s.ToolTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(s.ToolTimeoutSeconds) * time.Second
 }
 
 // SecuritySettings controls the execution boundary for file and shell tools.

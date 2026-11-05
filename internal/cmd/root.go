@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/m4ns0ur/iris/internal/agent"
 	"github.com/m4ns0ur/iris/internal/config"
@@ -73,6 +76,11 @@ func initConfig() {
 	viper.SetDefault("security.shell.max_output_lines", 1000)
 	viper.SetDefault("security.shell.max_capture_bytes", 10*1024*1024)
 	viper.SetDefault("security.shell.temp_file_ttl_minutes", 24*60)
+
+	viper.SetDefault("llm.request_timeout_seconds", int(llm.DefaultRequestTimeout.Seconds()))
+	viper.SetDefault("agent.max_turns", agent.DefaultMaxTurns)
+	viper.SetDefault("agent.max_tool_calls", agent.DefaultMaxToolCalls)
+	viper.SetDefault("agent.tool_timeout_seconds", int(agent.DefaultToolTimeout.Seconds()))
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
@@ -143,8 +151,14 @@ func startTui(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stderr, "iris: warning: %s\n", warning)
 	}
 
+	cfg := config.GetConfig()
+
 	client := llm.NewClient()
-	irisAgent, err := agent.NewAgent(client, securityPolicy)
+	irisAgent, err := agent.NewAgent(client, securityPolicy, agent.Options{
+		MaxTurns:     cfg.Agent.MaxTurns,
+		MaxToolCalls: cfg.Agent.MaxToolCalls,
+		ToolTimeout:  cfg.Agent.ToolTimeout(),
+	})
 	if err != nil {
 		Logger.Error("failed to create agent", "error", err)
 		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
@@ -156,8 +170,15 @@ func startTui(cmd *cobra.Command, args []string) {
 		}
 	}()
 
-	if err := tui.Run(irisAgent, securityPolicy); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := tui.Run(ctx, irisAgent, securityPolicy); err != nil {
 		Logger.Error("TUI failed to start", "error", err)
+		// Exit uses os.Exit, which skips deferred cleanup.
+		if closeErr := irisAgent.Close(); closeErr != nil {
+			Logger.Warn("failed to clean up agent resources", "error", closeErr)
+		}
 		Exit()
 	}
 }

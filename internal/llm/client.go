@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -130,38 +131,102 @@ type FunctionCall struct {
 }
 
 type LLMClient struct {
-	URL        string
-	MaxRetries int
-	Model      string
-	HTTP       *http.Client
+	URL            string
+	MaxRetries     int
+	RequestTimeout time.Duration
+	Model          string
+	HTTP           *http.Client
 }
 
+// DefaultRequestTimeout bounds one complete LLM request, including retry
+// attempts and stream reading. It can be overridden with
+// [llm].request_timeout_seconds.
+const DefaultRequestTimeout = 30 * time.Minute
+
 func NewClient() *LLMClient {
+	cfg := config.GetConfig()
+
+	maxRetries := cfg.MaxRetries
+	if maxRetries < 1 {
+		maxRetries = 1
+	}
+
+	requestTimeout := cfg.LLM.RequestTimeout()
+	if requestTimeout <= 0 {
+		requestTimeout = DefaultRequestTimeout
+	}
+
 	return &LLMClient{
-		URL:        config.GetConfig().BaseURL + "/chat/completions",
-		MaxRetries: config.GetConfig().MaxRetries,
-		Model:      config.GetConfig().DefaultModel,
+		URL:            cfg.BaseURL + "/chat/completions",
+		MaxRetries:     maxRetries,
+		RequestTimeout: requestTimeout,
+		Model:          cfg.DefaultModel,
 		HTTP: &http.Client{
-			Timeout: 0, // controlled via context per-request
+			Timeout: 0, // controlled via context per request
 		},
 	}
 }
 
-func (c *LLMClient) Generate(messages []ChatMessage, tools []Tool, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
+// HTTPStatusError describes a non-2xx response from the LLM server.
+type HTTPStatusError struct {
+	Status int
+	Body   string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body)
+}
+
+// Generate requests a completion. A context is required so callers can
+// cancel the request, its retries, and an in-progress stream.
+func (c *LLMClient) Generate(
+	ctx context.Context,
+	messages []ChatMessage,
+	tools []Tool,
+	onChunk func(chunkType string, content string),
+	onError func(error),
+) (Chunk, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	Logger.Debug("Generating response from LLM", "messageCount", len(messages), "toolCount", len(tools))
+
 	if onChunk != nil || onError != nil {
-		return c.GenerateStream(messages, tools, onChunk, onError)
+		return c.GenerateStream(ctx, messages, tools, onChunk, onError)
 	}
 	return Chunk{}, fmt.Errorf("synchronous generation is not supported, onChunk or onError callback must be provided")
 }
 
-func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, onChunk func(chunkType string, content string), onError func(error)) (Chunk, error) {
+// GenerateStream streams a completion. Cancellation of ctx aborts the HTTP
+// request, any retry backoff, and stream reading.
+func (c *LLMClient) GenerateStream(
+	ctx context.Context,
+	messages []ChatMessage,
+	tools []Tool,
+	onChunk func(chunkType string, content string),
+	onError func(error),
+) (Chunk, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return Chunk{}, err
+	}
+
 	// Guard against nil callbacks to avoid panics.
 	if onChunk == nil {
 		onChunk = func(string, string) {}
 	}
 	if onError == nil {
 		onError = func(error) {}
+	}
+
+	callCtx := ctx
+	var cancel context.CancelFunc
+	if c.RequestTimeout > 0 {
+		callCtx, cancel = context.WithTimeout(ctx, c.RequestTimeout)
+		defer cancel()
 	}
 
 	payload := createPayload(c.Model, messages, tools)
@@ -172,45 +237,48 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, onChunk
 
 	LogLLMPayload(payload)
 
+	httpClient := c.HTTP
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
 	doRequest := func() (*http.Response, error) {
-		bodyBytes, e := json.Marshal(payload)
-		if e != nil {
-			return nil, e
+		bodyBytes, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("encode LLM request: %w", err)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
-		// cancel is intentionally not deferred here. The context must stay
-		// alive for the duration of the stream read below. The caller closes
-		// res.Body which unblocks any in-flight reads, and the GC will clean
-		// up the context. If you want explicit cancellation, thread a
-		// context.Context through the method signature instead.
-		_ = cancel // suppress "cancel not called" linter warning
-
-		req, e := http.NewRequestWithContext(ctx, "POST", c.URL, bytes.NewReader(bodyBytes))
-		if e != nil {
-			cancel()
-			return nil, e
+		req, err := http.NewRequestWithContext(callCtx, http.MethodPost, c.URL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
 
-		res, e := c.HTTP.Do(req)
-		if e != nil {
-			cancel()
-			return nil, e
+		res, err := httpClient.Do(req)
+		if err != nil {
+			if res != nil && res.Body != nil {
+				_ = res.Body.Close()
+			}
+			return nil, err
 		}
 
 		if res.StatusCode != http.StatusOK {
-			bodyBytes, err := io.ReadAll(res.Body)
-			res.Body.Close()
-			cancel()
+			defer res.Body.Close()
 
-			if err != nil {
-				return nil, fmt.Errorf("HTTP %d (failed to read error body: %w)", res.StatusCode, err)
+			body, readErr := io.ReadAll(io.LimitReader(res.Body, 64*1024))
+			if readErr != nil {
+				return nil, fmt.Errorf("HTTP %d (failed to read error body: %w)", res.StatusCode, readErr)
 			}
-			return nil, fmt.Errorf("HTTP %d: %s", res.StatusCode, string(bodyBytes))
+			return nil, &HTTPStatusError{Status: res.StatusCode, Body: string(body)}
 		}
 
 		return res, nil
+	}
+
+	attempts := c.MaxRetries
+	if attempts < 1 {
+		attempts = 1
 	}
 
 	var (
@@ -219,17 +287,28 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, onChunk
 		retryDelay = time.Second
 	)
 
-	for attempt := 1; attempt <= c.MaxRetries; attempt++ {
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if callCtx.Err() != nil {
+			return Chunk{}, c.requestContextError(ctx, callCtx)
+		}
+
 		if attempt > 1 {
 			Logger.Warn(
 				"LLM streaming request failed, retrying...",
 				"attempt", attempt,
-				"maxRetries", c.MaxRetries,
+				"maxAttempts", attempts,
 			)
 			if err != nil {
 				onError(fmt.Errorf("LLM streaming request failed on attempt %d: %w", attempt-1, err))
 			}
-			time.Sleep(retryDelay)
+
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-callCtx.Done():
+				timer.Stop()
+				return Chunk{}, c.requestContextError(ctx, callCtx)
+			case <-timer.C:
+			}
 			retryDelay *= 2
 		}
 
@@ -238,19 +317,39 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, onChunk
 			break
 		}
 
-		if attempt < c.MaxRetries {
+		if callCtx.Err() != nil {
+			return Chunk{}, c.requestContextError(ctx, callCtx)
+		}
+
+		var statusErr *HTTPStatusError
+		if errors.As(err, &statusErr) &&
+			statusErr.Status >= 400 &&
+			statusErr.Status < 500 &&
+			statusErr.Status != http.StatusTooManyRequests {
+			// Client errors are not transient; retrying cannot help.
+			Logger.Error("LLM request rejected", "status", statusErr.Status)
+			return Chunk{}, err
+		}
+
+		if attempt < attempts {
 			Logger.Warn(
 				"LLM streaming request failed",
 				"attempt", attempt,
 				"error", err,
 			)
 		} else {
-			Logger.Error("LLM streaming request failed after all retries", "error", err)
+			Logger.Error("LLM streaming request failed after all attempts", "error", err)
 		}
 	}
 
 	if res == nil || err != nil {
-		return Chunk{}, fmt.Errorf("failed to connect to LLM server after %d attempts: %w", c.MaxRetries, err)
+		if err == nil {
+			err = errors.New("LLM server returned no response")
+		}
+		if callCtx.Err() != nil {
+			return Chunk{}, c.requestContextError(ctx, callCtx)
+		}
+		return Chunk{}, fmt.Errorf("failed to connect to LLM server after %d attempts: %w", attempts, err)
 	}
 	defer res.Body.Close()
 
@@ -276,9 +375,16 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, onChunk
 	}
 
 	for {
+		if callCtx.Err() != nil {
+			return finalChunk, c.requestContextError(ctx, callCtx)
+		}
+
 		line, readErr := reader.ReadBytes('\n')
 		if readErr != nil {
-			if readErr == io.EOF {
+			if callCtx.Err() != nil {
+				return finalChunk, c.requestContextError(ctx, callCtx)
+			}
+			if errors.Is(readErr, io.EOF) {
 				break
 			}
 			// Return whatever we have accumulated alongside the error so the
@@ -310,6 +416,10 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, onChunk
 
 		if len(chunk.Choices) == 0 {
 			continue
+		}
+
+		if callCtx.Err() != nil {
+			return finalChunk, c.requestContextError(ctx, callCtx)
 		}
 
 		choice := chunk.Choices[0]
@@ -360,6 +470,10 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, onChunk
 		}
 	}
 
+	if callCtx.Err() != nil {
+		return finalChunk, c.requestContextError(ctx, callCtx)
+	}
+
 	finalChunk.Choices[0].Delta.Content = fullResponse.String()
 	finalChunk.Choices[0].Delta.ReasoningContent = fullReasoning.String()
 
@@ -372,6 +486,24 @@ func (c *LLMClient) GenerateStream(messages []ChatMessage, tools []Tool, onChunk
 	}
 
 	return finalChunk, nil
+}
+
+// requestContextError turns a cancelled call context into the most useful
+// error: the parent's cancellation takes priority, then the request deadline.
+func (c *LLMClient) requestContextError(parent, callCtx context.Context) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
+
+	if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("LLM request timed out after %s: %w", c.RequestTimeout, context.DeadlineExceeded)
+	}
+
+	if err := callCtx.Err(); err != nil {
+		return err
+	}
+
+	return context.Canceled
 }
 
 func createPayload(model string, messages []ChatMessage, tools []Tool) Payload {

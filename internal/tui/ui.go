@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -50,10 +53,28 @@ const (
 	ToolValue
 	ErrorPrompt
 	Error
+	NoticePrompt
+	Notice
 	Spinner
 )
 
 var Logger = logger.Logger
+
+type lifecycle struct {
+	once sync.Once
+	done chan struct{}
+}
+
+func newLifecycle() *lifecycle {
+	return &lifecycle{done: make(chan struct{})}
+}
+
+func (l *lifecycle) close() {
+	if l == nil {
+		return
+	}
+	l.once.Do(func() { close(l.done) })
+}
 
 type model struct {
 	agent           *agent.Agent
@@ -77,6 +98,8 @@ type model struct {
 	approvals       chan approvalRequestMsg
 	pendingApproval *approvalRequestMsg
 	approvalTimeout time.Duration
+	canceling       bool
+	lifecycle       *lifecycle
 }
 
 type toolCallDelta struct {
@@ -100,6 +123,8 @@ type chunkMsg struct {
 }
 
 type doneMsg struct{}
+
+type canceledMsg struct{}
 
 type errMsg struct{ error }
 
@@ -174,6 +199,9 @@ func (m *model) renderMessage(msg message) string {
 	case "error":
 		sb.WriteString(m.renderFor(ErrorPrompt, "Error> "))
 		sb.WriteString(m.renderFor(Error, msg.content) + "\n")
+	case "notice":
+		sb.WriteString(m.renderFor(NoticePrompt, "Notice> "))
+		sb.WriteString(m.renderFor(Notice, msg.content) + "\n")
 	}
 	return sb.String()
 }
@@ -273,6 +301,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				m.fullReason.Reset()
 				m.fullResponse.Reset()
+				m.toolName = ""
+				m.toolArgs.Reset()
+				m.previewPath = ""
+				m.previewContent = ""
+				m.previewCommand = ""
+				m.canceling = false
 				m.state = StateStreaming
 				m.resizeLayout()
 				m.viewport.GotoBottom()
@@ -281,19 +315,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.fresh = false
 					return m, tea.Batch(
 						m.spinner.Tick,
-						runFreshAgenticLoopCommand(m.agent, input, m.stream),
+						runFreshAgenticLoopCommand(m.agent, input, m.stream, m.done()),
 						waitForStream(m.stream),
 					)
 				} else {
 					return m, tea.Batch(
 						m.spinner.Tick,
-						runAgenticLoopCommand(m.agent, input, m.stream),
+						runAgenticLoopCommand(m.agent, input, m.stream, m.done()),
 						waitForStream(m.stream),
 					)
 				}
 
 			case "ctrl+c":
-				return m, tea.Quit
+				return m, m.quit()
 
 			case "pgup", "ctrl+u", "pgdown", "ctrl+d":
 				var cmd tea.Cmd
@@ -327,7 +361,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPressMsg:
 			switch msg.String() {
 			case "ctrl+c":
-				return m, tea.Quit
+				if m.canceling {
+					return m, m.quit()
+				}
+				m.canceling = true
+				if m.agent != nil {
+					m.agent.Cancel()
+				}
+				m.resizeLayout()
+				m.viewport.GotoBottom()
+				return m, nil
 			case "pgup", "ctrl+u":
 				m.viewport, _ = m.viewport.Update(msg)
 				return m, nil
@@ -431,9 +474,32 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, message{role: "assistant", content: resp})
 			Logger.Debug("Agentic loop completed", "response", resp)
 			Logger.Debug(">>>>>", "messages", fmt.Sprintf("%+v", m.messages))
+			m.canceling = false
 			m.state = StateInput
 			m.resizeLayout()
 			m.viewport.GotoBottom()
+			if rearm {
+				return m, m.waitApproval()
+			}
+			return m, nil
+
+		case canceledMsg:
+			rearm := false
+			if m.pendingApproval != nil {
+				m.resolveApproval(policy.ApprovalDecision{
+					Allow:  false,
+					Reason: "run canceled",
+				})
+				rearm = true
+			}
+
+			m.flushPartialStream()
+			m.messages = append(m.messages, message{role: "notice", content: "Canceled."})
+			m.canceling = false
+			m.state = StateInput
+			m.resizeLayout()
+			m.viewport.GotoBottom()
+
 			if rearm {
 				return m, m.waitApproval()
 			}
@@ -454,7 +520,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 				rearm = true
 			}
+			m.flushPartialStream()
 			m.messages = append(m.messages, message{role: "error", content: msg.Error()})
+			m.canceling = false
 			m.state = StateInput
 			m.resizeLayout()
 			m.viewport.GotoBottom()
@@ -501,6 +569,8 @@ func (m *model) spinnerBar() string {
 	if m.state == StateStreaming {
 		var color, label string
 		switch {
+		case m.canceling:
+			color, label = ColorRedSoft, " canceling..."
 		case m.fullReason.Len() > 0 && m.fullResponse.Len() == 0:
 			color, label = ColorYellow, " Iris reasoning..."
 		case m.toolArgs.Len() > 0 && m.fullResponse.Len() == 0:
@@ -567,10 +637,13 @@ func (m *model) statusLine() string {
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorDim))
 	help := style.Render("enter: send · shift+enter: newline · pgup/pgdn: scroll · ctrl+c: quit")
 	if m.state == StateStreaming {
-		help = style.Render("pgup/pgdn: scroll · ctrl+c: quit")
+		help = style.Render("pgup/pgdn: scroll · ctrl+c: cancel")
+	}
+	if m.canceling {
+		help = style.Render("canceling… · ctrl+c: quit")
 	}
 	if m.pendingApproval != nil {
-		help = style.Render("y: allow once · n: deny · ctrl+c: quit")
+		help = style.Render("y: allow once · n: deny · ctrl+c: cancel")
 	}
 	pct := style.Render(fmt.Sprintf(" %3.0f%% ", m.viewport.ScrollPercent()*100))
 	gap := max(m.width-lipgloss.Width(help)-lipgloss.Width(pct), 1)
@@ -615,10 +688,23 @@ func waitForStream(ch chan tea.Msg) tea.Cmd {
 	return func() tea.Msg { return <-ch }
 }
 
-func Run(agent *agent.Agent, pol *policy.Policy) error {
+func Run(ctx context.Context, agent *agent.Agent, pol *policy.Policy) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	m := initialModel(agent, pol)
-	prg := tea.NewProgram(&m)
+	prg := tea.NewProgram(&m, tea.WithContext(ctx))
 	_, err := prg.Run()
+
+	// Unblock any agent callback that is trying to deliver a message after the
+	// program has stopped. cmd calls Agent.Close next, which cancels the run
+	// and waits for cleanup.
+	m.closeDone()
+
+	if errors.Is(err, tea.ErrProgramKilled) {
+		return nil
+	}
 	return err
 }
 
@@ -666,5 +752,62 @@ func initialModel(agent *agent.Agent, pol *policy.Policy) model {
 		spinner:         spin,
 		approvals:       approvals,
 		approvalTimeout: approvalTimeout,
+		lifecycle:       newLifecycle(),
+	}
+}
+
+func (m *model) done() <-chan struct{} {
+	if m.lifecycle == nil {
+		return nil
+	}
+	return m.lifecycle.done
+}
+
+func (m *model) closeDone() {
+	if m.lifecycle != nil {
+		m.lifecycle.close()
+	}
+}
+
+func (m *model) quit() tea.Cmd {
+	if m.agent != nil {
+		m.agent.Cancel()
+	}
+	m.closeDone()
+	return tea.Quit
+}
+
+// flushPartialStream persists partial output before returning to input.
+func (m *model) flushPartialStream() {
+	if m.fullReason.Len() > 0 {
+		m.messages = append(m.messages, message{
+			role:    "reasoning",
+			content: m.fullReason.String(),
+		})
+		m.fullReason.Reset()
+	}
+
+	if m.fullResponse.Len() > 0 {
+		m.messages = append(m.messages, message{
+			role:    "assistant",
+			content: m.fullResponse.String(),
+		})
+		m.fullResponse.Reset()
+	}
+
+	if m.toolArgs.Len() > 0 {
+		m.messages = append(m.messages, message{
+			role:           "tool",
+			toolName:       m.toolName,
+			toolArgs:       m.toolArgs.String(),
+			previewPath:    m.previewPath,
+			previewContent: m.previewContent,
+			previewCommand: m.previewCommand,
+		})
+		m.toolName = ""
+		m.toolArgs.Reset()
+		m.previewPath = ""
+		m.previewContent = ""
+		m.previewCommand = ""
 	}
 }

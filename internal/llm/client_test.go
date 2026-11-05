@@ -1,0 +1,221 @@
+package llm
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func newTestClient(server *httptest.Server) *LLMClient {
+	return &LLMClient{
+		URL:            server.URL,
+		MaxRetries:     1,
+		RequestTimeout: 5 * time.Second,
+		HTTP:           server.Client(),
+	}
+}
+
+func TestGenerateStreamCancellation(t *testing.T) {
+	firstChunk := make(chan struct{})
+	var once sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"}}]}\n\n")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("response writer does not support flushing")
+			return
+		}
+		flusher.Flush()
+
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := newTestClient(server)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := client.GenerateStream(ctx, nil, nil, func(_ string, content string) {
+			if content == "first" {
+				once.Do(func() { close(firstChunk) })
+			}
+		}, nil)
+		errCh <- err
+	}()
+
+	select {
+	case <-firstChunk:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the first streamed chunk")
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("GenerateStream() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GenerateStream() did not return after cancellation")
+	}
+}
+
+func TestGenerateStreamRequestDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := &LLMClient{
+		URL:            server.URL,
+		MaxRetries:     1,
+		RequestTimeout: 100 * time.Millisecond,
+		HTTP:           server.Client(),
+	}
+
+	_, err := client.GenerateStream(context.Background(), nil, nil, nil, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GenerateStream() error = %v, want context.DeadlineExceeded", err)
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %v, want a timeout explanation", err)
+	}
+}
+
+func TestGenerateStreamRetryCancellation(t *testing.T) {
+	var requests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "temporary failure", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := &LLMClient{
+		URL:            server.URL,
+		MaxRetries:     3,
+		RequestTimeout: 10 * time.Second,
+		HTTP:           server.Client(),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	start := time.Now()
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := client.GenerateStream(ctx, nil, nil, nil, nil)
+		errCh <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("GenerateStream() error = %v, want context.Canceled", err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("retry cancellation took too long: %s", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GenerateStream() did not return after cancelling retries")
+	}
+
+	if requests.Load() < 1 {
+		t.Fatal("expected at least one request before cancellation")
+	}
+}
+
+func TestGenerateStreamRetriesThenSucceeds(t *testing.T) {
+	var attempts atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			http.Error(w, "try again", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	client := &LLMClient{
+		URL:            server.URL,
+		MaxRetries:     2,
+		RequestTimeout: 5 * time.Second,
+		HTTP:           server.Client(),
+	}
+
+	response, err := client.GenerateStream(context.Background(), nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateStream() error = %v", err)
+	}
+	if got := response.Choices[0].Delta.Content; got != "ok" {
+		t.Fatalf("content = %q, want ok", got)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts.Load())
+	}
+}
+
+func TestGenerateStreamDoesNotRetryClientErrors(t *testing.T) {
+	var attempts atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := &LLMClient{
+		URL:            server.URL,
+		MaxRetries:     3,
+		RequestTimeout: 5 * time.Second,
+		HTTP:           server.Client(),
+	}
+
+	_, err := client.GenerateStream(context.Background(), nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("GenerateStream() error = nil, want HTTP status error")
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1 (4xx must not be retried)", attempts.Load())
+	}
+}
+
+func TestGenerateStreamPreCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client := &LLMClient{
+		URL:            "http://127.0.0.1:1/chat/completions",
+		MaxRetries:     1,
+		RequestTimeout: time.Second,
+	}
+
+	_, err := client.GenerateStream(ctx, nil, nil, nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("GenerateStream() error = %v, want context.Canceled", err)
+	}
+}

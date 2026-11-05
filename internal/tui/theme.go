@@ -55,6 +55,10 @@ func (m *model) renderFor(c component, text string) string {
 		return style.Foreground(lipgloss.Color(ColorRed)).Bold(true).Render(text)
 	case Error:
 		return style.Foreground(lipgloss.Color(ColorRedSoft)).Render(text)
+	case NoticePrompt:
+		return style.Foreground(lipgloss.Color(ColorMuted)).PaddingTop(1).Render(text)
+	case Notice:
+		return style.Foreground(lipgloss.Color(ColorMuted)).Render(text)
 	case Spinner:
 		var color string
 		switch {

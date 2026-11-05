@@ -101,6 +101,26 @@ bounded by `approval_timeout_seconds` (default 5 minutes).
 - Session directories are removed on exit. Directories left by crashed
   processes are reaped after `temp_file_ttl_minutes` (default 24 hours).
 
+### Cancellation and execution budgets
+
+Each agent run has its own `context.Context`. Cancellation propagates to the
+LLM HTTP request, stream reading, retry backoff, approval requests, and tool
+execution. Interrupting a tool call records synthetic tool results for the
+remaining calls so the conversation history stays valid for the next run.
+
+- `[llm] request_timeout_seconds` bounds a complete LLM request, including
+  retries and streaming (default 30 minutes). Retry backoff is
+  cancellation-aware, and non-transient 4xx responses are not retried.
+- `[agent] max_turns` bounds LLM turns per run (default 100).
+- `[agent] max_tool_calls` bounds tool executions per run (default 200).
+- `[agent] tool_timeout_seconds` bounds a single tool execution (default
+  5 minutes).
+- Exhausting a budget returns a clear error instead of looping indefinitely.
+
+Press `Ctrl+C` while Iris is streaming to cancel the current run; press it
+again to quit. `SIGTERM` exits the TUI, cancels the active run, and waits for
+tool and temp-file cleanup before the process exits.
+
 ### Edits are validated before they are applied
 
 The edit tool requires every `find` string to occur exactly once in the
@@ -210,6 +230,16 @@ max_capture_bytes = 10485760
 temp_file_ttl_minutes = 1440
 # Optional external approval hook (argv, no shell). Exit 0 = allow.
 # approval_hook = ['/usr/local/bin/iris-approve']
+
+[llm]
+# Deadline for one complete request, including retries and streaming.
+request_timeout_seconds = 1800
+
+[agent]
+# Per-run execution budgets.
+max_turns = 100
+max_tool_calls = 200
+tool_timeout_seconds = 300
 ```
 
 ### 4. Run
@@ -248,7 +278,7 @@ Flags:
 | `Enter` | Send message |
 | `Shift+Enter` or `Ctrl+J` | Insert newline |
 | `PgUp` / `PgDn` or `Ctrl+U` / `Ctrl+D` | Scroll history |
-| `Ctrl+C` | Quit |
+| `Ctrl+C` | Cancel the current run; press again (or press while idle) to quit |
 
 ## Making Custom Tools
 

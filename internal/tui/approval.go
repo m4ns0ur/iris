@@ -83,8 +83,15 @@ func (m *model) handleApprovalKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resolveApproval(policy.ApprovalDecision{Allow: false, Reason: "denied by user"})
 		return m, m.waitApproval()
 	case "ctrl+c":
+		if m.canceling {
+			return m, m.quit()
+		}
 		m.resolveApproval(policy.ApprovalDecision{Allow: false, Reason: "canceled by user"})
-		return m, tea.Quit
+		m.canceling = true
+		if m.agent != nil {
+			m.agent.Cancel()
+		}
+		return m, m.waitApproval()
 	}
 	return m, nil
 }
