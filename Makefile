@@ -1,4 +1,8 @@
-.PHONY: help clean build lint test coverage
+.PHONY: help build lint test coverage
+
+default: build
+
+all: build lint test coverage
 
 help:
 	@grep -E '^##' Makefile | sed 's/^## //'

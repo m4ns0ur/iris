@@ -18,22 +18,20 @@ import (
 var Logger = logger.Logger
 
 type Payload struct {
-	Model            string         `json:"model"`
-	Stream           bool           `json:"stream"`
-	StreamOptions    StreamOptions  `json:"stream_options,omitempty"`
-	Store            bool           `json:"store,omitempty"`
-	Messages         []ChatMessage  `json:"messages"`
-	Tools            []Tool         `json:"tools,omitempty"`
-	MaxTokens        int            `json:"max_tokens"`
-	Temperature      float32        `json:"temperature"`
-	TopP             float32        `json:"top_p,omitempty"`
-	TopK             int            `json:"top_k,omitempty"`
-	MinP             float32        `json:"min_p,omitempty"`
-	RepeatPenalty    float32        `json:"repeat_penalty,omitempty"`
-	PresencePenalty  float32        `json:"presence_penalty,omitempty"`
-	FrequencyPenalty float32        `json:"frequency_penalty,omitempty"`
-	ResponseFormat   ResponseFormat `json:"response_format,omitempty"`
-	CachePrompt      bool           `json:"cache_prompt"`
+	Model            string        `json:"model"`
+	Stream           bool          `json:"stream"`
+	StreamOptions    StreamOptions `json:"stream_options,omitempty"`
+	Store            bool          `json:"store,omitempty"`
+	Messages         []ChatMessage `json:"messages"`
+	Tools            []Tool        `json:"tools,omitempty"`
+	MaxTokens        int           `json:"max_tokens"`
+	Temperature      float32       `json:"temperature"`
+	TopP             float32       `json:"top_p,omitempty"`
+	TopK             int           `json:"top_k,omitempty"`
+	MinP             float32       `json:"min_p,omitempty"`
+	RepeatPenalty    float32       `json:"repeat_penalty,omitempty"`
+	PresencePenalty  float32       `json:"presence_penalty,omitempty"`
+	FrequencyPenalty float32       `json:"frequency_penalty,omitempty"`
 }
 
 type StreamOptions struct {
@@ -74,10 +72,6 @@ type Property struct {
 	Type        string      `json:"type"`
 	Description string      `json:"description"`
 	Items       *Parameters `json:"items,omitempty"`
-}
-
-type ResponseFormat struct {
-	ResponseType string `json:"type,omitempty"`
 }
 
 type LLMResponse struct {
@@ -388,7 +382,6 @@ func createPayload(model string, messages []ChatMessage, tools []Tool) Payload {
 		Tools:       tools,
 		MaxTokens:   32768,
 		Temperature: 0.6,
-		CachePrompt: true,
 	}
 
 	defaultModel := config.DefaultModel()
