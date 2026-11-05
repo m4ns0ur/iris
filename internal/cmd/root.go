@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/m4ns0ur/iris/internal/agent"
 	"github.com/m4ns0ur/iris/internal/config"
@@ -55,10 +56,23 @@ func initConfig() {
 	viper.SetConfigType("toml")
 
 	viper.SetEnvPrefix("IRIS")
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
 	viper.SetDefault("base_url", "http://127.0.0.1:8080/v1")
 	viper.SetDefault("max_retries", 3)
+
+	// Security defaults are repeated here so that IRIS_SECURITY_* environment
+	// variables work with AutomaticEnv (Viper only resolves known keys).
+	viper.SetDefault("security.mode", "workspace-write")
+	viper.SetDefault("security.external_sandbox", false)
+	viper.SetDefault("security.shell.mode", "approval")
+	viper.SetDefault("security.shell.timeout_seconds", 120)
+	viper.SetDefault("security.shell.approval_timeout_seconds", 300)
+	viper.SetDefault("security.shell.max_output_bytes", 25*1024)
+	viper.SetDefault("security.shell.max_output_lines", 1000)
+	viper.SetDefault("security.shell.max_capture_bytes", 10*1024*1024)
+	viper.SetDefault("security.shell.temp_file_ttl_minutes", 24*60)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
@@ -117,10 +131,32 @@ func startTui(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	client := llm.NewClient()
-	agent := agent.NewAgent(client, workdir)
+	securityPolicy, err := config.GetConfig().BuildPolicy(workdir)
+	if err != nil {
+		Logger.Error("invalid security policy", "error", err)
+		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
+		os.Exit(1)
+	}
 
-	if err := tui.Run(agent); err != nil {
+	for _, warning := range securityPolicy.Warnings() {
+		Logger.Warn("security warning", "warning", warning)
+		fmt.Fprintf(os.Stderr, "iris: warning: %s\n", warning)
+	}
+
+	client := llm.NewClient()
+	irisAgent, err := agent.NewAgent(client, securityPolicy)
+	if err != nil {
+		Logger.Error("failed to create agent", "error", err)
+		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := irisAgent.Close(); err != nil {
+			Logger.Warn("failed to clean up agent resources", "error", err)
+		}
+	}()
+
+	if err := tui.Run(irisAgent, securityPolicy); err != nil {
 		Logger.Error("TUI failed to start", "error", err)
 		Exit()
 	}

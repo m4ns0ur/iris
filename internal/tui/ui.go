@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
@@ -15,6 +16,7 @@ import (
 	"charm.land/lipgloss/v2/tree"
 	"github.com/m4ns0ur/iris/internal/agent"
 	"github.com/m4ns0ur/iris/internal/logger"
+	"github.com/m4ns0ur/iris/internal/policy"
 )
 
 const (
@@ -54,24 +56,27 @@ const (
 var Logger = logger.Logger
 
 type model struct {
-	agent          *agent.Agent
-	fresh          bool
-	fullReason     *strings.Builder
-	fullResponse   *strings.Builder
-	toolName       string
-	toolArgs       *strings.Builder
-	previewPath    string
-	previewContent string
-	previewCommand string
-	width          int
-	height         int
-	state          state
-	inputText      textarea.Model
-	stream         chan tea.Msg
-	spinner        spinner.Model
-	messages       []message
-	viewport       viewport.Model
-	ready          bool
+	agent           *agent.Agent
+	fresh           bool
+	fullReason      *strings.Builder
+	fullResponse    *strings.Builder
+	toolName        string
+	toolArgs        *strings.Builder
+	previewPath     string
+	previewContent  string
+	previewCommand  string
+	width           int
+	height          int
+	state           state
+	inputText       textarea.Model
+	stream          chan tea.Msg
+	spinner         spinner.Model
+	messages        []message
+	viewport        viewport.Model
+	ready           bool
+	approvals       chan approvalRequestMsg
+	pendingApproval *approvalRequestMsg
+	approvalTimeout time.Duration
 }
 
 type toolCallDelta struct {
@@ -174,7 +179,11 @@ func (m *model) renderMessage(msg message) string {
 }
 
 func (m *model) Init() tea.Cmd {
-	return m.inputText.Focus()
+	cmds := []tea.Cmd{m.inputText.Focus()}
+	if m.approvals != nil {
+		cmds = append(cmds, waitForApproval(m.approvals))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -207,6 +216,41 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resizeLayout()
 			m.viewport.GotoBottom()
 		}
+
+	case approvalRequestMsg:
+		if m.pendingApproval != nil {
+			select {
+			case msg.reply <- policy.ApprovalDecision{
+				Allow:  false,
+				Reason: "another approval request is already pending",
+			}:
+			default:
+			}
+			return m, nil
+		}
+
+		m.pendingApproval = &msg
+		m.resizeLayout()
+		m.viewport.GotoBottom()
+
+		// The policy has its own approval deadline. Mirror it in the UI so a
+		// timed-out prompt disappears instead of blocking the next turn.
+		return m, tea.Tick(m.approvalTimeout, func(time.Time) tea.Msg {
+			return approvalTimeoutMsg{reply: msg.reply}
+		})
+
+	case approvalTimeoutMsg:
+		if m.pendingApproval != nil && m.pendingApproval.reply == msg.reply {
+			m.pendingApproval = nil
+			m.resizeLayout()
+			m.viewport.GotoBottom()
+			return m, m.waitApproval()
+		}
+		return m, nil
+	}
+
+	if key, ok := msg.(tea.KeyPressMsg); ok && m.pendingApproval != nil {
+		return m.handleApprovalKey(key)
 	}
 
 	switch m.state {
@@ -367,6 +411,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 
 		case doneMsg:
+			rearm := false
+			if m.pendingApproval != nil {
+				m.resolveApproval(policy.ApprovalDecision{
+					Allow:  false,
+					Reason: "agent finished before the approval was answered",
+				})
+				rearm = true
+			}
 			if m.fullReason.Len() > 0 {
 				m.messages = append(m.messages, message{
 					role:    "reasoning",
@@ -382,6 +434,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = StateInput
 			m.resizeLayout()
 			m.viewport.GotoBottom()
+			if rearm {
+				return m, m.waitApproval()
+			}
 			return m, nil
 
 		case errMsg:
@@ -391,10 +446,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, waitForStream(m.stream)
 
 		case fatalErrMsg:
+			rearm := false
+			if m.pendingApproval != nil {
+				m.resolveApproval(policy.ApprovalDecision{
+					Allow:  false,
+					Reason: "agent failed before the approval was answered",
+				})
+				rearm = true
+			}
 			m.messages = append(m.messages, message{role: "error", content: msg.Error()})
 			m.state = StateInput
 			m.resizeLayout()
 			m.viewport.GotoBottom()
+			if rearm {
+				return m, m.waitApproval()
+			}
 			return m, nil
 		}
 
@@ -427,6 +493,10 @@ func (m *model) View() tea.View {
 
 func (m *model) spinnerBar() string {
 	w := m.contentWidth()
+
+	if m.pendingApproval != nil {
+		return m.approvalBar(w)
+	}
 
 	if m.state == StateStreaming {
 		var color, label string
@@ -499,6 +569,9 @@ func (m *model) statusLine() string {
 	if m.state == StateStreaming {
 		help = style.Render("pgup/pgdn: scroll · ctrl+c: quit")
 	}
+	if m.pendingApproval != nil {
+		help = style.Render("y: allow once · n: deny · ctrl+c: quit")
+	}
 	pct := style.Render(fmt.Sprintf(" %3.0f%% ", m.viewport.ScrollPercent()*100))
 	gap := max(m.width-lipgloss.Width(help)-lipgloss.Width(pct), 1)
 	return help + strings.Repeat(" ", gap) + pct
@@ -542,14 +615,14 @@ func waitForStream(ch chan tea.Msg) tea.Cmd {
 	return func() tea.Msg { return <-ch }
 }
 
-func Run(agent *agent.Agent) error {
-	m := initialModel(agent)
+func Run(agent *agent.Agent, pol *policy.Policy) error {
+	m := initialModel(agent, pol)
 	prg := tea.NewProgram(&m)
 	_, err := prg.Run()
 	return err
 }
 
-func initialModel(agent *agent.Agent) model {
+func initialModel(agent *agent.Agent, pol *policy.Policy) model {
 	ta := textarea.New()
 	ta.Placeholder = "Ask Iris..."
 	ta.SetHeight(InputHeight)
@@ -568,15 +641,30 @@ func initialModel(agent *agent.Agent) model {
 		FPS:    SpinnerFPS,
 	}
 
+	var approvals chan approvalRequestMsg
+	approvalTimeout := 5 * time.Minute
+	if pol != nil {
+		if configured := pol.ShellOptions().ApprovalTimeout; configured > 0 {
+			approvalTimeout = configured
+		}
+		if pol.Approver() == nil {
+			approver := newTUIApprover()
+			pol.SetApprover(approver)
+			approvals = approver.requests
+		}
+	}
+
 	return model{
-		agent:        agent,
-		fresh:        true,
-		fullReason:   &strings.Builder{},
-		fullResponse: &strings.Builder{},
-		toolArgs:     &strings.Builder{},
-		state:        StateInput,
-		inputText:    ta,
-		stream:       make(chan tea.Msg),
-		spinner:      spin,
+		agent:           agent,
+		fresh:           true,
+		fullReason:      &strings.Builder{},
+		fullResponse:    &strings.Builder{},
+		toolArgs:        &strings.Builder{},
+		state:           StateInput,
+		inputText:       ta,
+		stream:          make(chan tea.Msg),
+		spinner:         spin,
+		approvals:       approvals,
+		approvalTimeout: approvalTimeout,
 	}
 }

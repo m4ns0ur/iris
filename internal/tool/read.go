@@ -8,13 +8,22 @@ import (
 	"strings"
 
 	"github.com/m4ns0ur/iris/internal/llm"
+	"github.com/m4ns0ur/iris/internal/policy"
 )
 
-// FileReadTool reads the contents of a file.
-type FileReadTool struct{}
+const (
+	defaultReadLines = 1000
+	defaultReadBytes = 25 * 1024
+	maxReadLines     = 10_000
+)
 
-func NewFileReadTool() *FileReadTool {
-	return &FileReadTool{}
+// FileReadTool reads the contents of a file inside the workspace.
+type FileReadTool struct {
+	policy *policy.Policy
+}
+
+func NewFileReadTool(pol *policy.Policy) *FileReadTool {
+	return &FileReadTool{policy: pol}
 }
 
 func (t *FileReadTool) Name() string {
@@ -26,7 +35,7 @@ func (t *FileReadTool) Description() string {
 }
 
 func (t *FileReadTool) FullDescription() string {
-	return "Read a file. Output is limited to 1000 lines or 25KB; use start/max to read parts. Continue reading offsets until the full file is obtained."
+	return "Read a file inside the workspace. Output is limited to 1000 lines or 25KB; use start/max to read parts. Paths outside the workspace are rejected."
 }
 
 func (t *FileReadTool) Parameters() llm.Parameters {
@@ -36,7 +45,7 @@ func (t *FileReadTool) Parameters() llm.Parameters {
 		Properties: map[string]llm.Property{
 			"path": {
 				Type:        "string",
-				Description: "File path",
+				Description: "File path (absolute or relative to the workspace)",
 			},
 			"start": {
 				Type:        "number",
@@ -44,7 +53,7 @@ func (t *FileReadTool) Parameters() llm.Parameters {
 			},
 			"max": {
 				Type:        "number",
-				Description: "Maximum lines to read",
+				Description: "Maximum lines to read (default 1000)",
 			},
 		},
 	}
@@ -52,71 +61,102 @@ func (t *FileReadTool) Parameters() llm.Parameters {
 
 func (t *FileReadTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
 	path, ok := args["path"].(string)
-	if !ok || path == "" {
+	if !ok || strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("missing required parameter: path")
 	}
 
-	resolvedPath, err := resolvePath(ctx, path)
+	if t.policy == nil {
+		return nil, fmt.Errorf("%w: read tool has no security policy", ErrExecutionFailed)
+	}
+
+	resolvedPath, err := t.policy.ResolveRead(path)
 	if err != nil {
 		return nil, err
 	}
 
 	start := 1
-	if s, ok := args["start"].(float64); ok && s > 0 {
-		start = int(s)
+	if value, ok := args["start"].(float64); ok && value >= 1 {
+		start = int(value)
 	}
 
-	maxBytes := 25 * 1024
-	if m, ok := args["max"].(float64); ok && m > 0 {
-		maxBytes = int(m)
+	maxLines := defaultReadLines
+	if value, ok := args["max"].(float64); ok && value > 0 {
+		maxLines = int(value)
+		if maxLines > maxReadLines {
+			maxLines = maxReadLines
+		}
 	}
 
-	const maxLines = 1000
-
-	fi, err := os.Stat(resolvedPath)
+	info, err := os.Stat(resolvedPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat file %q: %w", resolvedPath, err)
 	}
-	if fi.IsDir() {
+	if info.IsDir() {
 		return nil, fmt.Errorf("path is a directory, not a file: %q", resolvedPath)
 	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("path is not a regular file: %q", resolvedPath)
+	}
 
-	f, err := os.Open(resolvedPath)
+	file, err := os.Open(resolvedPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file %q: %w", resolvedPath, err)
 	}
-	defer f.Close()
+	defer file.Close()
 
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
-	var b strings.Builder
-	line := 1
-	readBytes := 0
-	readLines := 0
+	var content strings.Builder
+	line := 0
+	linesRead := 0
+	bytesRead := 0
+	truncated := false
 
 	for scanner.Scan() {
-		if line >= start {
-			txt := scanner.Text()
-			n := len(txt) + 1 // include newline
-
-			if readBytes+n > maxBytes || readLines >= maxLines {
-				break
-			}
-
-			b.WriteString(txt)
-			b.WriteByte('\n')
-
-			readBytes += n
-			readLines++
-		}
 		line++
+		if line < start {
+			if line%512 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+
+		text := scanner.Text()
+		needed := len(text) + 1
+
+		if linesRead >= maxLines || bytesRead+needed > defaultReadBytes {
+			truncated = true
+			break
+		}
+
+		content.WriteString(text)
+		content.WriteByte('\n')
+		linesRead++
+		bytesRead += needed
+
+		if linesRead%512 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read error %q: %w", resolvedPath, err)
 	}
 
-	return map[string]any{
-		"content": b.String(),
-	}, nil
+	result := map[string]any{
+		"content":    content.String(),
+		"truncated":  truncated,
+		"start_line": start,
+		"lines":      linesRead,
+	}
+	if linesRead > 0 {
+		result["end_line"] = start + linesRead - 1
+	}
+
+	return result, nil
 }

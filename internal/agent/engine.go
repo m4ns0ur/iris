@@ -7,14 +7,12 @@ import (
 
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/logger"
+	"github.com/m4ns0ur/iris/internal/policy"
 	"github.com/m4ns0ur/iris/internal/prompt"
 	"github.com/m4ns0ur/iris/internal/tool"
 )
 
-var (
-	Logger      = logger.Logger
-	toolContext *tool.ToolContext
-)
+var Logger = logger.Logger
 
 type Agent struct {
 	client           *llm.LLMClient
@@ -25,6 +23,11 @@ type Agent struct {
 	maxSteps         int
 	workdir          string
 	pendingToolCalls []PendingToolCall
+	policy           *policy.Policy
+	registry         *tool.ToolRegistry
+	toolContext      *tool.ToolContext
+	runCtx           context.Context
+	cancel           context.CancelFunc
 }
 
 type PendingToolCall struct {
@@ -33,18 +36,47 @@ type PendingToolCall struct {
 	Args map[string]any
 }
 
-func NewAgent(client *llm.LLMClient, workdir string) *Agent {
-	registry := tool.NewDefaultRegistry()
-	toolContext = &tool.ToolContext{Registry: registry, Workdir: workdir}
+func NewAgent(client *llm.LLMClient, pol *policy.Policy) (*Agent, error) {
+	registry, err := tool.NewDefaultRegistry(pol)
+	if err != nil {
+		return nil, err
+	}
+
+	workdir := pol.Workdir()
+	toolContext := &tool.ToolContext{
+		Registry: registry,
+		Workdir:  workdir,
+		Policy:   pol,
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
 
 	return &Agent{
-		client:   client,
-		state:    "idle",
-		goals:    []string{},
-		history:  []llm.ChatMessage{},
-		maxSteps: 1000, // TODO: Prevent infinite loops
-		workdir:  workdir,
+		client:      client,
+		state:       "idle",
+		goals:       []string{},
+		history:     []llm.ChatMessage{},
+		maxSteps:    1000, // TODO: Prevent infinite loops
+		workdir:     workdir,
+		policy:      pol,
+		registry:    registry,
+		toolContext: toolContext,
+		runCtx:      runCtx,
+		cancel:      cancel,
+	}, nil
+}
+
+// Close releases resources owned by the agent's tools.
+func (a *Agent) Close() error {
+	// Cancelling the run context terminates any shell process group (and any
+	// pending approval) before tool resources are released.
+	if a.cancel != nil {
+		a.cancel()
 	}
+	if a.registry == nil {
+		return nil
+	}
+	return a.registry.Close()
 }
 
 // Run executes the agentic loop with streaming support
@@ -56,7 +88,7 @@ func (a *Agent) Run(input string, onChunk func(chunkType string, content string)
 func (a *Agent) RunFresh(input string, onChunk func(chunkType string, content string), onError func(error)) error {
 	a.reset()
 	// Initialize with system prompt and user input
-	a.history = append(a.history, llm.ChatMessage{Role: "system", Content: prompt.BuildSystemPrompt(toolContext)})
+	a.history = append(a.history, llm.ChatMessage{Role: "system", Content: prompt.BuildSystemPrompt(a.toolContext)})
 	return a.Run(input, onChunk, onError)
 }
 
@@ -71,8 +103,6 @@ func (a *Agent) reset() {
 
 func (a *Agent) loop(onChunk func(chunkType string, content string), onError func(error)) error {
 	Logger.Info("Starting agentic loop")
-
-	registry := tool.NewDefaultRegistry()
 
 	for a.step < a.maxSteps {
 		Logger.Debug(
@@ -92,13 +122,17 @@ func (a *Agent) loop(onChunk func(chunkType string, content string), onError fun
 			Logger.Info("Agent is calling tools")
 			Logger.Debug("Tool calls", "count", len(a.pendingToolCalls))
 
-			ctx := context.Background()
+			ctx := a.runCtx
+			if ctx == nil {
+				ctx = context.Background()
+			}
 			ctx = tool.WithWorkdir(ctx, a.workdir)
+			ctx = tool.WithPolicy(ctx, a.policy)
 
 			for _, call := range a.pendingToolCalls {
 				result, err := tool.ExecuteWithTools(
 					ctx,
-					registry,
+					a.registry,
 					call.Name,
 					call.Args,
 				)
@@ -155,7 +189,7 @@ func (a *Agent) next(onChunk func(chunkType string, content string), onError fun
 	Logger.Info("Generating next response from LLM")
 	Logger.Debug("Next response", "historyLength", len(a.history))
 
-	tools := toolContext.Registry.List()
+	tools := a.toolContext.Registry.List()
 
 	response, err := a.client.Generate(
 		a.history,

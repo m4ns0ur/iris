@@ -22,10 +22,12 @@ type LLMChoice struct {
 func init() {
 	levelVar.Set(slog.LevelDebug)
 
-	file, err := os.OpenFile("iris_debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
+	// Logs include prompts and tool output, so keep them owner-only.
+	file, err := os.OpenFile("iris_debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		panic(err)
 	}
+	_ = file.Chmod(0o600)
 	fileHandler := slog.NewJSONHandler(file, &slog.HandlerOptions{Level: levelVar})
 
 	Logger = slog.New(slog.NewMultiHandler(fileHandler))

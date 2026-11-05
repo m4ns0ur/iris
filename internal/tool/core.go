@@ -8,13 +8,16 @@ package tool
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/m4ns0ur/iris/internal/llm"
+	"github.com/m4ns0ur/iris/internal/policy"
 )
 
 // ToolRegistry manages and provides access to available tools.
 type ToolRegistry struct {
 	tools map[string]Tool
+	temp  *TempStore
 }
 
 // Tool represents an executable function that can be called by the agent.
@@ -42,17 +45,35 @@ func NewToolRegistry() *ToolRegistry {
 	}
 }
 
-// NewDefaultRegistry creates and registers all default built-in tools.
-func NewDefaultRegistry() *ToolRegistry {
-	reg := NewToolRegistry()
+// NewDefaultRegistry creates and registers all default built-in tools. Every
+// file and shell tool is bound to the supplied security policy.
+func NewDefaultRegistry(pol *policy.Policy) (*ToolRegistry, error) {
+	if pol == nil {
+		return nil, fmt.Errorf("%w: tool registry requires a security policy", ErrExecutionFailed)
+	}
 
-	// Register built-in tools
-	reg.Register("read", NewFileReadTool())
-	reg.Register("edit", NewFileEditTool())
-	reg.Register("write", NewFileWriteTool())
-	reg.Register("shell", NewShellTool())
+	registry := NewToolRegistry()
 
-	return reg
+	temp, err := NewTempStore(pol.ShellOptions().TempDirTTL)
+	if err != nil {
+		return nil, fmt.Errorf("create shell output store: %w", err)
+	}
+
+	// The read tool may inspect captured shell output, but nothing else in
+	// the temp directory is writable.
+	if err := pol.AddReadRoot(temp.Dir()); err != nil {
+		_ = temp.Close()
+		return nil, fmt.Errorf("grant read access to shell output store: %w", err)
+	}
+
+	registry.temp = temp
+
+	registry.Register("read", NewFileReadTool(pol))
+	registry.Register("edit", NewFileEditTool(pol))
+	registry.Register("write", NewFileWriteTool(pol))
+	registry.Register("shell", NewShellTool(pol, temp))
+
+	return registry, nil
 }
 
 // Register adds a tool to the registry. Panics if name already exists.
@@ -71,26 +92,58 @@ func (r *ToolRegistry) Get(name string) Tool {
 // List returns names of all registered tools.
 func (r *ToolRegistry) List() []llm.Tool {
 	tools := make([]llm.Tool, 0, len(r.tools))
-	for name, tool := range r.tools {
+	for name, t := range r.tools {
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.Function{
 				Name:        name,
-				Description: tool.FullDescription(),
-				Parameters:  tool.Parameters(),
+				Description: t.FullDescription(),
+				Parameters:  t.Parameters(),
 			},
 		})
 	}
 	return tools
 }
 
-// ExecuteWithTools is a helper to execute a tool with proper context.
-func ExecuteWithTools(ctx context.Context, registry *ToolRegistry, name string, args map[string]any) (map[string]any, error) {
-	tool := registry.Get(name)
-	if tool == nil {
+// TempDir returns the directory used for captured shell output.
+func (r *ToolRegistry) TempDir() string {
+	if r == nil || r.temp == nil {
+		return ""
+	}
+	return r.temp.Dir()
+}
+
+// Close releases resources owned by the registry, including captured output
+// files created by the shell tool.
+func (r *ToolRegistry) Close() error {
+	if r == nil || r.temp == nil {
+		return nil
+	}
+	return r.temp.Close()
+}
+
+// ExecuteWithTools is a helper to execute a tool with proper context. Tool
+// panics are converted into errors so that a buggy tool cannot crash the
+// agent.
+func ExecuteWithTools(
+	ctx context.Context,
+	registry *ToolRegistry,
+	name string,
+	args map[string]any,
+) (result map[string]any, err error) {
+	t := registry.Get(name)
+	if t == nil {
 		return nil, ErrToolNotFound
 	}
 
 	ctx = WithCurrentTool(ctx, name, args)
-	return tool.Execute(ctx, args)
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = nil
+			err = fmt.Errorf("%w: tool %q panicked: %v", ErrExecutionFailed, name, recovered)
+		}
+	}()
+
+	return t.Execute(ctx, args)
 }

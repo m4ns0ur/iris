@@ -3,6 +3,8 @@ package tool
 import (
 	"context"
 	"strings"
+
+	"github.com/m4ns0ur/iris/internal/policy"
 )
 
 const (
@@ -14,6 +16,9 @@ const (
 
 	// WorkdirContextKey holds the working directory for file operations.
 	WorkdirContextKey = ContextKey("workdir")
+
+	// PolicyContextKey holds the security policy for custom tools.
+	PolicyContextKey = ContextKey("security_policy")
 )
 
 // ContextKey is a type for context keys.
@@ -35,6 +40,23 @@ func FromWorkdir(ctx context.Context) (string, bool) {
 	return workdir, ok
 }
 
+// WithPolicy attaches the security policy to a context so that custom tools
+// can reuse Iris' path and command checks.
+func WithPolicy(ctx context.Context, pol *policy.Policy) context.Context {
+	return context.WithValue(ctx, PolicyContextKey, pol)
+}
+
+// FromPolicy retrieves the security policy from the context.
+func FromPolicy(ctx context.Context) (*policy.Policy, bool) {
+	v := ctx.Value(PolicyContextKey)
+	if v == nil {
+		return nil, false
+	}
+
+	pol, ok := v.(*policy.Policy)
+	return pol, ok
+}
+
 // WithCurrentTool creates a new context with information about the currently executing tool.
 func WithCurrentTool(ctx context.Context, name string, args map[string]any) context.Context {
 	return context.WithValue(ctx, CurrentToolContextKey, struct {
@@ -47,6 +69,7 @@ func WithCurrentTool(ctx context.Context, name string, args map[string]any) cont
 type ToolContext struct {
 	Registry *ToolRegistry
 	Workdir  string
+	Policy   *policy.Policy
 }
 
 // BuildPrompt adds tool descriptions to a prompt for the LLM.

@@ -3,20 +3,24 @@ package tool
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/m4ns0ur/iris/internal/llm"
+	"github.com/m4ns0ur/iris/internal/policy"
 )
 
-// FileWriteTool writes content to a file.
-type FileWriteTool struct{}
-
-func NewFileWriteTool() *FileWriteTool {
-	return &FileWriteTool{}
+// FileWriteTool writes content to a file inside the workspace.
+type FileWriteTool struct {
+	policy *policy.Policy
 }
 
-// FileWriteTool writes content to a file.
+func NewFileWriteTool(pol *policy.Policy) *FileWriteTool {
+	return &FileWriteTool{policy: pol}
+}
+
 func (t *FileWriteTool) Name() string {
 	return "write"
 }
@@ -26,7 +30,7 @@ func (t *FileWriteTool) Description() string {
 }
 
 func (t *FileWriteTool) FullDescription() string {
-	return "Write content to a file. Creates parent directories as needed. Overwrites existing files."
+	return "Write content to a file inside the workspace. Creates parent directories as needed and atomically overwrites existing files. Paths outside the workspace are rejected."
 }
 
 func (t *FileWriteTool) Parameters() llm.Parameters {
@@ -36,11 +40,11 @@ func (t *FileWriteTool) Parameters() llm.Parameters {
 		Properties: map[string]llm.Property{
 			"path": {
 				Type:        "string",
-				Description: "File path",
+				Description: "File path (absolute or relative to the workspace)",
 			},
 			"content": {
 				Type:        "string",
-				Description: "File content",
+				Description: "File content (may be empty)",
 			},
 		},
 	}
@@ -48,29 +52,59 @@ func (t *FileWriteTool) Parameters() llm.Parameters {
 
 func (t *FileWriteTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
 	path, ok := args["path"].(string)
-	if !ok || path == "" {
+	if !ok || strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("missing required parameter: path")
 	}
 
 	content, ok := args["content"].(string)
-	if !ok || content == "" {
+	if !ok {
 		return nil, fmt.Errorf("missing required parameter: content")
 	}
 
-	resolvedPath, err := resolvePath(ctx, path)
+	if t.policy == nil {
+		return nil, fmt.Errorf("%w: write tool has no security policy", ErrExecutionFailed)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	resolvedPath, err := t.policy.ResolveWrite(path)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(resolvedPath), 0755); err != nil {
-		return nil, fmt.Errorf("failed to create dirs: %w", err)
+	perm := fs.FileMode(0o644)
+	if existingPerm, exists, err := existingFileMode(resolvedPath); err != nil {
+		return nil, err
+	} else if exists {
+		perm = existingPerm
 	}
 
-	if err := os.WriteFile(resolvedPath, []byte(content), 0644); err != nil {
+	if err := os.MkdirAll(filepath.Dir(resolvedPath), 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create parent directories for %q: %w", resolvedPath, err)
+	}
+
+	// Re-resolve now that parents exist. This catches a path that became a
+	// symlink pointing outside the workspace between the first check and the
+	// write.
+	resolvedPath, err = t.policy.ResolveWrite(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if existingPerm, exists, err := existingFileMode(resolvedPath); err != nil {
+		return nil, err
+	} else if exists {
+		perm = existingPerm
+	}
+
+	if err := writeFileAtomic(resolvedPath, []byte(content), perm); err != nil {
 		return nil, fmt.Errorf("write failed %q: %w", resolvedPath, err)
 	}
 
 	return map[string]any{
 		"success": true,
+		"bytes":   len(content),
 	}, nil
 }
