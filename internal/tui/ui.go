@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -17,9 +16,8 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/tree"
-	"github.com/m4ns0ur/iris/internal/agent"
+	"github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/internal/logger"
-	"github.com/m4ns0ur/iris/internal/policy"
 )
 
 const (
@@ -77,8 +75,7 @@ func (l *lifecycle) close() {
 }
 
 type model struct {
-	agent           *agent.Agent
-	fresh           bool
+	agent           agent.Agent
 	fullReason      *strings.Builder
 	fullResponse    *strings.Builder
 	toolName        string
@@ -99,12 +96,9 @@ type model struct {
 	pendingApproval *approvalRequestMsg
 	approvalTimeout time.Duration
 	canceling       bool
+	agentErrored    bool
+	totalTokens     int
 	lifecycle       *lifecycle
-}
-
-type toolCallDelta struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
 }
 
 type message struct {
@@ -117,18 +111,9 @@ type message struct {
 	previewCommand string
 }
 
-type chunkMsg struct {
-	chunkType string
-	content   string
+type agentEventMsg struct {
+	event agent.Event
 }
-
-type doneMsg struct{}
-
-type canceledMsg struct{}
-
-type errMsg struct{ error }
-
-type fatalErrMsg struct{ error }
 
 func (m *model) viewportHeight() int {
 	return max(m.height-m.inputText.Height()-InputBorder-SpinnerHeight-StatusHeight, 1)
@@ -155,7 +140,7 @@ func (m *model) buildContent() string {
 			sb.WriteString(m.renderFor(IrisPrompt, "Iris> "))
 			sb.WriteString(m.renderFor(Iris, m.fullResponse.String()))
 		}
-		if m.toolArgs.Len() > 0 {
+		if m.toolName != "" || m.toolArgs.Len() > 0 {
 			t := tree.Root(m.renderFor(ToolPrompt, m.toolName))
 			if m.previewPath != "" {
 				t.Child(m.renderFor(ToolKey, "Path: ") + m.renderFor(ToolValue, m.previewPath))
@@ -207,7 +192,10 @@ func (m *model) renderMessage(msg message) string {
 }
 
 func (m *model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.inputText.Focus()}
+	cmds := []tea.Cmd{
+		m.inputText.Focus(),
+		waitForStream(m.stream),
+	}
 	if m.approvals != nil {
 		cmds = append(cmds, waitForApproval(m.approvals))
 	}
@@ -248,7 +236,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case approvalRequestMsg:
 		if m.pendingApproval != nil {
 			select {
-			case msg.reply <- policy.ApprovalDecision{
+			case msg.reply <- agent.ApprovalDecision{
 				Allow:  false,
 				Reason: "another approval request is already pending",
 			}:
@@ -275,6 +263,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.waitApproval()
 		}
 		return m, nil
+
+	case agentEventMsg:
+		return m.handleAgentEvent(msg.event)
 	}
 
 	if key, ok := msg.(tea.KeyPressMsg); ok && m.pendingApproval != nil {
@@ -307,24 +298,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.previewContent = ""
 				m.previewCommand = ""
 				m.canceling = false
+				m.agentErrored = false
+				m.totalTokens = 0
 				m.state = StateStreaming
 				m.resizeLayout()
 				m.viewport.GotoBottom()
 
-				if m.fresh {
-					m.fresh = false
-					return m, tea.Batch(
-						m.spinner.Tick,
-						runFreshAgenticLoopCommand(m.agent, input, m.stream, m.done()),
-						waitForStream(m.stream),
-					)
-				} else {
-					return m, tea.Batch(
-						m.spinner.Tick,
-						runAgenticLoopCommand(m.agent, input, m.stream, m.done()),
-						waitForStream(m.stream),
-					)
-				}
+				return m, tea.Batch(
+					m.spinner.Tick,
+					runAgentCommand(m.agent, input, m.done()),
+				)
 
 			case "ctrl+c":
 				return m, m.quit()
@@ -389,147 +372,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
 
-		case chunkMsg:
-			switch msg.chunkType {
-			case "next":
-				if m.fullReason.Len() > 0 {
-					m.messages = append(m.messages, message{
-						role:    "reasoning",
-						content: m.fullReason.String(),
-					})
-					m.fullReason.Reset()
-				}
-				if m.fullResponse.Len() > 0 {
-					m.messages = append(m.messages, message{
-						role:    "assistant",
-						content: m.fullResponse.String(),
-					})
-					m.fullResponse.Reset()
-				}
-				if m.toolArgs.Len() > 0 {
-					m.messages = append(m.messages, message{
-						role:           "tool",
-						toolName:       m.toolName,
-						toolArgs:       m.toolArgs.String(),
-						previewPath:    m.previewPath,
-						previewContent: m.previewContent,
-						previewCommand: m.previewCommand,
-					})
-					m.toolName = ""
-					m.toolArgs.Reset()
-					m.previewPath = ""
-					m.previewContent = ""
-					m.previewCommand = ""
-				}
-			case "reason":
-				m.fullReason.WriteString(msg.content)
-			case "tool":
-				var delta toolCallDelta
-				if err := json.Unmarshal([]byte(msg.content), &delta); err != nil {
-					break
-				}
-				if delta.Name != "" {
-					m.toolName = delta.Name
-				}
-				if delta.Arguments != "" {
-					m.toolArgs.WriteString(delta.Arguments)
-				}
-				toolArgs := m.toolArgs.String()
-				if path, ok := partialJSONField(toolArgs, "path"); ok {
-					m.previewPath = path
-				}
-				if content, ok := partialJSONField(toolArgs, "content"); ok {
-					m.previewContent = content
-				}
-				if command, ok := partialJSONField(toolArgs, "command"); ok {
-					m.previewCommand = command
-				}
-			case "response":
-				m.fullResponse.WriteString(msg.content)
-			}
-
-			m.resizeLayout()
-			m.viewport.GotoBottom()
-			cmds = append(cmds, waitForStream(m.stream))
-			return m, tea.Batch(cmds...)
-
-		case doneMsg:
-			rearm := false
-			if m.pendingApproval != nil {
-				m.resolveApproval(policy.ApprovalDecision{
-					Allow:  false,
-					Reason: "agent finished before the approval was answered",
-				})
-				rearm = true
-			}
-			if m.fullReason.Len() > 0 {
-				m.messages = append(m.messages, message{
-					role:    "reasoning",
-					content: m.fullReason.String(),
-				})
-				m.fullReason.Reset()
-			}
-			resp := m.fullResponse.String()
-			m.fullResponse.Reset()
-			m.messages = append(m.messages, message{role: "assistant", content: resp})
-			Logger.Debug("Agentic loop completed", "response", resp)
-			Logger.Debug(">>>>>", "messages", fmt.Sprintf("%+v", m.messages))
-			m.canceling = false
-			m.state = StateInput
-			m.resizeLayout()
-			m.viewport.GotoBottom()
-			if rearm {
-				return m, m.waitApproval()
-			}
-			return m, nil
-
-		case canceledMsg:
-			rearm := false
-			if m.pendingApproval != nil {
-				m.resolveApproval(policy.ApprovalDecision{
-					Allow:  false,
-					Reason: "run canceled",
-				})
-				rearm = true
-			}
-
-			m.flushPartialStream()
-			m.messages = append(m.messages, message{role: "notice", content: "Canceled."})
-			m.canceling = false
-			m.state = StateInput
-			m.resizeLayout()
-			m.viewport.GotoBottom()
-
-			if rearm {
-				return m, m.waitApproval()
-			}
-			return m, nil
-
-		case errMsg:
-			m.messages = append(m.messages, message{role: "error", content: msg.Error()})
-			m.resizeLayout()
-			m.viewport.GotoBottom()
-			return m, waitForStream(m.stream)
-
-		case fatalErrMsg:
-			rearm := false
-			if m.pendingApproval != nil {
-				m.resolveApproval(policy.ApprovalDecision{
-					Allow:  false,
-					Reason: "agent failed before the approval was answered",
-				})
-				rearm = true
-			}
-			m.flushPartialStream()
-			m.messages = append(m.messages, message{role: "error", content: msg.Error()})
-			m.canceling = false
-			m.state = StateInput
-			m.resizeLayout()
-			m.viewport.GotoBottom()
-			if rearm {
-				return m, m.waitApproval()
-			}
-			return m, nil
 		}
 
 		var vpCmd tea.Cmd
@@ -573,7 +415,7 @@ func (m *model) spinnerBar() string {
 			color, label = ColorRedSoft, " canceling..."
 		case m.fullReason.Len() > 0 && m.fullResponse.Len() == 0:
 			color, label = ColorYellow, " Iris reasoning..."
-		case m.toolArgs.Len() > 0 && m.fullResponse.Len() == 0:
+		case m.toolName != "" && m.fullResponse.Len() == 0:
 			color, label = ColorPurple, " Iris tooling..."
 		default:
 			color, label = ColorOrange, " Iris thinking..."
@@ -645,7 +487,11 @@ func (m *model) statusLine() string {
 	if m.pendingApproval != nil {
 		help = style.Render("y: allow once · n: deny · ctrl+c: cancel")
 	}
-	pct := style.Render(fmt.Sprintf(" %3.0f%% ", m.viewport.ScrollPercent()*100))
+	pctText := fmt.Sprintf(" %3.0f%% ", m.viewport.ScrollPercent()*100)
+	if m.totalTokens > 0 {
+		pctText = fmt.Sprintf(" %3.0f%% · %d tok ", m.viewport.ScrollPercent()*100, m.totalTokens)
+	}
+	pct := style.Render(pctText)
 	gap := max(m.width-lipgloss.Width(help)-lipgloss.Width(pct), 1)
 	return help + strings.Repeat(" ", gap) + pct
 }
@@ -688,18 +534,17 @@ func waitForStream(ch chan tea.Msg) tea.Cmd {
 	return func() tea.Msg { return <-ch }
 }
 
-func Run(ctx context.Context, agent *agent.Agent, pol *policy.Policy) error {
+func Run(ctx context.Context, instance agent.Agent) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	m := initialModel(agent, pol)
+	m := initialModel(instance)
 	prg := tea.NewProgram(&m, tea.WithContext(ctx))
 	_, err := prg.Run()
 
-	// Unblock any agent callback that is trying to deliver a message after the
-	// program has stopped. cmd calls Agent.Close next, which cancels the run
-	// and waits for cleanup.
+	// Unblock the event subscription after the program stops. cmd calls
+	// Agent.Close next, which cancels the run and waits for cleanup.
 	m.closeDone()
 
 	if errors.Is(err, tea.ErrProgramKilled) {
@@ -708,7 +553,7 @@ func Run(ctx context.Context, agent *agent.Agent, pol *policy.Policy) error {
 	return err
 }
 
-func initialModel(agent *agent.Agent, pol *policy.Policy) model {
+func initialModel(instance agent.Agent) model {
 	ta := textarea.New()
 	ta.Placeholder = "Ask Iris..."
 	ta.SetHeight(InputHeight)
@@ -727,32 +572,141 @@ func initialModel(agent *agent.Agent, pol *policy.Policy) model {
 		FPS:    SpinnerFPS,
 	}
 
-	var approvals chan approvalRequestMsg
+	stream := make(chan tea.Msg)
+	lifecycle := newLifecycle()
+
 	approvalTimeout := 5 * time.Minute
-	if pol != nil {
-		if configured := pol.ShellOptions().ApprovalTimeout; configured > 0 {
+	var approvals chan approvalRequestMsg
+	if instance != nil {
+		if configured := instance.ApprovalTimeout(); configured > 0 {
 			approvalTimeout = configured
 		}
-		if pol.Approver() == nil {
+		if instance.Approver() == nil {
 			approver := newTUIApprover()
-			pol.SetApprover(approver)
+			instance.SetApprover(approver)
 			approvals = approver.requests
 		}
+
+		instance.Subscribe(func(event agent.Event) {
+			select {
+			case stream <- agentEventMsg{event: event}:
+			case <-lifecycle.done:
+			}
+		})
 	}
 
 	return model{
-		agent:           agent,
-		fresh:           true,
+		agent:           instance,
 		fullReason:      &strings.Builder{},
 		fullResponse:    &strings.Builder{},
 		toolArgs:        &strings.Builder{},
 		state:           StateInput,
 		inputText:       ta,
-		stream:          make(chan tea.Msg),
+		stream:          stream,
 		spinner:         spin,
 		approvals:       approvals,
 		approvalTimeout: approvalTimeout,
-		lifecycle:       newLifecycle(),
+		lifecycle:       lifecycle,
+	}
+}
+
+func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
+	rearmApproval := false
+
+	switch e := event.(type) {
+	case agent.AgentStarted:
+		// State is already streaming; no action.
+
+	case agent.TurnStarted:
+		m.flushPartialStream()
+
+	case agent.AssistantDelta:
+		m.fullResponse.WriteString(e.Text)
+
+	case agent.ReasoningDelta:
+		m.fullReason.WriteString(e.Text)
+
+	case agent.ToolProgress:
+		if e.ToolName != "" {
+			m.toolName = e.ToolName
+		}
+		if e.ArgumentsDelta != "" {
+			m.toolArgs.WriteString(e.ArgumentsDelta)
+			m.updateToolPreview(m.toolArgs.String())
+		}
+
+	case agent.ToolStarted:
+		if e.ToolName != "" {
+			m.toolName = e.ToolName
+		}
+		m.applyToolArgs(e.Args)
+
+	case agent.ToolCompleted:
+		// Tool results are fed back to the model; the preview is already shown.
+
+	case agent.ToolFailed:
+		Logger.Debug("Tool failed", "tool", e.ToolName, "error", e.Message)
+
+	case agent.Usage:
+		m.totalTokens = e.TotalTokens
+
+	case agent.AgentError:
+		m.flushPartialStream()
+		m.messages = append(m.messages, message{role: "error", content: e.Message})
+		m.agentErrored = true
+
+	case agent.AgentFinished:
+		rearmApproval = m.pendingApproval != nil
+		if rearmApproval {
+			m.resolveApproval(agent.ApprovalDecision{
+				Allow:  false,
+				Reason: "run finished before the approval was answered",
+			})
+		}
+
+		m.flushPartialStream()
+
+		if e.Canceled {
+			m.messages = append(m.messages, message{role: "notice", content: "Canceled."})
+		} else if e.Err != "" && !m.agentErrored {
+			m.messages = append(m.messages, message{role: "error", content: e.Err})
+		}
+
+		m.canceling = false
+		m.state = StateInput
+	}
+
+	m.resizeLayout()
+	m.viewport.GotoBottom()
+
+	cmds := []tea.Cmd{waitForStream(m.stream)}
+	if rearmApproval {
+		cmds = append(cmds, m.waitApproval())
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m *model) updateToolPreview(argsJSON string) {
+	if path, ok := partialJSONField(argsJSON, "path"); ok {
+		m.previewPath = path
+	}
+	if content, ok := partialJSONField(argsJSON, "content"); ok {
+		m.previewContent = content
+	}
+	if command, ok := partialJSONField(argsJSON, "command"); ok {
+		m.previewCommand = command
+	}
+}
+
+func (m *model) applyToolArgs(args map[string]any) {
+	if path, ok := args["path"].(string); ok {
+		m.previewPath = path
+	}
+	if content, ok := args["content"].(string); ok {
+		m.previewContent = content
+	}
+	if command, ok := args["command"].(string); ok {
+		m.previewCommand = command
 	}
 }
 
@@ -795,7 +749,7 @@ func (m *model) flushPartialStream() {
 		m.fullResponse.Reset()
 	}
 
-	if m.toolArgs.Len() > 0 {
+	if m.toolName != "" || m.toolArgs.Len() > 0 {
 		m.messages = append(m.messages, message{
 			role:           "tool",
 			toolName:       m.toolName,

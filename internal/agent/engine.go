@@ -8,24 +8,28 @@ import (
 	"sync"
 	"time"
 
-	"github.com/m4ns0ur/iris/internal/llm"
+	publicagent "github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/internal/policy"
 	"github.com/m4ns0ur/iris/internal/prompt"
 	"github.com/m4ns0ur/iris/internal/tool"
+	"github.com/m4ns0ur/iris/provider"
+	apitype "github.com/m4ns0ur/iris/tool"
 )
 
 var Logger = logger.Logger
 
+var _ publicagent.Agent = (*Agent)(nil)
+
 const (
 	// DefaultMaxTurns bounds the number of LLM turns in one run.
-	DefaultMaxTurns = 100
+	DefaultMaxTurns = publicagent.DefaultMaxTurns
 
 	// DefaultMaxToolCalls bounds the number of tool executions in one run.
-	DefaultMaxToolCalls = 200
+	DefaultMaxToolCalls = publicagent.DefaultMaxToolCalls
 
 	// DefaultToolTimeout bounds a single tool execution.
-	DefaultToolTimeout = 5 * time.Minute
+	DefaultToolTimeout = publicagent.DefaultToolTimeout
 )
 
 // Options configures execution budgets for an Agent.
@@ -41,6 +45,13 @@ type Options struct {
 	// ToolTimeout bounds a single tool execution. Zero uses
 	// DefaultToolTimeout.
 	ToolTimeout time.Duration
+
+	// Model is forwarded to the provider request. Empty lets the provider
+	// choose its default.
+	Model string
+
+	// Tools are additional tools registered after the built-ins.
+	Tools []apitype.Tool
 }
 
 type Agent struct {
@@ -52,11 +63,15 @@ type Agent struct {
 	runCancel context.CancelFunc
 	runWG     sync.WaitGroup
 
-	client           *llm.LLMClient
+	// subMu guards event subscribers.
+	subMu       sync.RWMutex
+	subscribers []func(publicagent.Event)
+
+	provider         provider.Provider
+	model            string
 	state            string
 	step             int
-	goals            []string
-	history          []llm.ChatMessage
+	history          []provider.Message
 	maxTurns         int
 	maxToolCalls     int
 	toolTimeout      time.Duration
@@ -74,14 +89,11 @@ type PendingToolCall struct {
 	Args map[string]any
 }
 
-func NewAgent(client *llm.LLMClient, pol *policy.Policy, options ...Options) (*Agent, error) {
-	if client == nil {
-		return nil, fmt.Errorf("agent requires an LLM client")
-	}
-
-	registry, err := tool.NewDefaultRegistry(pol)
-	if err != nil {
-		return nil, err
+// NewAgent creates a runtime agent. The provider is the only LLM dependency;
+// the agent has no knowledge of terminals, HTTP servers, or other consumers.
+func NewAgent(prov provider.Provider, pol *policy.Policy, options ...Options) (*Agent, error) {
+	if prov == nil {
+		return nil, fmt.Errorf("agent requires a provider")
 	}
 
 	opts := Options{}
@@ -98,6 +110,11 @@ func NewAgent(client *llm.LLMClient, pol *policy.Policy, options ...Options) (*A
 		opts.ToolTimeout = DefaultToolTimeout
 	}
 
+	registry, err := tool.NewDefaultRegistry(pol, opts.Tools...)
+	if err != nil {
+		return nil, err
+	}
+
 	workdir := pol.Workdir()
 	toolContext := &tool.ToolContext{
 		Registry: registry,
@@ -106,10 +123,10 @@ func NewAgent(client *llm.LLMClient, pol *policy.Policy, options ...Options) (*A
 	}
 
 	return &Agent{
-		client:       client,
+		provider:     prov,
+		model:        opts.Model,
 		state:        "idle",
-		goals:        []string{},
-		history:      []llm.ChatMessage{},
+		history:      []provider.Message{},
 		maxTurns:     opts.MaxTurns,
 		maxToolCalls: opts.MaxToolCalls,
 		toolTimeout:  opts.ToolTimeout,
@@ -120,8 +137,72 @@ func NewAgent(client *llm.LLMClient, pol *policy.Policy, options ...Options) (*A
 	}, nil
 }
 
-// Cancel stops the current run, if any. It is safe to call concurrently and
-// when no run is active.
+// Subscribe registers an event handler. Handlers run synchronously in the run
+// goroutine and must return quickly.
+func (a *Agent) Subscribe(handler func(publicagent.Event)) {
+	if handler == nil {
+		return
+	}
+
+	a.subMu.Lock()
+	a.subscribers = append(a.subscribers, handler)
+	a.subMu.Unlock()
+}
+
+func (a *Agent) emit(event publicagent.Event) {
+	if event == nil {
+		return
+	}
+
+	a.subMu.RLock()
+	handlers := make([]func(publicagent.Event), len(a.subscribers))
+	copy(handlers, a.subscribers)
+	a.subMu.RUnlock()
+
+	for _, handler := range handlers {
+		func() {
+			defer func() {
+				_ = recover()
+			}()
+			handler(event)
+		}()
+	}
+}
+
+// SetApprover installs the public approval mechanism on the security policy.
+func (a *Agent) SetApprover(approver publicagent.Approver) {
+	if approver == nil {
+		a.policy.SetApprover(nil)
+		return
+	}
+	a.policy.SetApprover(publicApproverAdapter{public: approver})
+}
+
+// Approver returns the currently installed approver, including one configured
+// through a policy approval hook.
+func (a *Agent) Approver() publicagent.Approver {
+	current := a.policy.Approver()
+	if current == nil {
+		return nil
+	}
+
+	switch adapter := current.(type) {
+	case publicApproverAdapter:
+		return adapter.public
+	case *publicApproverAdapter:
+		return adapter.public
+	default:
+		return policyApproverAdapter{inner: current}
+	}
+}
+
+// Cancel stops the current run, if any.
+// ApprovalTimeout reports the shell approval deadline configured on the
+// security policy.
+func (a *Agent) ApprovalTimeout() time.Duration {
+	return a.policy.ShellOptions().ApprovalTimeout
+}
+
 func (a *Agent) Cancel() {
 	a.mu.Lock()
 	cancel := a.runCancel
@@ -134,7 +215,7 @@ func (a *Agent) Cancel() {
 
 // Close cancels any active run, waits for it to release tool resources, and
 // removes the session's temporary files. It must not be called from inside an
-// agent callback.
+// event handler.
 func (a *Agent) Close() error {
 	a.mu.Lock()
 	a.closed = true
@@ -145,8 +226,6 @@ func (a *Agent) Close() error {
 		cancel()
 	}
 
-	// Wait for the run to observe cancellation and finish its deferred cleanup
-	// before deleting the temp directory it may still be using.
 	a.runWG.Wait()
 
 	if a.registry == nil {
@@ -199,97 +278,66 @@ func (a *Agent) finishRun() {
 	a.runWG.Done()
 }
 
-// Run executes the agentic loop using a background context. Prefer
-// RunContext when the caller needs cancellation.
-func (a *Agent) Run(input string, onChunk func(chunkType string, content string), onError func(error)) error {
-	return a.RunContext(context.Background(), input, onChunk, onError)
-}
-
-// RunFresh executes a run with a fresh conversation history.
-func (a *Agent) RunFresh(input string, onChunk func(chunkType string, content string), onError func(error)) error {
-	return a.RunFreshContext(context.Background(), input, onChunk, onError)
-}
-
-// RunContext executes the agentic loop until completion, cancellation, a
-// budget is exhausted, or an error occurs.
-func (a *Agent) RunContext(
-	ctx context.Context,
-	input string,
-	onChunk func(chunkType string, content string),
-	onError func(error),
-) error {
+// Run executes one turn of the agentic loop and streams typed events to
+// subscribers. The first run initializes the conversation with the system
+// prompt.
+func (a *Agent) Run(ctx context.Context, input string) (runErr error) {
 	runCtx, err := a.beginRun(ctx)
 	if err != nil {
+		a.emitRunFailure(err)
 		return err
 	}
+
+	// Guarantee a terminal event even if a provider or tool panics. The
+	// terminal event is emitted after finishRun clears the active-run state so
+	// a consumer can immediately start another run.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			runErr = fmt.Errorf("agent panicked: %v", recovered)
+		}
+
+		finished := publicagent.AgentFinished{At: time.Now()}
+		if runErr != nil {
+			if errors.Is(runErr, context.Canceled) {
+				finished.Canceled = true
+			} else {
+				finished.Err = runErr.Error()
+				a.emit(publicagent.AgentError{At: time.Now(), Message: runErr.Error()})
+			}
+		}
+		a.emit(finished)
+	}()
 	defer a.finishRun()
 
-	onChunk, onError = defaultCallbacks(onChunk, onError)
-
-	a.history = append(a.history, llm.ChatMessage{
+	if len(a.history) == 0 {
+		a.history = append(a.history, provider.Message{
+			Role:    "system",
+			Content: prompt.BuildSystemPrompt(a.toolContext),
+		})
+	}
+	a.history = append(a.history, provider.Message{
 		Role:    "user",
-		Content: []llm.Content{{Type: "text", Text: input}},
+		Content: []provider.Content{{Type: "text", Text: input}},
 	})
 
-	return a.loop(runCtx, onChunk, onError)
+	a.emit(publicagent.AgentStarted{At: time.Now(), Input: input})
+
+	runErr = a.loop(runCtx)
+	return runErr
 }
 
-// RunFreshContext resets the conversation and executes a run.
-func (a *Agent) RunFreshContext(
-	ctx context.Context,
-	input string,
-	onChunk func(chunkType string, content string),
-	onError func(error),
-) error {
-	runCtx, err := a.beginRun(ctx)
-	if err != nil {
-		return err
+func (a *Agent) emitRunFailure(err error) {
+	finished := publicagent.AgentFinished{At: time.Now()}
+	if errors.Is(err, context.Canceled) {
+		finished.Canceled = true
+	} else {
+		finished.Err = err.Error()
+		a.emit(publicagent.AgentError{At: time.Now(), Message: err.Error()})
 	}
-	defer a.finishRun()
-
-	onChunk, onError = defaultCallbacks(onChunk, onError)
-
-	a.reset()
-	a.history = append(a.history, llm.ChatMessage{
-		Role:    "system",
-		Content: prompt.BuildSystemPrompt(a.toolContext),
-	})
-	a.history = append(a.history, llm.ChatMessage{
-		Role:    "user",
-		Content: []llm.Content{{Type: "text", Text: input}},
-	})
-
-	return a.loop(runCtx, onChunk, onError)
+	a.emit(finished)
 }
 
-func defaultCallbacks(
-	onChunk func(chunkType string, content string),
-	onError func(error),
-) (func(string, string), func(error)) {
-	if onChunk == nil {
-		onChunk = func(string, string) {}
-	}
-	if onError == nil {
-		onError = func(error) {}
-	}
-	return onChunk, onError
-}
-
-func (a *Agent) reset() {
-	Logger.Info("Resetting agent state")
-
-	a.state = "idle"
-	a.step = 0
-	a.goals = []string{}
-	a.history = []llm.ChatMessage{}
-	a.pendingToolCalls = nil
-}
-
-func (a *Agent) loop(
-	ctx context.Context,
-	onChunk func(chunkType string, content string),
-	onError func(error),
-) error {
+func (a *Agent) loop(ctx context.Context) error {
 	Logger.Info("Starting agentic loop")
 
 	for {
@@ -308,9 +356,9 @@ func (a *Agent) loop(
 			"state", a.state,
 		)
 
-		onChunk("next", fmt.Sprintf("%d", a.step))
+		a.emit(publicagent.TurnStarted{At: time.Now(), Turn: a.step})
 
-		if err := a.next(ctx, onChunk, onError); err != nil {
+		if err := a.next(ctx); err != nil {
 			return err
 		}
 
@@ -343,13 +391,13 @@ func (a *Agent) executeTools(ctx context.Context) error {
 
 	for i, call := range pending {
 		if err := ctx.Err(); err != nil {
-			a.appendSkippedToolResults(pending[i:], "run canceled before execution")
+			a.recordSkippedTools(pending[i:], "run canceled before execution")
 			a.pendingToolCalls = nil
 			return err
 		}
 
 		if a.toolCalls >= a.maxToolCalls {
-			a.appendSkippedToolResults(
+			a.recordSkippedTools(
 				pending[i:],
 				fmt.Sprintf("tool execution budget exhausted (max_tool_calls=%d)", a.maxToolCalls),
 			)
@@ -359,13 +407,28 @@ func (a *Agent) executeTools(ctx context.Context) error {
 
 		a.toolCalls++
 
+		a.emit(publicagent.ToolStarted{
+			At:         time.Now(),
+			ToolCallID: call.ID,
+			ToolName:   call.Name,
+			Args:       call.Args,
+		})
+		a.emit(publicagent.ToolProgress{
+			At:         time.Now(),
+			ToolCallID: call.ID,
+			ToolName:   call.Name,
+			Message:    "executing",
+		})
+
 		toolCtx := toolCtxBase
 		var cancel context.CancelFunc
 		if a.toolTimeout > 0 {
 			toolCtx, cancel = context.WithTimeout(toolCtxBase, a.toolTimeout)
 		}
 
+		startedAt := time.Now()
 		result, err := tool.ExecuteWithTools(toolCtx, a.registry, call.Name, call.Args)
+		elapsed := time.Since(startedAt)
 
 		timedOut := cancel != nil && errors.Is(toolCtx.Err(), context.DeadlineExceeded)
 		if cancel != nil {
@@ -373,8 +436,15 @@ func (a *Agent) executeTools(ctx context.Context) error {
 		}
 
 		if ctxErr := ctx.Err(); ctxErr != nil {
+			a.emit(publicagent.ToolFailed{
+				At:         time.Now(),
+				ToolCallID: call.ID,
+				ToolName:   call.Name,
+				Message:    "run canceled: " + ctxErr.Error(),
+				Duration:   elapsed,
+			})
 			a.appendToolResult(call, fmt.Sprintf("failed: run canceled: %v", ctxErr))
-			a.appendSkippedToolResults(pending[i+1:], "run canceled before execution")
+			a.recordSkippedTools(pending[i+1:], "run canceled before execution")
 			a.pendingToolCalls = nil
 			return ctxErr
 		}
@@ -383,19 +453,32 @@ func (a *Agent) executeTools(ctx context.Context) error {
 			err = fmt.Errorf("%w after %s: %w", ErrToolTimeout, a.toolTimeout, context.DeadlineExceeded)
 		}
 
-		var resultStr string
 		if err != nil {
-			resultStr = fmt.Sprintf("failed: %v", err)
-		} else {
-			jsonBytes, jsonErr := json.Marshal(result)
-			if jsonErr != nil {
-				resultStr = fmt.Sprintf("failed: encode tool result: %v", jsonErr)
-			} else {
-				resultStr = string(jsonBytes)
-			}
+			a.emit(publicagent.ToolFailed{
+				At:         time.Now(),
+				ToolCallID: call.ID,
+				ToolName:   call.Name,
+				Message:    err.Error(),
+				Duration:   elapsed,
+			})
+			a.appendToolResult(call, fmt.Sprintf("failed: %v", err))
+			continue
 		}
 
-		a.appendToolResult(call, resultStr)
+		a.emit(publicagent.ToolCompleted{
+			At:         time.Now(),
+			ToolCallID: call.ID,
+			ToolName:   call.Name,
+			Result:     result,
+			Duration:   elapsed,
+		})
+
+		jsonBytes, jsonErr := json.Marshal(result)
+		if jsonErr != nil {
+			a.appendToolResult(call, fmt.Sprintf("failed: encode tool result: %v", jsonErr))
+			continue
+		}
+		a.appendToolResult(call, string(jsonBytes))
 	}
 
 	a.pendingToolCalls = nil
@@ -404,8 +487,14 @@ func (a *Agent) executeTools(ctx context.Context) error {
 	return nil
 }
 
-func (a *Agent) appendSkippedToolResults(calls []PendingToolCall, reason string) {
+func (a *Agent) recordSkippedTools(calls []PendingToolCall, reason string) {
 	for _, call := range calls {
+		a.emit(publicagent.ToolFailed{
+			At:         time.Now(),
+			ToolCallID: call.ID,
+			ToolName:   call.Name,
+			Message:    reason,
+		})
 		a.appendToolResult(call, "failed: "+reason)
 	}
 }
@@ -418,24 +507,63 @@ func (a *Agent) appendToolResult(call PendingToolCall, content string) {
 		"result", content,
 	)
 
-	a.history = append(a.history, llm.ChatMessage{
+	a.history = append(a.history, provider.Message{
 		Role:       "tool",
 		Content:    content,
 		ToolCallID: call.ID,
 	})
 }
 
-func (a *Agent) next(
-	ctx context.Context,
-	onChunk func(chunkType string, content string),
-	onError func(error),
-) error {
+func (a *Agent) next(ctx context.Context) error {
 	Logger.Info("Generating next response from LLM")
 	Logger.Debug("Next response", "historyLength", len(a.history))
 
-	tools := a.toolContext.Registry.List()
+	progress := make(map[int]struct {
+		id   string
+		name string
+	})
 
-	response, err := a.client.Generate(ctx, a.history, tools, onChunk, onError)
+	response, err := a.provider.Generate(
+		ctx,
+		provider.Request{
+			Model:    a.model,
+			Messages: a.history,
+			Tools:    a.toolContext.Registry.Specs(),
+		},
+		func(delta provider.Delta) {
+			if delta.ReasoningContent != "" {
+				a.emit(publicagent.ReasoningDelta{At: time.Now(), Text: delta.ReasoningContent})
+			}
+			if delta.Content != "" {
+				a.emit(publicagent.AssistantDelta{At: time.Now(), Text: delta.Content})
+			}
+
+			for _, tc := range delta.ToolCalls {
+				index := 0
+				if tc.Index != nil {
+					index = *tc.Index
+				}
+
+				state := progress[index]
+				if tc.ID != "" {
+					state.id = tc.ID
+				}
+				if tc.Function.Name != "" {
+					state.name = tc.Function.Name
+				}
+				progress[index] = state
+
+				if state.name != "" || tc.Function.Arguments != "" {
+					a.emit(publicagent.ToolProgress{
+						At:             time.Now(),
+						ToolCallID:     state.id,
+						ToolName:       state.name,
+						ArgumentsDelta: tc.Function.Arguments,
+					})
+				}
+			}
+		},
+	)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -443,43 +571,33 @@ func (a *Agent) next(
 		return fmt.Errorf("LLM generation failed: %w", err)
 	}
 
-	if len(response.Choices) == 0 {
-		return fmt.Errorf("LLM returned no choices")
-	}
+	a.emit(publicagent.Usage{
+		At:               time.Now(),
+		PromptTokens:     response.Usage.PromptTokens,
+		CompletionTokens: response.Usage.CompletionTokens,
+		TotalTokens:      response.Usage.TotalTokens,
+	})
 
-	Logger.Debug("LLM response received", "response", response)
-
-	delta := response.Choices[0].Delta
-
-	msg := llm.ChatMessage{
+	msg := provider.Message{
 		Role:             "assistant",
-		Content:          delta.Content,
-		ReasoningContent: delta.ReasoningContent,
+		Content:          response.Content,
+		ReasoningContent: response.ReasoningContent,
 	}
 
-	if len(delta.ToolCalls) > 0 {
+	if len(response.ToolCalls) > 0 {
 		a.pendingToolCalls = nil
+		msg.ToolCalls = make([]provider.ToolCall, 0, len(response.ToolCalls))
 
-		msg.ToolCalls = make([]llm.ToolCall, 0, len(delta.ToolCalls))
-
-		for _, tc := range delta.ToolCalls {
-			msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{
-				Id:   tc.Id,
-				Type: tc.Type,
-				Function: llm.FunctionCall{
-					Name:      tc.Function.Name,
-					Arguments: tc.Function.Arguments,
-				},
-			})
+		for _, tc := range response.ToolCalls {
+			msg.ToolCalls = append(msg.ToolCalls, tc)
 
 			call := PendingToolCall{
-				ID:   tc.Id,
+				ID:   tc.ID,
 				Name: tc.Function.Name,
 			}
 
 			if tc.Function.Arguments != "" {
 				var args map[string]any
-
 				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 					Logger.Error(
 						"Failed to parse tool arguments",
@@ -488,7 +606,6 @@ func (a *Agent) next(
 					)
 					args = map[string]any{}
 				}
-
 				call.Args = args
 			}
 
@@ -501,11 +618,60 @@ func (a *Agent) next(
 		return nil
 	}
 
-	if delta.Content != "" {
+	if response.Content != "" {
 		Logger.Debug("Message added to history", "message", msg)
 		a.history = append(a.history, msg)
 	}
 
 	a.state = "done"
 	return nil
+}
+
+// publicApproverAdapter adapts a public approver to the internal policy
+// approver contract.
+type publicApproverAdapter struct {
+	public publicagent.Approver
+}
+
+func (a publicApproverAdapter) Approve(
+	ctx context.Context,
+	request policy.ApprovalRequest,
+) (policy.ApprovalDecision, error) {
+	decision, err := a.public.Approve(ctx, publicagent.ApprovalRequest{
+		Kind:     request.Kind,
+		Command:  request.Command,
+		Workdir:  request.Workdir,
+		Programs: request.Programs,
+		Reason:   request.Reason,
+	})
+	if err != nil {
+		return policy.ApprovalDecision{}, err
+	}
+	return policy.ApprovalDecision{Allow: decision.Allow, Reason: decision.Reason}, nil
+}
+
+// policyApproverAdapter exposes an internally configured policy approver (for
+// example a hook) through the public API.
+type policyApproverAdapter struct {
+	inner policy.Approver
+}
+
+func (a policyApproverAdapter) Approve(
+	ctx context.Context,
+	request publicagent.ApprovalRequest,
+) (publicagent.ApprovalDecision, error) {
+	decision, err := a.inner.Approve(ctx, policy.ApprovalRequest{
+		Kind:     request.Kind,
+		Command:  request.Command,
+		Workdir:  request.Workdir,
+		Programs: request.Programs,
+		Reason:   request.Reason,
+	})
+	if err != nil {
+		return publicagent.ApprovalDecision{}, err
+	}
+	return publicagent.ApprovalDecision{
+		Allow:  decision.Allow,
+		Reason: decision.Reason,
+	}, nil
 }

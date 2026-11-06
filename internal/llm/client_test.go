@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/m4ns0ur/iris/provider"
 )
 
 func newTestClient(server *httptest.Server) *LLMClient {
@@ -47,11 +49,11 @@ func TestGenerateStreamCancellation(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := client.GenerateStream(ctx, nil, nil, func(_ string, content string) {
-			if content == "first" {
+		_, err := client.Generate(ctx, provider.Request{}, func(delta provider.Delta) {
+			if delta.Content == "first" {
 				once.Do(func() { close(firstChunk) })
 			}
-		}, nil)
+		})
 		errCh <- err
 	}()
 
@@ -66,10 +68,10 @@ func TestGenerateStreamCancellation(t *testing.T) {
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("GenerateStream() error = %v, want context.Canceled", err)
+			t.Fatalf("Generate() error = %v, want context.Canceled", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("GenerateStream() did not return after cancellation")
+		t.Fatal("Generate() did not return after cancellation")
 	}
 }
 
@@ -90,9 +92,9 @@ func TestGenerateStreamRequestDeadline(t *testing.T) {
 		HTTP:           server.Client(),
 	}
 
-	_, err := client.GenerateStream(context.Background(), nil, nil, nil, nil)
+	_, err := client.Generate(context.Background(), provider.Request{}, nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("GenerateStream() error = %v, want context.DeadlineExceeded", err)
+		t.Fatalf("Generate() error = %v, want context.DeadlineExceeded", err)
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("error = %v, want a timeout explanation", err)
@@ -121,7 +123,7 @@ func TestGenerateStreamRetryCancellation(t *testing.T) {
 	start := time.Now()
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := client.GenerateStream(ctx, nil, nil, nil, nil)
+		_, err := client.Generate(ctx, provider.Request{}, nil)
 		errCh <- err
 	}()
 
@@ -131,13 +133,13 @@ func TestGenerateStreamRetryCancellation(t *testing.T) {
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("GenerateStream() error = %v, want context.Canceled", err)
+			t.Fatalf("Generate() error = %v, want context.Canceled", err)
 		}
 		if elapsed := time.Since(start); elapsed > 2*time.Second {
 			t.Fatalf("retry cancellation took too long: %s", elapsed)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("GenerateStream() did not return after cancelling retries")
+		t.Fatal("Generate() did not return after cancelling retries")
 	}
 
 	if requests.Load() < 1 {
@@ -156,6 +158,7 @@ func TestGenerateStreamRetriesThenSucceeds(t *testing.T) {
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n")
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer server.Close()
@@ -167,12 +170,15 @@ func TestGenerateStreamRetriesThenSucceeds(t *testing.T) {
 		HTTP:           server.Client(),
 	}
 
-	response, err := client.GenerateStream(context.Background(), nil, nil, nil, nil)
+	response, err := client.Generate(context.Background(), provider.Request{}, nil)
 	if err != nil {
-		t.Fatalf("GenerateStream() error = %v", err)
+		t.Fatalf("Generate() error = %v", err)
 	}
-	if got := response.Choices[0].Delta.Content; got != "ok" {
+	if got := response.Content; got != "ok" {
 		t.Fatalf("content = %q, want ok", got)
+	}
+	if response.Usage.TotalTokens != 12 {
+		t.Fatalf("usage = %+v, want 12 total tokens", response.Usage)
 	}
 	if attempts.Load() != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts.Load())
@@ -195,9 +201,9 @@ func TestGenerateStreamDoesNotRetryClientErrors(t *testing.T) {
 		HTTP:           server.Client(),
 	}
 
-	_, err := client.GenerateStream(context.Background(), nil, nil, nil, nil)
+	_, err := client.Generate(context.Background(), provider.Request{}, nil)
 	if err == nil {
-		t.Fatal("GenerateStream() error = nil, want HTTP status error")
+		t.Fatal("Generate() error = nil, want HTTP status error")
 	}
 	if attempts.Load() != 1 {
 		t.Fatalf("attempts = %d, want 1 (4xx must not be retried)", attempts.Load())
@@ -214,8 +220,8 @@ func TestGenerateStreamPreCancelledContext(t *testing.T) {
 		RequestTimeout: time.Second,
 	}
 
-	_, err := client.GenerateStream(ctx, nil, nil, nil, nil)
+	_, err := client.Generate(ctx, provider.Request{}, nil)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("GenerateStream() error = %v, want context.Canceled", err)
+		t.Fatalf("Generate() error = %v, want context.Canceled", err)
 	}
 }

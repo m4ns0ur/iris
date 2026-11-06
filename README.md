@@ -280,21 +280,104 @@ Flags:
 | `PgUp` / `PgDn` or `Ctrl+U` / `Ctrl+D` | Scroll history |
 | `Ctrl+C` | Cancel the current run; press again (or press while idle) to quit |
 
+## Public API
+
+The agent runtime has no dependency on the TUI. Consumers subscribe to a typed
+event stream and drive runs with a context:
+
+```go
+type Agent interface {
+    Run(ctx context.Context, input string) error
+    Subscribe(handler func(Event))
+    Cancel()
+    Close() error
+    SetApprover(Approver)
+    Approver() Approver
+    ApprovalTimeout() time.Duration
+}
+
+type Event interface {
+    Type() EventType
+}
+```
+
+| Event | Meaning |
+| --- | --- |
+| `agent.started` | A run began. |
+| `agent.finished` | A run ended, including cancellation or error status. |
+| `agent.turn.started` | A new LLM turn began; flush buffered deltas. |
+| `assistant.delta` | Assistant text increment. |
+| `reasoning.delta` | Reasoning text increment. |
+| `tool.started` | A tool is about to execute. |
+| `tool.progress` | Streaming tool arguments or execution progress. |
+| `tool.completed` | A tool finished successfully. |
+| `tool.failed` | A tool failed, timed out, or was skipped. |
+| `usage` | Token accounting for an LLM call. |
+| `agent.error` | A run-level error. |
+
+```go
+ag.Subscribe(func(event agent.Event) {
+    switch e := event.(type) {
+    case agent.AssistantDelta:
+        fmt.Print(e.Text)
+    case agent.ToolStarted:
+        fmt.Println("tool:", e.ToolName)
+    case agent.AgentError:
+        fmt.Fprintln(os.Stderr, e.Message)
+    case agent.AgentFinished:
+        fmt.Println("done, canceled:", e.Canceled)
+    }
+})
+
+if err := ag.Run(ctx, "Implement the feature"); err != nil {
+    // ctx cancellation, a budget, or a run error
+}
+```
+
+Event handlers run synchronously on the run goroutine; keep them fast and do
+not call `Run` or `Close` from inside a handler. The TUI is just one consumer of
+this stream.
+
+Stable public packages:
+
+- [`agent`](agent) — agent interface, typed events, approval hooks, errors.
+- [`provider`](provider) — LLM provider interface and provider-neutral request,
+  response, message, tool, delta, and usage types.
+- [`tool`](tool) — tool and registry interfaces.
+- [`runtime`](runtime) — constructor, runtime/security options, and the
+  provider/tool composition root. Implementation details stay under `internal/`.
+
+```go
+rt, err := runtime.New(runtime.Options{
+    Workspace: ".",
+    Provider:  myProvider,
+    Tools:     []tool.Tool{NewMyTool()},
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer rt.Close()
+
+ag, err := rt.NewAgent()
+if err != nil {
+    log.Fatal(err)
+}
+```
+
 ## Making Custom Tools
 
-Implement the `tool.Tool` interface:
+Implement the public `tool.Tool` interface and register the tool through
+`runtime.Options.Tools`:
 
 ```go
 type Tool interface {
     Name() string
     Description() string
     FullDescription() string
-    Parameters() llm.Parameters
+    Parameters() provider.Parameters
     Execute(ctx context.Context, args map[string]any) (map[string]any, error)
 }
 ```
-
-Register it in a tool package:
 
 ```go
 func NewMyTool() *MyTool { return &MyTool{} }
@@ -302,20 +385,20 @@ func NewMyTool() *MyTool { return &MyTool{} }
 func (t *MyTool) Name() string { return "my-tool" }
 func (t *MyTool) Description() string { return "Does something useful" }
 func (t *MyTool) FullDescription() string { return "Does something useful. Use when..." }
-func (t *MyTool) Parameters() llm.Parameters {
-    return llm.Parameters{
+func (t *MyTool) Parameters() provider.Parameters {
+    return provider.Parameters{
         Type: "object",
         Required: []string{"input"},
-        Properties: map[string]llm.Property{
+        Properties: map[string]provider.Property{
             "input": {Type: "string", Description: "The input"},
         },
     }
 }
 func (t *MyTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
-    // Custom tools that touch the filesystem or execute commands should honor
-    // the shared policy rather than implementing their own checks:
-    if pol, ok := tool.FromPolicy(ctx); ok {
-        path, err := pol.ResolveRead("some/file")
+    // Honour ctx cancellation in long-running custom tools.
+    // Custom tools that touch the filesystem can reuse the workspace sandbox:
+    if env, ok := tool.FromContext(ctx); ok {
+        path, err := env.ResolveRead("some/file")
         _ = path
         _ = err
     }

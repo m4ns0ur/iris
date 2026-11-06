@@ -8,20 +8,20 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/m4ns0ur/iris/internal/policy"
+	"github.com/m4ns0ur/iris/agent"
 )
 
 func TestTUIApproverRoundTrip(t *testing.T) {
 	approver := newTUIApprover()
 
 	type outcome struct {
-		decision policy.ApprovalDecision
+		decision agent.ApprovalDecision
 		err      error
 	}
 	done := make(chan outcome, 1)
 
 	go func() {
-		decision, err := approver.Approve(context.Background(), policy.ApprovalRequest{
+		decision, err := approver.Approve(context.Background(), agent.ApprovalRequest{
 			Kind:    "shell",
 			Command: "echo hi",
 		})
@@ -33,7 +33,7 @@ func TestTUIApproverRoundTrip(t *testing.T) {
 		if request.request.Command != "echo hi" {
 			t.Fatalf("request command = %q, want %q", request.request.Command, "echo hi")
 		}
-		request.reply <- policy.ApprovalDecision{Allow: true, Reason: "ok"}
+		request.reply <- agent.ApprovalDecision{Allow: true, Reason: "ok"}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for approval request")
 	}
@@ -56,7 +56,7 @@ func TestTUIApproverRespectsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := approver.Approve(ctx, policy.ApprovalRequest{Command: "echo hi"})
+	_, err := approver.Approve(ctx, agent.ApprovalRequest{Command: "echo hi"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Approve() error = %v, want context.Canceled", err)
 	}
@@ -82,23 +82,19 @@ func TestSummarizeCommandCollapsesWhitespace(t *testing.T) {
 func newApprovalModel(t *testing.T) *model {
 	t.Helper()
 
-	pol, err := policy.New(t.TempDir(), policy.Options{
-		Shell: policy.ShellOptions{Mode: policy.ShellModeApproval},
-	})
-	if err != nil {
-		t.Fatalf("policy.New() error = %v", err)
-	}
-
-	m := initialModel(nil, pol)
+	m := initialModel(nil)
+	// Tests drive events directly; provide an approval channel so re-arm
+	// commands are observable.
+	m.approvals = make(chan approvalRequestMsg)
 	return &m
 }
 
 func TestModelApprovalAllow(t *testing.T) {
 	m := newApprovalModel(t)
-	reply := make(chan policy.ApprovalDecision, 1)
+	reply := make(chan agent.ApprovalDecision, 1)
 
 	updated, _ := m.Update(approvalRequestMsg{
-		request: policy.ApprovalRequest{Kind: "shell", Command: "echo hi"},
+		request: agent.ApprovalRequest{Kind: "shell", Command: "echo hi"},
 		reply:   reply,
 	})
 	m = updated.(*model)
@@ -129,10 +125,10 @@ func TestModelApprovalAllow(t *testing.T) {
 
 func TestModelApprovalDeny(t *testing.T) {
 	m := newApprovalModel(t)
-	reply := make(chan policy.ApprovalDecision, 1)
+	reply := make(chan agent.ApprovalDecision, 1)
 
 	updated, _ := m.Update(approvalRequestMsg{
-		request: policy.ApprovalRequest{Kind: "shell", Command: "echo hi"},
+		request: agent.ApprovalRequest{Kind: "shell", Command: "echo hi"},
 		reply:   reply,
 	})
 	m = updated.(*model)
@@ -156,10 +152,10 @@ func TestModelApprovalDeny(t *testing.T) {
 
 func TestModelApprovalTimeoutClearsPrompt(t *testing.T) {
 	m := newApprovalModel(t)
-	reply := make(chan policy.ApprovalDecision, 1)
+	reply := make(chan agent.ApprovalDecision, 1)
 
 	updated, _ := m.Update(approvalRequestMsg{
-		request: policy.ApprovalRequest{Kind: "shell", Command: "echo hi"},
+		request: agent.ApprovalRequest{Kind: "shell", Command: "echo hi"},
 		reply:   reply,
 	})
 	m = updated.(*model)
@@ -181,14 +177,14 @@ func TestModelDoneWhilePendingRearmsApproval(t *testing.T) {
 	m = updated.(*model)
 	m.state = StateStreaming
 
-	reply := make(chan policy.ApprovalDecision, 1)
+	reply := make(chan agent.ApprovalDecision, 1)
 	updated, _ = m.Update(approvalRequestMsg{
-		request: policy.ApprovalRequest{Kind: "shell", Command: "echo hi"},
+		request: agent.ApprovalRequest{Kind: "shell", Command: "echo hi"},
 		reply:   reply,
 	})
 	m = updated.(*model)
 
-	updated, cmd := m.Update(doneMsg{})
+	updated, cmd := m.Update(agentEventMsg{event: agent.AgentFinished{At: time.Now()}})
 	m = updated.(*model)
 
 	if m.pendingApproval != nil {
@@ -216,7 +212,7 @@ func TestModelCanceledMessagePreservesPartialOutput(t *testing.T) {
 	m.canceling = true
 	m.fullResponse.WriteString("partial answer")
 
-	updated, _ = m.Update(canceledMsg{})
+	updated, _ = m.Update(agentEventMsg{event: agent.AgentFinished{At: time.Now(), Canceled: true}})
 	m = updated.(*model)
 
 	if m.state != StateInput {
@@ -249,16 +245,16 @@ func TestModelCanceledMessagePreservesPartialOutput(t *testing.T) {
 
 func TestModelCanceledMessageResolvesPendingApproval(t *testing.T) {
 	m := newApprovalModel(t)
-	reply := make(chan policy.ApprovalDecision, 1)
+	reply := make(chan agent.ApprovalDecision, 1)
 
 	updated, _ := m.Update(approvalRequestMsg{
-		request: policy.ApprovalRequest{Kind: "shell", Command: "echo hi"},
+		request: agent.ApprovalRequest{Kind: "shell", Command: "echo hi"},
 		reply:   reply,
 	})
 	m = updated.(*model)
 	m.state = StateStreaming
 
-	updated, cmd := m.Update(canceledMsg{})
+	updated, cmd := m.Update(agentEventMsg{event: agent.AgentFinished{At: time.Now(), Canceled: true}})
 	m = updated.(*model)
 
 	if m.pendingApproval != nil {
@@ -299,7 +295,9 @@ func TestModelFatalErrorPreservesPartialOutput(t *testing.T) {
 	m.canceling = true
 	m.fullResponse.WriteString("partial answer")
 
-	updated, _ = m.Update(fatalErrMsg{error: errors.New("boom")})
+	updated, _ = m.Update(agentEventMsg{event: agent.AgentError{At: time.Now(), Message: "boom"}})
+	m = updated.(*model)
+	updated, _ = m.Update(agentEventMsg{event: agent.AgentFinished{At: time.Now(), Err: "boom"}})
 	m = updated.(*model)
 
 	if m.state != StateInput {
@@ -324,5 +322,45 @@ func TestModelFatalErrorPreservesPartialOutput(t *testing.T) {
 	}
 	if !foundError {
 		t.Fatal("fatal error message was not appended")
+	}
+}
+
+func TestModelConsumesTypedAgentEvents(t *testing.T) {
+	m := newApprovalModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*model)
+	m.state = StateStreaming
+
+	events := []agent.Event{
+		agent.AgentStarted{At: time.Now(), Input: "hi"},
+		agent.TurnStarted{At: time.Now(), Turn: 0},
+		agent.ReasoningDelta{At: time.Now(), Text: "thinking"},
+		agent.AssistantDelta{At: time.Now(), Text: "hello "},
+		agent.ToolProgress{At: time.Now(), ToolName: "shell", ArgumentsDelta: `{"command":"ls"}`},
+		agent.AgentFinished{At: time.Now()},
+	}
+	for _, event := range events {
+		updated, _ = m.Update(agentEventMsg{event: event})
+		m = updated.(*model)
+	}
+
+	if m.state != StateInput {
+		t.Fatalf("state = %v, want StateInput", m.state)
+	}
+
+	var hasReasoning, hasAssistant, hasTool bool
+	for _, message := range m.messages {
+		switch {
+		case message.role == "reasoning" && message.content == "thinking":
+			hasReasoning = true
+		case message.role == "assistant" && message.content == "hello ":
+			hasAssistant = true
+		case message.role == "tool" && message.toolName == "shell" && message.previewCommand == "ls":
+			hasTool = true
+		}
+	}
+
+	if !hasReasoning || !hasAssistant || !hasTool {
+		t.Fatalf("messages = %+v, want reasoning, assistant, and tool preview", m.messages)
 	}
 }

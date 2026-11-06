@@ -6,26 +6,26 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/m4ns0ur/iris/internal/policy"
+	"github.com/m4ns0ur/iris/agent"
 )
 
 // approvalRequestMsg carries an approval request from the agent goroutine to
 // the TUI event loop.
 type approvalRequestMsg struct {
-	request policy.ApprovalRequest
-	reply   chan policy.ApprovalDecision
+	request agent.ApprovalRequest
+	reply   chan agent.ApprovalDecision
 }
 
 // approvalTimeoutMsg clears a prompt whose policy deadline has elapsed, so
 // the user is not stuck on a request the agent has already abandoned.
 type approvalTimeoutMsg struct {
-	reply chan policy.ApprovalDecision
+	reply chan agent.ApprovalDecision
 }
 
-// tuiApprover implements policy.Approver using a minimal interactive prompt.
+// tuiApprover implements agent.Approver using a minimal interactive prompt.
 // It deliberately stays small: a single line and y/n keys. More elaborate
-// permission UIs can be supplied through policy.SetApprover or an external
-// approval hook.
+// permission UIs can be supplied through the public Agent.SetApprover method
+// or an external approval hook.
 type tuiApprover struct {
 	requests chan approvalRequestMsg
 }
@@ -37,20 +37,20 @@ func newTUIApprover() *tuiApprover {
 // Approve sends the request to the TUI and waits for a decision or context
 // cancellation. The reply channel is buffered so a late key press never blocks
 // the UI after the policy has already timed out.
-func (a *tuiApprover) Approve(ctx context.Context, request policy.ApprovalRequest) (policy.ApprovalDecision, error) {
-	reply := make(chan policy.ApprovalDecision, 1)
+func (a *tuiApprover) Approve(ctx context.Context, request agent.ApprovalRequest) (agent.ApprovalDecision, error) {
+	reply := make(chan agent.ApprovalDecision, 1)
 
 	select {
 	case a.requests <- approvalRequestMsg{request: request, reply: reply}:
 	case <-ctx.Done():
-		return policy.ApprovalDecision{}, ctx.Err()
+		return agent.ApprovalDecision{}, ctx.Err()
 	}
 
 	select {
 	case decision := <-reply:
 		return decision, nil
 	case <-ctx.Done():
-		return policy.ApprovalDecision{}, ctx.Err()
+		return agent.ApprovalDecision{}, ctx.Err()
 	}
 }
 
@@ -77,16 +77,16 @@ func (m *model) waitApproval() tea.Cmd {
 func (m *model) handleApprovalKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "y", "Y":
-		m.resolveApproval(policy.ApprovalDecision{Allow: true, Reason: "approved by user"})
+		m.resolveApproval(agent.ApprovalDecision{Allow: true, Reason: "approved by user"})
 		return m, m.waitApproval()
 	case "n", "N", "esc":
-		m.resolveApproval(policy.ApprovalDecision{Allow: false, Reason: "denied by user"})
+		m.resolveApproval(agent.ApprovalDecision{Allow: false, Reason: "denied by user"})
 		return m, m.waitApproval()
 	case "ctrl+c":
 		if m.canceling {
 			return m, m.quit()
 		}
-		m.resolveApproval(policy.ApprovalDecision{Allow: false, Reason: "canceled by user"})
+		m.resolveApproval(agent.ApprovalDecision{Allow: false, Reason: "canceled by user"})
 		m.canceling = true
 		if m.agent != nil {
 			m.agent.Cancel()
@@ -96,7 +96,7 @@ func (m *model) handleApprovalKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) resolveApproval(decision policy.ApprovalDecision) {
+func (m *model) resolveApproval(decision agent.ApprovalDecision) {
 	pending := m.pendingApproval
 	m.pendingApproval = nil
 	if pending == nil || pending.reply == nil {

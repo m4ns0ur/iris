@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/m4ns0ur/iris/internal/policy"
+	apitype "github.com/m4ns0ur/iris/tool"
 )
 
 const (
@@ -17,12 +18,15 @@ const (
 	// WorkdirContextKey holds the working directory for file operations.
 	WorkdirContextKey = ContextKey("workdir")
 
-	// PolicyContextKey holds the security policy for custom tools.
+	// PolicyContextKey is retained for backwards compatibility with internal
+	// tools. New code should use the public tool environment helpers.
 	PolicyContextKey = ContextKey("security_policy")
 )
 
 // ContextKey is a type for context keys.
 type ContextKey string
+
+var _ apitype.Environment = (*policy.Policy)(nil)
 
 // WithWorkdir creates a new context with the working directory set.
 func WithWorkdir(ctx context.Context, workdir string) context.Context {
@@ -41,19 +45,26 @@ func FromWorkdir(ctx context.Context) (string, bool) {
 }
 
 // WithPolicy attaches the security policy to a context so that custom tools
-// can reuse Iris' path and command checks.
+// can reuse Iris' path checks through the public tool.Environment API.
 func WithPolicy(ctx context.Context, pol *policy.Policy) context.Context {
-	return context.WithValue(ctx, PolicyContextKey, pol)
+	ctx = context.WithValue(ctx, PolicyContextKey, pol)
+	return apitype.WithEnvironment(ctx, pol)
 }
 
-// FromPolicy retrieves the security policy from the context.
+// FromPolicy retrieves the concrete security policy from the context.
 func FromPolicy(ctx context.Context) (*policy.Policy, bool) {
-	v := ctx.Value(PolicyContextKey)
-	if v == nil {
+	if value := ctx.Value(PolicyContextKey); value != nil {
+		if pol, ok := value.(*policy.Policy); ok {
+			return pol, true
+		}
+	}
+
+	environment, ok := apitype.FromContext(ctx)
+	if !ok {
 		return nil, false
 	}
 
-	pol, ok := v.(*policy.Policy)
+	pol, ok := environment.(*policy.Policy)
 	return pol, ok
 }
 
@@ -74,16 +85,16 @@ type ToolContext struct {
 
 // BuildPrompt adds tool descriptions to a prompt for the LLM.
 func (tc *ToolContext) BuildPrompt() string {
-	if tc.Registry == nil || len(tc.Registry.List()) == 0 {
+	if tc.Registry == nil || len(tc.Registry.Tools()) == 0 {
 		return ""
 	}
 
 	var sb strings.Builder
 
-	for _, tool := range tc.Registry.List() {
-		sb.WriteString(tool.Function.Name)
+	for _, tool := range tc.Registry.Tools() {
+		sb.WriteString(tool.Name())
 		sb.WriteString(": ")
-		sb.WriteString(tool.Function.Description)
+		sb.WriteString(tool.Description())
 		sb.WriteString("\n")
 	}
 

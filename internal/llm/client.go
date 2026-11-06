@@ -14,9 +14,24 @@ import (
 
 	"github.com/m4ns0ur/iris/internal/config"
 	"github.com/m4ns0ur/iris/internal/logger"
+	"github.com/m4ns0ur/iris/provider"
 )
 
 var Logger = logger.Logger
+
+// Public provider types are re-exported here so existing Iris code can keep
+// using the llm package while the stable API lives in provider.
+type (
+	ChatMessage  = provider.Message
+	Content      = provider.Content
+	Tool         = provider.Tool
+	Function     = provider.Function
+	Parameters   = provider.Parameters
+	Property     = provider.Property
+	ToolCall     = provider.ToolCall
+	FunctionCall = provider.FunctionCall
+	Usage        = provider.Usage
+)
 
 type Payload struct {
 	Model            string        `json:"model"`
@@ -39,42 +54,8 @@ type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
-type ChatMessage struct {
-	Role             string     `json:"role"`
-	Content          any        `json:"content"`
-	ReasoningContent string     `json:"reasoning_content"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
-}
-
-type Content struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-type Tool struct {
-	Type     string   `json:"type"`
-	Function Function `json:"function"`
-}
-
-type Function struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Parameters  Parameters `json:"parameters"`
-}
-
-type Parameters struct {
-	Type       string              `json:"type"`
-	Required   []string            `json:"required"`
-	Properties map[string]Property `json:"properties"`
-}
-
-type Property struct {
-	Type        string      `json:"type"`
-	Description string      `json:"description"`
-	Items       *Parameters `json:"items,omitempty"`
-}
-
+// LLMResponse and its children are retained for debug logging of
+// non-streaming responses.
 type LLMResponse struct {
 	Choices []Choice `json:"choices"`
 	Usage   Usage    `json:"usage"`
@@ -90,45 +71,22 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-}
-
 type Timings struct {
 	PredictedPerSecond float64 `json:"predicted_per_second"`
 }
 
 type Chunk struct {
 	Choices []ChunkChoice `json:"choices"`
+	Usage   *Usage        `json:"usage,omitempty"`
 }
 
 type ChunkChoice struct {
-	FinishReason string `json:"finish_reason,omitempty"`
-	Index        int    `json:"index"`
-	Delta        Delta  `json:"delta"`
+	FinishReason string         `json:"finish_reason,omitempty"`
+	Index        int            `json:"index"`
+	Delta        provider.Delta `json:"delta"`
 }
 
-type Delta struct {
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	Content          string     `json:"content,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-}
-
-type ToolCall struct {
-	// Index is present in streaming chunks to identify which tool call
-	// this delta belongs to. It is omitted in non-streaming responses.
-	Index    *int         `json:"index,omitempty"`
-	Id       string       `json:"id,omitempty"`
-	Type     string       `json:"type,omitempty"`
-	Function FunctionCall `json:"function"`
-}
-
-type FunctionCall struct {
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments"`
-}
+var _ provider.Provider = (*LLMClient)(nil)
 
 type LLMClient struct {
 	URL            string
@@ -177,49 +135,21 @@ func (e *HTTPStatusError) Error() string {
 	return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body)
 }
 
-// Generate requests a completion. A context is required so callers can
-// cancel the request, its retries, and an in-progress stream.
+// Generate implements provider.Provider. Cancellation of ctx aborts the HTTP
+// request, any retry backoff, and stream reading.
 func (c *LLMClient) Generate(
 	ctx context.Context,
-	messages []ChatMessage,
-	tools []Tool,
-	onChunk func(chunkType string, content string),
-	onError func(error),
-) (Chunk, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	Logger.Debug("Generating response from LLM", "messageCount", len(messages), "toolCount", len(tools))
-
-	if onChunk != nil || onError != nil {
-		return c.GenerateStream(ctx, messages, tools, onChunk, onError)
-	}
-	return Chunk{}, fmt.Errorf("synchronous generation is not supported, onChunk or onError callback must be provided")
-}
-
-// GenerateStream streams a completion. Cancellation of ctx aborts the HTTP
-// request, any retry backoff, and stream reading.
-func (c *LLMClient) GenerateStream(
-	ctx context.Context,
-	messages []ChatMessage,
-	tools []Tool,
-	onChunk func(chunkType string, content string),
-	onError func(error),
-) (Chunk, error) {
+	request provider.Request,
+	onDelta func(provider.Delta),
+) (provider.Response, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return Chunk{}, err
+		return provider.Response{}, err
 	}
-
-	// Guard against nil callbacks to avoid panics.
-	if onChunk == nil {
-		onChunk = func(string, string) {}
-	}
-	if onError == nil {
-		onError = func(error) {}
+	if onDelta == nil {
+		onDelta = func(provider.Delta) {}
 	}
 
 	callCtx := ctx
@@ -229,11 +159,9 @@ func (c *LLMClient) GenerateStream(
 		defer cancel()
 	}
 
-	payload := createPayload(c.Model, messages, tools)
+	payload := createPayload(c.Model, request)
 	payload.Stream = true
-	payload.StreamOptions = StreamOptions{
-		IncludeUsage: true,
-	}
+	payload.StreamOptions = StreamOptions{IncludeUsage: true}
 
 	LogLLMPayload(payload)
 
@@ -289,7 +217,7 @@ func (c *LLMClient) GenerateStream(
 
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if callCtx.Err() != nil {
-			return Chunk{}, c.requestContextError(ctx, callCtx)
+			return provider.Response{}, c.requestContextError(ctx, callCtx)
 		}
 
 		if attempt > 1 {
@@ -298,15 +226,12 @@ func (c *LLMClient) GenerateStream(
 				"attempt", attempt,
 				"maxAttempts", attempts,
 			)
-			if err != nil {
-				onError(fmt.Errorf("LLM streaming request failed on attempt %d: %w", attempt-1, err))
-			}
 
 			timer := time.NewTimer(retryDelay)
 			select {
 			case <-callCtx.Done():
 				timer.Stop()
-				return Chunk{}, c.requestContextError(ctx, callCtx)
+				return provider.Response{}, c.requestContextError(ctx, callCtx)
 			case <-timer.C:
 			}
 			retryDelay *= 2
@@ -318,7 +243,7 @@ func (c *LLMClient) GenerateStream(
 		}
 
 		if callCtx.Err() != nil {
-			return Chunk{}, c.requestContextError(ctx, callCtx)
+			return provider.Response{}, c.requestContextError(ctx, callCtx)
 		}
 
 		var statusErr *HTTPStatusError
@@ -328,7 +253,7 @@ func (c *LLMClient) GenerateStream(
 			statusErr.Status != http.StatusTooManyRequests {
 			// Client errors are not transient; retrying cannot help.
 			Logger.Error("LLM request rejected", "status", statusErr.Status)
-			return Chunk{}, err
+			return provider.Response{}, err
 		}
 
 		if attempt < attempts {
@@ -347,9 +272,9 @@ func (c *LLMClient) GenerateStream(
 			err = errors.New("LLM server returned no response")
 		}
 		if callCtx.Err() != nil {
-			return Chunk{}, c.requestContextError(ctx, callCtx)
+			return provider.Response{}, c.requestContextError(ctx, callCtx)
 		}
-		return Chunk{}, fmt.Errorf("failed to connect to LLM server after %d attempts: %w", attempts, err)
+		return provider.Response{}, fmt.Errorf("failed to connect to LLM server after %d attempts: %w", attempts, err)
 	}
 	defer res.Body.Close()
 
@@ -360,36 +285,41 @@ func (c *LLMClient) GenerateStream(
 		fullReasoning strings.Builder
 
 		// toolCallAccum maps streaming index → accumulated ToolCall.
-		// The first chunk for a given tool call carries id/type/name;
-		// subsequent chunks only carry argument fragments.
-		toolCallAccum = make(map[int]*ToolCall)
-		toolCallOrder []int // preserves insertion order
+		toolCallAccum = make(map[int]*provider.ToolCall)
+		toolCallOrder []int
+		usage         provider.Usage
+		finishReason  string
 	)
 
-	finalChunk := Chunk{
-		Choices: []ChunkChoice{
-			{
-				Delta: Delta{},
-			},
-		},
+	assembledResponse := func() provider.Response {
+		assembled := make([]provider.ToolCall, 0, len(toolCallOrder))
+		for _, idx := range toolCallOrder {
+			assembled = append(assembled, *toolCallAccum[idx])
+		}
+
+		return provider.Response{
+			Content:          fullResponse.String(),
+			ReasoningContent: fullReasoning.String(),
+			FinishReason:     finishReason,
+			ToolCalls:        assembled,
+			Usage:            usage,
+		}
 	}
 
 	for {
 		if callCtx.Err() != nil {
-			return finalChunk, c.requestContextError(ctx, callCtx)
+			return assembledResponse(), c.requestContextError(ctx, callCtx)
 		}
 
 		line, readErr := reader.ReadBytes('\n')
 		if readErr != nil {
 			if callCtx.Err() != nil {
-				return finalChunk, c.requestContextError(ctx, callCtx)
+				return assembledResponse(), c.requestContextError(ctx, callCtx)
 			}
 			if errors.Is(readErr, io.EOF) {
 				break
 			}
-			// Return whatever we have accumulated alongside the error so the
-			// caller can decide whether to use the partial response.
-			return finalChunk, fmt.Errorf("error reading stream: %w", readErr)
+			return assembledResponse(), fmt.Errorf("error reading stream: %w", readErr)
 		}
 
 		line = bytes.TrimSpace(line)
@@ -414,24 +344,27 @@ func (c *LLMClient) GenerateStream(
 			continue
 		}
 
+		if chunk.Usage != nil {
+			usage = *chunk.Usage
+		}
+
 		if len(chunk.Choices) == 0 {
 			continue
 		}
 
 		if callCtx.Err() != nil {
-			return finalChunk, c.requestContextError(ctx, callCtx)
+			return assembledResponse(), c.requestContextError(ctx, callCtx)
 		}
 
 		choice := chunk.Choices[0]
-		finalChunk.Choices[0].FinishReason = choice.FinishReason
+		finishReason = choice.FinishReason
+		delta := choice.Delta
 
-		if rc := choice.Delta.ReasoningContent; rc != "" {
+		if rc := delta.ReasoningContent; rc != "" {
 			fullReasoning.WriteString(rc)
-			onChunk("reason", rc)
 		}
 
-		// Accumulate tool call deltas keyed by their streaming index.
-		for _, tc := range choice.Delta.ToolCalls {
+		for _, tc := range delta.ToolCalls {
 			idx := 0
 			if tc.Index != nil {
 				idx = *tc.Index
@@ -439,53 +372,36 @@ func (c *LLMClient) GenerateStream(
 
 			acc, exists := toolCallAccum[idx]
 			if !exists {
-				// First chunk for this tool call: capture id/type/name.
-				acc = &ToolCall{
-					Id:   tc.Id,
-					Type: tc.Type,
-					Function: FunctionCall{
-						Name: tc.Function.Name,
-					},
-				}
+				acc = &provider.ToolCall{}
 				toolCallAccum[idx] = acc
 				toolCallOrder = append(toolCallOrder, idx)
 			}
-
-			acc.Function.Arguments += tc.Function.Arguments
-
-			// Emit raw argument fragments for callers that want to stream
-			// tool call progress (e.g. progress indicators). Callers must
-			// treat these as partial/incomplete JSON.
-			if tc.Function.Arguments != "" {
-				b, err := json.Marshal(tc.Function)
-				if err == nil {
-					onChunk("tool", string(b))
-				}
+			if tc.ID != "" {
+				acc.ID = tc.ID
 			}
+			if tc.Type != "" {
+				acc.Type = tc.Type
+			}
+			if tc.Function.Name != "" {
+				acc.Function.Name = tc.Function.Name
+			}
+			acc.Function.Arguments += tc.Function.Arguments
 		}
 
-		if content := choice.Delta.Content; content != "" {
+		if content := delta.Content; content != "" {
 			fullResponse.WriteString(content)
-			onChunk("response", content)
+		}
+
+		if delta.ReasoningContent != "" || delta.Content != "" || len(delta.ToolCalls) > 0 {
+			onDelta(delta)
 		}
 	}
 
 	if callCtx.Err() != nil {
-		return finalChunk, c.requestContextError(ctx, callCtx)
+		return assembledResponse(), c.requestContextError(ctx, callCtx)
 	}
 
-	finalChunk.Choices[0].Delta.Content = fullResponse.String()
-	finalChunk.Choices[0].Delta.ReasoningContent = fullReasoning.String()
-
-	if len(toolCallAccum) > 0 {
-		assembled := make([]ToolCall, 0, len(toolCallOrder))
-		for _, idx := range toolCallOrder {
-			assembled = append(assembled, *toolCallAccum[idx])
-		}
-		finalChunk.Choices[0].Delta.ToolCalls = assembled
-	}
-
-	return finalChunk, nil
+	return assembledResponse(), nil
 }
 
 // requestContextError turns a cancelled call context into the most useful
@@ -506,36 +422,55 @@ func (c *LLMClient) requestContextError(parent, callCtx context.Context) error {
 	return context.Canceled
 }
 
-func createPayload(model string, messages []ChatMessage, tools []Tool) Payload {
+func createPayload(model string, request provider.Request) Payload {
 	payload := Payload{
-		Model:       model,
-		Store:       false,
-		Messages:    messages,
-		Tools:       tools,
-		MaxTokens:   32768,
-		Temperature: 0.6,
+		Model:            request.Model,
+		Store:            false,
+		Messages:         request.Messages,
+		Tools:            request.Tools,
+		MaxTokens:        request.MaxTokens,
+		Temperature:      request.Temperature,
+		TopP:             request.TopP,
+		TopK:             request.TopK,
+		MinP:             request.MinP,
+		RepeatPenalty:    request.RepeatPenalty,
+		PresencePenalty:  request.PresencePenalty,
+		FrequencyPenalty: request.FrequencyPenalty,
+	}
+
+	if payload.Model == "" {
+		payload.Model = model
+	}
+	if payload.Model == "" {
+		payload.Model = config.GetConfig().DefaultModel
+	}
+	if payload.MaxTokens == 0 {
+		payload.MaxTokens = 32768
+	}
+	if payload.Temperature == 0 {
+		payload.Temperature = 0.6
 	}
 
 	defaultModel := config.DefaultModel()
-	if defaultModel.Temperature != 0 {
+	if request.Temperature == 0 && defaultModel.Temperature != 0 {
 		payload.Temperature = defaultModel.Temperature
 	}
-	if defaultModel.TopP != 0 {
+	if request.TopP == 0 && defaultModel.TopP != 0 {
 		payload.TopP = defaultModel.TopP
 	}
-	if defaultModel.TopK != 0 {
+	if request.TopK == 0 && defaultModel.TopK != 0 {
 		payload.TopK = defaultModel.TopK
 	}
-	if defaultModel.MinP != 0 {
+	if request.MinP == 0 && defaultModel.MinP != 0 {
 		payload.MinP = defaultModel.MinP
 	}
-	if defaultModel.RepeatPenalty != 0 {
+	if request.RepeatPenalty == 0 && defaultModel.RepeatPenalty != 0 {
 		payload.RepeatPenalty = defaultModel.RepeatPenalty
 	}
-	if defaultModel.PresencePenalty != 0 {
+	if request.PresencePenalty == 0 && defaultModel.PresencePenalty != 0 {
 		payload.PresencePenalty = defaultModel.PresencePenalty
 	}
-	if defaultModel.FrequencyPenalty != 0 {
+	if request.FrequencyPenalty == 0 && defaultModel.FrequencyPenalty != 0 {
 		payload.FrequencyPenalty = defaultModel.FrequencyPenalty
 	}
 

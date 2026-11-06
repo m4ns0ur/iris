@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	publicagent "github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/policy"
 )
@@ -20,6 +21,8 @@ import (
 const toolCallRead = `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"missing.txt\"}"}}]},"finish_reason":"tool_calls"}]}`
 
 const toolCallTwoReads = `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"missing.txt\"}"}},{"index":1,"id":"call_2","type":"function","function":{"name":"read","arguments":"{\"path\":\"missing.txt\"}"}}]},"finish_reason":"tool_calls"}]}`
+
+const toolCallWrite = `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write","arguments":"{\"path\":\"event.txt\",\"content\":\"x\"}"}}]},"finish_reason":"tool_calls"}]}`
 
 const finalResponse = `{"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`
 
@@ -82,14 +85,15 @@ func TestAgentCancelStopsRunAndCleansUp(t *testing.T) {
 
 	first := make(chan struct{})
 	var once sync.Once
+	instance.Subscribe(func(event publicagent.Event) {
+		if delta, ok := event.(publicagent.AssistantDelta); ok && delta.Text == "hello" {
+			once.Do(func() { close(first) })
+		}
+	})
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- instance.RunContext(context.Background(), "hi", func(_ string, content string) {
-			if content == "hello" {
-				once.Do(func() { close(first) })
-			}
-		}, nil)
+		errCh <- instance.Run(context.Background(), "hi")
 	}()
 
 	select {
@@ -103,10 +107,10 @@ func TestAgentCancelStopsRunAndCleansUp(t *testing.T) {
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("RunContext() error = %v, want context.Canceled", err)
+			t.Fatalf("Run() error = %v, want context.Canceled", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("RunContext() did not return after Cancel")
+		t.Fatal("Run() did not return after Cancel")
 	}
 
 	if err := instance.Close(); err != nil {
@@ -131,14 +135,15 @@ func TestAgentCloseInterruptsActiveRun(t *testing.T) {
 
 	first := make(chan struct{})
 	var once sync.Once
+	instance.Subscribe(func(event publicagent.Event) {
+		if delta, ok := event.(publicagent.AssistantDelta); ok && delta.Text == "hello" {
+			once.Do(func() { close(first) })
+		}
+	})
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- instance.RunContext(context.Background(), "hi", func(_ string, content string) {
-			if content == "hello" {
-				once.Do(func() { close(first) })
-			}
-		}, nil)
+		errCh <- instance.Run(context.Background(), "hi")
 	}()
 
 	select {
@@ -164,7 +169,7 @@ func TestAgentCloseInterruptsActiveRun(t *testing.T) {
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("RunContext() error = %v, want context.Canceled", err)
+			t.Fatalf("Run() error = %v, want context.Canceled", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the canceled run to return")
@@ -193,14 +198,15 @@ func TestAgentRejectsConcurrentAndClosedRuns(t *testing.T) {
 
 	first := make(chan struct{})
 	var once sync.Once
+	instance.Subscribe(func(event publicagent.Event) {
+		if delta, ok := event.(publicagent.AssistantDelta); ok && delta.Text == "hello" {
+			once.Do(func() { close(first) })
+		}
+	})
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- instance.RunContext(context.Background(), "hi", func(_ string, content string) {
-			if content == "hello" {
-				once.Do(func() { close(first) })
-			}
-		}, nil)
+		errCh <- instance.Run(context.Background(), "hi")
 	}()
 
 	select {
@@ -209,21 +215,21 @@ func TestAgentRejectsConcurrentAndClosedRuns(t *testing.T) {
 		t.Fatal("timed out waiting for the first streamed chunk")
 	}
 
-	if err := instance.RunContext(context.Background(), "again", nil, nil); !errors.Is(err, ErrAgentBusy) {
-		t.Fatalf("second RunContext() error = %v, want ErrAgentBusy", err)
+	if err := instance.Run(context.Background(), "again"); !errors.Is(err, ErrAgentBusy) {
+		t.Fatalf("second Run() error = %v, want ErrAgentBusy", err)
 	}
 
 	instance.Cancel()
 	if err := <-errCh; !errors.Is(err, context.Canceled) {
-		t.Fatalf("RunContext() error = %v, want context.Canceled", err)
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
 	}
 
 	if err := instance.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	if err := instance.RunContext(context.Background(), "after close", nil, nil); !errors.Is(err, ErrAgentClosed) {
-		t.Fatalf("RunContext() after Close error = %v, want ErrAgentClosed", err)
+	if err := instance.Run(context.Background(), "after close"); !errors.Is(err, ErrAgentClosed) {
+		t.Fatalf("Run() after Close error = %v, want ErrAgentClosed", err)
 	}
 }
 
@@ -237,9 +243,9 @@ func TestAgentTurnBudget(t *testing.T) {
 
 	instance, _ := newTestAgent(t, server, Options{MaxTurns: 1})
 
-	err := instance.RunContext(context.Background(), "hi", nil, nil)
+	err := instance.Run(context.Background(), "hi")
 	if !errors.Is(err, ErrTurnBudgetExceeded) {
-		t.Fatalf("RunContext() error = %v, want ErrTurnBudgetExceeded", err)
+		t.Fatalf("Run() error = %v, want ErrTurnBudgetExceeded", err)
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("LLM requests = %d, want 1", requests.Load())
@@ -259,9 +265,9 @@ func TestAgentToolBudget(t *testing.T) {
 
 	instance, _ := newTestAgent(t, server, Options{MaxTurns: 5, MaxToolCalls: 1})
 
-	err := instance.RunContext(context.Background(), "hi", nil, nil)
+	err := instance.Run(context.Background(), "hi")
 	if !errors.Is(err, ErrToolBudgetExceeded) {
-		t.Fatalf("RunContext() error = %v, want ErrToolBudgetExceeded", err)
+		t.Fatalf("Run() error = %v, want ErrToolBudgetExceeded", err)
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("LLM requests = %d, want 1", requests.Load())
@@ -289,11 +295,11 @@ func TestAgentToolTimeout(t *testing.T) {
 	})
 
 	start := time.Now()
-	err := instance.RunContext(context.Background(), "hi", nil, nil)
+	err := instance.Run(context.Background(), "hi")
 	elapsed := time.Since(start)
 
 	if err != nil {
-		t.Fatalf("RunContext() error = %v", err)
+		t.Fatalf("Run() error = %v", err)
 	}
 	if elapsed > 3*time.Second {
 		t.Fatalf("tool timeout took too long: %s", elapsed)
@@ -326,4 +332,94 @@ func historyToolContent(history []llm.ChatMessage) string {
 		}
 	}
 	return builder.String()
+}
+
+func TestAgentEmitsTypedEvents(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			writeSSE(w, toolCallWrite)
+			return
+		}
+		writeSSE(w, `{"choices":[{"index":0,"delta":{"reasoning_content":"thinking","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`)
+	}))
+	defer server.Close()
+
+	instance, _ := newTestAgent(t, server, Options{})
+
+	var mu sync.Mutex
+	seen := make(map[publicagent.EventType]int)
+	instance.Subscribe(func(event publicagent.Event) {
+		mu.Lock()
+		seen[event.Type()]++
+		mu.Unlock()
+	})
+
+	if err := instance.Run(context.Background(), "hi"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	for _, eventType := range []publicagent.EventType{
+		publicagent.EventAgentStarted,
+		publicagent.EventTurnStarted,
+		publicagent.EventReasoningDelta,
+		publicagent.EventAssistantDelta,
+		publicagent.EventToolProgress,
+		publicagent.EventToolStarted,
+		publicagent.EventToolCompleted,
+		publicagent.EventUsage,
+		publicagent.EventAgentFinished,
+	} {
+		if seen[eventType] == 0 {
+			t.Fatalf("event %q was not emitted; seen = %v", eventType, seen)
+		}
+	}
+}
+
+func TestAgentAllowsRerunAfterFinishedEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(w, finalResponse)
+	}))
+	defer server.Close()
+
+	instance, _ := newTestAgent(t, server, Options{})
+
+	finished := make(chan struct{}, 1)
+	instance.Subscribe(func(event publicagent.Event) {
+		if _, ok := event.(publicagent.AgentFinished); ok {
+			select {
+			case finished <- struct{}{}:
+			default:
+			}
+		}
+	})
+
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- instance.Run(context.Background(), "one")
+	}()
+
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for agent.finished")
+	}
+
+	// The runtime must have cleared its active-run state before emitting the
+	// terminal event, so a consumer can immediately start the next run.
+	if err := instance.Run(context.Background(), "two"); err != nil {
+		t.Fatalf("second Run() error = %v, want nil", err)
+	}
+
+	select {
+	case err := <-firstErr:
+		if err != nil {
+			t.Fatalf("first Run() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Run() did not return")
+	}
 }

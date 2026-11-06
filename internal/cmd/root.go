@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
-	"github.com/m4ns0ur/iris/internal/agent"
+	"github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/internal/config"
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/internal/tui"
+	"github.com/m4ns0ur/iris/runtime"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -139,26 +141,34 @@ func startTui(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	securityPolicy, err := config.GetConfig().BuildPolicy(workdir)
+	cfg := config.GetConfig()
+
+	irt, err := runtime.New(runtime.Options{
+		Workspace:    workdir,
+		Provider:     llm.NewClient(),
+		Model:        cfg.DefaultModel,
+		MaxTurns:     cfg.Agent.MaxTurns,
+		MaxToolCalls: cfg.Agent.MaxToolCalls,
+		ToolTimeout:  cfg.Agent.ToolTimeout(),
+		Security:     runtimeSecurity(cfg.Security),
+	})
 	if err != nil {
-		Logger.Error("invalid security policy", "error", err)
+		Logger.Error("invalid runtime configuration", "error", err)
 		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
 		os.Exit(1)
 	}
+	defer func() {
+		if err := irt.Close(); err != nil {
+			Logger.Warn("failed to clean up runtime resources", "error", err)
+		}
+	}()
 
-	for _, warning := range securityPolicy.Warnings() {
+	for _, warning := range irt.Warnings() {
 		Logger.Warn("security warning", "warning", warning)
 		fmt.Fprintf(os.Stderr, "iris: warning: %s\n", warning)
 	}
 
-	cfg := config.GetConfig()
-
-	client := llm.NewClient()
-	irisAgent, err := agent.NewAgent(client, securityPolicy, agent.Options{
-		MaxTurns:     cfg.Agent.MaxTurns,
-		MaxToolCalls: cfg.Agent.MaxToolCalls,
-		ToolTimeout:  cfg.Agent.ToolTimeout(),
-	})
+	irisAgent, err := irt.NewAgent()
 	if err != nil {
 		Logger.Error("failed to create agent", "error", err)
 		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
@@ -173,14 +183,56 @@ func startTui(cmd *cobra.Command, args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := tui.Run(ctx, irisAgent, securityPolicy); err != nil {
+	if err := tui.Run(ctx, irisAgent); err != nil {
 		Logger.Error("TUI failed to start", "error", err)
 		// Exit uses os.Exit, which skips deferred cleanup.
 		if closeErr := irisAgent.Close(); closeErr != nil {
 			Logger.Warn("failed to clean up agent resources", "error", closeErr)
 		}
+		if closeErr := irt.Close(); closeErr != nil {
+			Logger.Warn("failed to clean up runtime resources", "error", closeErr)
+		}
 		Exit()
 	}
+}
+
+func runtimeSecurity(security config.SecuritySettings) runtime.Security {
+	shell := security.Shell
+
+	return runtime.Security{
+		Mode:            security.Mode,
+		ExternalSandbox: security.ExternalSandbox,
+		ReadPaths:       append([]string(nil), security.ReadPaths...),
+		WritePaths:      append([]string(nil), security.WritePaths...),
+		Shell: runtime.ShellSecurity{
+			Mode:               shell.Mode,
+			Allow:              append([]string(nil), shell.Allow...),
+			Deny:               append([]string(nil), shell.Deny...),
+			DisableDefaultDeny: shell.DisableDefaultDeny,
+			ApprovalHook:       append([]string(nil), shell.ApprovalHook...),
+			Timeout:            seconds(shell.TimeoutSeconds),
+			ApprovalTimeout:    seconds(shell.ApprovalTimeoutSeconds),
+			MaxOutputBytes:     shell.MaxOutputBytes,
+			MaxOutputLines:     shell.MaxOutputLines,
+			MaxCaptureBytes:    shell.MaxCaptureBytes,
+			TempDirTTL:         minutes(shell.TempFileTTLMinutes),
+			Binary:             shell.ShellBinary,
+		},
+	}
+}
+
+func seconds(value int) time.Duration {
+	if value <= 0 {
+		return 0
+	}
+	return time.Duration(value) * time.Second
+}
+
+func minutes(value int) time.Duration {
+	if value <= 0 {
+		return 0
+	}
+	return time.Duration(value) * time.Minute
 }
 
 func Exit() {

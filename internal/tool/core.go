@@ -1,41 +1,24 @@
-// Package tool provides a registry mechanism for tools that can be used by LLM agents.
-//
-// The tool package includes:
-//   - ToolRegistry: A central registry to manage and retrieve tools
-//   - Built-in tools: read, edit, write, shell
-//   - Context helpers: For passing tool information in prompts
+// Package tool provides the built-in tools and their registry.
 package tool
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/policy"
+	"github.com/m4ns0ur/iris/provider"
+	apitype "github.com/m4ns0ur/iris/tool"
 )
+
+// Tool is the public tool contract.
+type Tool = apitype.Tool
+
+var _ apitype.Registry = (*ToolRegistry)(nil)
 
 // ToolRegistry manages and provides access to available tools.
 type ToolRegistry struct {
 	tools map[string]Tool
 	temp  *TempStore
-}
-
-// Tool represents an executable function that can be called by the agent.
-type Tool interface {
-	// Name returns the unique identifier for this tool.
-	Name() string
-
-	// Description returns a human-readable description of what the tool does.
-	Description() string
-
-	// FullDescription returns a detailed description of the tool, including usage instructions.
-	FullDescription() string
-
-	// Parameters describes the input schema for this tool (optional).
-	Parameters() llm.Parameters
-
-	// Execute runs the tool with the given arguments and context.
-	Execute(ctx context.Context, args map[string]any) (map[string]any, error)
 }
 
 // NewToolRegistry creates a new empty tool registry.
@@ -46,8 +29,9 @@ func NewToolRegistry() *ToolRegistry {
 }
 
 // NewDefaultRegistry creates and registers all default built-in tools. Every
-// file and shell tool is bound to the supplied security policy.
-func NewDefaultRegistry(pol *policy.Policy) (*ToolRegistry, error) {
+// file and shell tool is bound to the supplied security policy. Additional
+// tools are registered after the built-ins.
+func NewDefaultRegistry(pol *policy.Policy, extra ...Tool) (*ToolRegistry, error) {
 	if pol == nil {
 		return nil, fmt.Errorf("%w: tool registry requires a security policy", ErrExecutionFailed)
 	}
@@ -73,6 +57,21 @@ func NewDefaultRegistry(pol *policy.Policy) (*ToolRegistry, error) {
 	registry.Register("write", NewFileWriteTool(pol))
 	registry.Register("shell", NewShellTool(pol, temp))
 
+	for _, extraTool := range extra {
+		if extraTool == nil {
+			continue
+		}
+		if extraTool.Name() == "" {
+			_ = temp.Close()
+			return nil, fmt.Errorf("tool name must not be empty")
+		}
+		if registry.Get(extraTool.Name()) != nil {
+			_ = temp.Close()
+			return nil, fmt.Errorf("tool already registered: %s", extraTool.Name())
+		}
+		registry.Register(extraTool.Name(), extraTool)
+	}
+
 	return registry, nil
 }
 
@@ -89,13 +88,22 @@ func (r *ToolRegistry) Get(name string) Tool {
 	return r.tools[name]
 }
 
-// List returns names of all registered tools.
-func (r *ToolRegistry) List() []llm.Tool {
-	tools := make([]llm.Tool, 0, len(r.tools))
+// Tools returns the registered tools.
+func (r *ToolRegistry) Tools() []Tool {
+	tools := make([]Tool, 0, len(r.tools))
+	for _, t := range r.tools {
+		tools = append(tools, t)
+	}
+	return tools
+}
+
+// Specs returns the provider-facing definitions of the registered tools.
+func (r *ToolRegistry) Specs() []provider.Tool {
+	tools := make([]provider.Tool, 0, len(r.tools))
 	for name, t := range r.tools {
-		tools = append(tools, llm.Tool{
+		tools = append(tools, provider.Tool{
 			Type: "function",
-			Function: llm.Function{
+			Function: provider.Function{
 				Name:        name,
 				Description: t.FullDescription(),
 				Parameters:  t.Parameters(),
