@@ -18,6 +18,8 @@ import (
 	"charm.land/lipgloss/v2/tree"
 	"github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/internal/logger"
+	"github.com/m4ns0ur/iris/provider"
+	"github.com/m4ns0ur/iris/session"
 )
 
 const (
@@ -74,31 +76,44 @@ func (l *lifecycle) close() {
 	l.once.Do(func() { close(l.done) })
 }
 
+// Options configures the TUI consumer.
+type Options struct {
+	Agent           agent.Agent
+	Sessions        session.Manager
+	SessionDefaults session.CreateOptions
+}
+
 type model struct {
-	agent           agent.Agent
-	fullReason      *strings.Builder
-	fullResponse    *strings.Builder
-	toolName        string
-	toolArgs        *strings.Builder
-	previewPath     string
-	previewContent  string
-	previewCommand  string
-	width           int
-	height          int
-	state           state
-	inputText       textarea.Model
-	stream          chan tea.Msg
-	spinner         spinner.Model
-	messages        []message
-	viewport        viewport.Model
-	ready           bool
-	approvals       chan approvalRequestMsg
-	pendingApproval *approvalRequestMsg
-	approvalTimeout time.Duration
-	canceling       bool
-	agentErrored    bool
-	totalTokens     int
-	lifecycle       *lifecycle
+	agent            agent.Agent
+	fullReason       *strings.Builder
+	fullResponse     *strings.Builder
+	toolName         string
+	toolArgs         *strings.Builder
+	previewPath      string
+	previewContent   string
+	previewCommand   string
+	width            int
+	height           int
+	state            state
+	inputText        textarea.Model
+	stream           chan tea.Msg
+	spinner          spinner.Model
+	messages         []message
+	viewport         viewport.Model
+	ready            bool
+	approvals        chan approvalRequestMsg
+	pendingApproval  *approvalRequestMsg
+	approvalTimeout  time.Duration
+	canceling        bool
+	agentErrored     bool
+	totalTokens      int
+	lifecycle        *lifecycle
+	sessions         session.Manager
+	sessionDefaults  session.CreateOptions
+	currentSession   *session.Session
+	sessionPersisted int
+	sessionDirty     bool
+	usagePending     []provider.Usage
 }
 
 type message struct {
@@ -284,6 +299,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 				m.inputText.Reset()
+
+				if strings.HasPrefix(input, "/") {
+					return m.handleCommand(input)
+				}
 
 				m.messages = append(m.messages, message{
 					role:    "user",
@@ -477,7 +496,7 @@ func (m *model) inputBox() string {
 
 func (m *model) statusLine() string {
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorDim))
-	help := style.Render("enter: send · shift+enter: newline · pgup/pgdn: scroll · ctrl+c: quit")
+	help := style.Render("enter: send · shift+enter: newline · /help: commands · ctrl+c: quit")
 	if m.state == StateStreaming {
 		help = style.Render("pgup/pgdn: scroll · ctrl+c: cancel")
 	}
@@ -534,14 +553,24 @@ func waitForStream(ch chan tea.Msg) tea.Cmd {
 	return func() tea.Msg { return <-ch }
 }
 
-func Run(ctx context.Context, instance agent.Agent) error {
+func Run(ctx context.Context, options Options) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	m := initialModel(instance)
+	m, err := initialModel(options)
+	if err != nil {
+		return err
+	}
+
 	prg := tea.NewProgram(&m, tea.WithContext(ctx))
-	_, err := prg.Run()
+	_, err = prg.Run()
+
+	// Save an idle session before tearing down. A run interrupted by quit is
+	// persisted by the AgentFinished path when it can still be observed.
+	if m.state == StateInput {
+		m.persistSession()
+	}
 
 	// Unblock the event subscription after the program stops. cmd calls
 	// Agent.Close next, which cancels the run and waits for cleanup.
@@ -553,7 +582,7 @@ func Run(ctx context.Context, instance agent.Agent) error {
 	return err
 }
 
-func initialModel(instance agent.Agent) model {
+func initialModel(options Options) (model, error) {
 	ta := textarea.New()
 	ta.Placeholder = "Ask Iris..."
 	ta.SetHeight(InputHeight)
@@ -574,6 +603,7 @@ func initialModel(instance agent.Agent) model {
 
 	stream := make(chan tea.Msg)
 	lifecycle := newLifecycle()
+	instance := options.Agent
 
 	approvalTimeout := 5 * time.Minute
 	var approvals chan approvalRequestMsg
@@ -595,6 +625,28 @@ func initialModel(instance agent.Agent) model {
 		})
 	}
 
+	var currentSession *session.Session
+	var initialMessages []message
+
+	if options.Sessions != nil {
+		created, err := options.Sessions.Create(options.SessionDefaults)
+		if err != nil {
+			return model{}, err
+		}
+		currentSession = created
+
+		if instance != nil {
+			if err := instance.LoadHistory(nil); err != nil {
+				return model{}, err
+			}
+		}
+
+		initialMessages = append(initialMessages, message{
+			role:    "notice",
+			content: "Session " + created.ID,
+		})
+	}
+
 	return model{
 		agent:           instance,
 		fullReason:      &strings.Builder{},
@@ -607,7 +659,11 @@ func initialModel(instance agent.Agent) model {
 		approvals:       approvals,
 		approvalTimeout: approvalTimeout,
 		lifecycle:       lifecycle,
-	}
+		sessions:        options.Sessions,
+		sessionDefaults: options.SessionDefaults,
+		currentSession:  currentSession,
+		messages:        initialMessages,
+	}, nil
 }
 
 func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
@@ -649,6 +705,11 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 
 	case agent.Usage:
 		m.totalTokens = e.TotalTokens
+		m.usagePending = append(m.usagePending, provider.Usage{
+			PromptTokens:     e.PromptTokens,
+			CompletionTokens: e.CompletionTokens,
+			TotalTokens:      e.TotalTokens,
+		})
 
 	case agent.AgentError:
 		m.flushPartialStream()
@@ -674,6 +735,7 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 
 		m.canceling = false
 		m.state = StateInput
+		m.persistSession()
 	}
 
 	m.resizeLayout()
@@ -724,6 +786,9 @@ func (m *model) closeDone() {
 }
 
 func (m *model) quit() tea.Cmd {
+	if m.state == StateInput {
+		m.persistSession()
+	}
 	if m.agent != nil {
 		m.agent.Cancel()
 	}

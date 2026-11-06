@@ -18,6 +18,7 @@ type Config struct {
 	Security     SecuritySettings `mapstructure:"security"`
 	LLM          LLMSettings      `mapstructure:"llm"`
 	Agent        AgentSettings    `mapstructure:"agent"`
+	Session      SessionSettings  `mapstructure:"session"`
 }
 
 // ModelSettings represents one [models.'<name>'] block
@@ -66,6 +67,12 @@ func (s AgentSettings) ToolTimeout() time.Duration {
 		return 0
 	}
 	return time.Duration(s.ToolTimeoutSeconds) * time.Second
+}
+
+// SessionSettings controls persistent session storage.
+type SessionSettings struct {
+	// Dir is the session store directory. Empty uses ~/.iris/sessions.
+	Dir string `mapstructure:"dir"`
 }
 
 // SecuritySettings controls the execution boundary for file and shell tools.

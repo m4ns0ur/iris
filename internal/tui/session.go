@@ -1,0 +1,339 @@
+package tui
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/m4ns0ur/iris/provider"
+	"github.com/m4ns0ur/iris/session"
+)
+
+func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
+	fields := strings.Fields(input)
+	command := strings.ToLower(fields[0])
+
+	switch command {
+	case "/new":
+		m.commandNew()
+	case "/resume":
+		id := ""
+		if len(fields) > 1 {
+			id = fields[1]
+		}
+		m.commandResume(id)
+	case "/fork":
+		index := 0
+		if len(fields) > 1 {
+			parsed, err := strconv.Atoi(fields[1])
+			if err != nil || parsed <= 0 {
+				m.notice("Usage: /fork [n], where n is a 1-based user-message index.")
+				break
+			}
+			index = parsed
+		}
+		m.commandFork(index)
+	case "/export":
+		m.commandExport()
+	case "/help", "/?":
+		m.notice("Commands: /new, /resume [id], /fork [n], /export")
+	default:
+		m.notice("Unknown command " + command + ". Try /help.")
+	}
+
+	m.resizeLayout()
+	m.viewport.GotoBottom()
+	return m, nil
+}
+
+func (m *model) commandNew() {
+	if m.sessions == nil {
+		m.notice("Session persistence is not configured.")
+		return
+	}
+
+	m.persistSession()
+
+	created, err := m.sessions.Create(m.sessionDefaults)
+	if err != nil {
+		m.notice("Could not create session: " + err.Error())
+		return
+	}
+
+	if m.agent != nil {
+		if err := m.agent.LoadHistory(nil); err != nil {
+			m.notice("Could not reset agent history: " + err.Error())
+			return
+		}
+	}
+
+	m.setSession(created)
+	m.loadTranscript(created)
+	m.notice("New session " + created.ID)
+}
+
+func (m *model) commandResume(id string) {
+	if m.sessions == nil {
+		m.notice("Session persistence is not configured.")
+		return
+	}
+
+	m.persistSession()
+
+	var (
+		loaded *session.Session
+		err    error
+	)
+	if id == "" {
+		loaded, err = m.sessions.Latest()
+	} else {
+		loaded, err = m.findSession(id)
+	}
+	if err != nil {
+		m.notice("Could not resume session: " + err.Error())
+		return
+	}
+
+	if m.agent != nil {
+		if err := m.agent.LoadHistory(loaded.History()); err != nil {
+			m.notice("Could not load session history: " + err.Error())
+			return
+		}
+	}
+
+	m.setSession(loaded)
+	m.loadTranscript(loaded)
+	m.notice(fmt.Sprintf("Resumed session %s (%d entries)", loaded.ID, len(loaded.Entries)))
+}
+
+func (m *model) commandFork(index int) {
+	if m.sessions == nil || m.currentSession == nil {
+		m.notice("No active session to fork.")
+		return
+	}
+
+	m.persistSession()
+
+	users := m.currentSession.UserEntries()
+	if len(users) == 0 {
+		m.notice("This session has no user messages to fork from.")
+		return
+	}
+	if index == 0 {
+		index = len(users)
+	}
+	if index < 1 || index > len(users) {
+		m.notice(fmt.Sprintf("User message index must be between 1 and %d.", len(users)))
+		return
+	}
+
+	child, err := m.sessions.Fork(m.currentSession.ID, users[index-1].ID)
+	if err != nil {
+		m.notice("Could not fork session: " + err.Error())
+		return
+	}
+
+	if m.agent != nil {
+		if err := m.agent.LoadHistory(child.History()); err != nil {
+			m.notice("Could not load fork history: " + err.Error())
+			return
+		}
+	}
+
+	m.setSession(child)
+	m.loadTranscript(child)
+	m.notice(fmt.Sprintf("Forked session %s from user message %d", child.ID, index))
+}
+
+func (m *model) commandExport() {
+	if m.sessions == nil || m.currentSession == nil {
+		m.notice("No active session to export.")
+		return
+	}
+
+	m.persistSession()
+
+	path, err := m.sessions.ExportMarkdown(m.currentSession)
+	if err != nil {
+		m.notice("Could not export session: " + err.Error())
+		return
+	}
+	m.notice("Exported session to " + path)
+}
+
+func (m *model) findSession(prefix string) (*session.Session, error) {
+	summaries, err := m.sessions.List()
+	if err != nil {
+		return nil, err
+	}
+
+	var matches []session.Summary
+	for _, summary := range summaries {
+		if summary.ID == prefix {
+			return m.sessions.Open(summary.ID)
+		}
+		if strings.HasPrefix(summary.ID, prefix) {
+			matches = append(matches, summary)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return nil, session.ErrSessionNotFound
+	case 1:
+		return m.sessions.Open(matches[0].ID)
+	default:
+		return nil, fmt.Errorf("ambiguous session prefix %q matches %d sessions", prefix, len(matches))
+	}
+}
+
+func (m *model) setSession(loaded *session.Session) {
+	m.currentSession = loaded
+	m.sessionPersisted = 0
+	if m.agent != nil {
+		m.sessionPersisted = len(m.agent.History())
+	}
+	m.sessionDirty = false
+	m.usagePending = nil
+	m.totalTokens = loaded.Usage.TotalTokens
+	m.resetStreamingUI()
+}
+
+func (m *model) loadTranscript(loaded *session.Session) {
+	m.messages = nil
+	for _, entry := range loaded.Entries {
+		switch entry.Kind {
+		case session.EntryUser:
+			m.messages = append(m.messages, message{role: "user", content: entry.Content})
+		case session.EntryAssistant:
+			if entry.Content != "" {
+				m.messages = append(m.messages, message{role: "assistant", content: entry.Content})
+			}
+		}
+	}
+}
+
+func (m *model) resetStreamingUI() {
+	m.fullReason.Reset()
+	m.fullResponse.Reset()
+	m.toolName = ""
+	m.toolArgs.Reset()
+	m.previewPath = ""
+	m.previewContent = ""
+	m.previewCommand = ""
+	m.canceling = false
+	m.agentErrored = false
+}
+
+func (m *model) notice(text string) {
+	m.messages = append(m.messages, message{role: "notice", content: text})
+}
+
+// persistSession appends agent history messages that are not yet represented
+// in the session and saves the session atomically.
+func (m *model) persistSession() {
+	if m.sessions == nil || m.currentSession == nil || m.agent == nil {
+		return
+	}
+
+	history := m.agent.History()
+	if m.sessionPersisted > len(history) {
+		m.sessionPersisted = 0
+	}
+	newMessages := history[m.sessionPersisted:]
+
+	usage := m.usagePending
+	m.usagePending = nil
+
+	toolNames := make(map[string]string)
+	for _, entry := range m.currentSession.Entries {
+		for _, call := range entry.ToolCalls {
+			if call.ID != "" {
+				toolNames[call.ID] = call.Function.Name
+			}
+		}
+	}
+
+	usageIndex := 0
+	changed := false
+
+	for _, message := range newMessages {
+		switch message.Role {
+		case "system":
+			continue
+		case "user":
+			m.currentSession.AddUser(messageText(message.Content))
+			changed = true
+		case "assistant":
+			var messageUsage *provider.Usage
+			if usageIndex < len(usage) {
+				copied := usage[usageIndex]
+				messageUsage = &copied
+				usageIndex++
+			}
+
+			m.currentSession.AddAssistant(
+				messageText(message.Content),
+				message.ReasoningContent,
+				message.ToolCalls,
+				messageUsage,
+				m.currentSession.Model,
+			)
+			for _, call := range message.ToolCalls {
+				if call.ID != "" {
+					toolNames[call.ID] = call.Function.Name
+				}
+			}
+			changed = true
+		case "tool":
+			m.currentSession.AddTool(
+				message.ToolCallID,
+				toolNames[message.ToolCallID],
+				messageText(message.Content),
+			)
+			changed = true
+		}
+	}
+
+	for ; usageIndex < len(usage); usageIndex++ {
+		m.currentSession.Usage.PromptTokens += usage[usageIndex].PromptTokens
+		m.currentSession.Usage.CompletionTokens += usage[usageIndex].CompletionTokens
+		m.currentSession.Usage.TotalTokens += usage[usageIndex].TotalTokens
+		changed = true
+	}
+
+	m.sessionPersisted = len(history)
+	if changed {
+		m.sessionDirty = true
+	}
+
+	if !m.sessionDirty {
+		return
+	}
+
+	if err := m.sessions.Save(m.currentSession); err != nil {
+		m.notice("Session save failed: " + err.Error())
+		return
+	}
+	m.sessionDirty = false
+}
+
+func messageText(content any) string {
+	switch value := content.(type) {
+	case string:
+		return value
+	case []provider.Content:
+		var builder strings.Builder
+		for _, part := range value {
+			if part.Type == "text" {
+				builder.WriteString(part.Text)
+			}
+		}
+		return builder.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(value)
+	}
+}

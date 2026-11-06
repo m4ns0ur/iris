@@ -41,6 +41,9 @@ request_timeout_seconds = 42
 max_turns = 7
 max_tool_calls = 11
 tool_timeout_seconds = 13
+
+[session]
+dir = "/tmp/iris-sessions"
 `)); err != nil {
 		t.Fatalf("ReadConfig() error = %v", err)
 	}
@@ -85,6 +88,9 @@ tool_timeout_seconds = 13
 	}
 	if cfg.Agent.ToolTimeout() != 13*time.Second {
 		t.Fatalf("tool timeout = %v, want 13s", cfg.Agent.ToolTimeout())
+	}
+	if cfg.Session.Dir != "/tmp/iris-sessions" {
+		t.Fatalf("session dir = %q, want /tmp/iris-sessions", cfg.Session.Dir)
 	}
 }
 

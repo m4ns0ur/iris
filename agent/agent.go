@@ -6,6 +6,8 @@ package agent
 import (
 	"context"
 	"time"
+
+	"github.com/m4ns0ur/iris/provider"
 )
 
 const (
@@ -33,6 +35,15 @@ type Agent interface {
 	// there is no unsubscribe and the subscription lives for the lifetime of
 	// the agent.
 	Subscribe(handler func(Event))
+
+	// History returns a snapshot of the current conversation history,
+	// including any system message.
+	History() []provider.Message
+
+	// LoadHistory replaces the conversation history while the agent is idle.
+	// If the messages do not start with a system message, the agent prepends
+	// its system prompt. Loading an empty history clears the conversation.
+	LoadHistory(messages []provider.Message) error
 
 	// Cancel cancels the current run, if any.
 	Cancel()

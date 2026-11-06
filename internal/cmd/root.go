@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/internal/tui"
 	"github.com/m4ns0ur/iris/runtime"
+	"github.com/m4ns0ur/iris/session"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -83,6 +85,7 @@ func initConfig() {
 	viper.SetDefault("agent.max_turns", agent.DefaultMaxTurns)
 	viper.SetDefault("agent.max_tool_calls", agent.DefaultMaxToolCalls)
 	viper.SetDefault("agent.tool_timeout_seconds", int(agent.DefaultToolTimeout.Seconds()))
+	viper.SetDefault("session.dir", "")
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
@@ -143,6 +146,30 @@ func startTui(cmd *cobra.Command, args []string) {
 
 	cfg := config.GetConfig()
 
+	sessionDir := cfg.Session.Dir
+	if sessionDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			Logger.Error("cannot determine home directory for sessions", "error", err)
+			fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
+			os.Exit(1)
+		}
+		sessionDir = filepath.Join(home, IrisHome, "sessions")
+	}
+
+	sessions, err := session.NewJSONL(sessionDir)
+	if err != nil {
+		Logger.Error("cannot initialize session store", "error", err)
+		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
+		os.Exit(1)
+	}
+
+	sessionDefaults := session.CreateOptions{
+		Model:         cfg.DefaultModel,
+		Workspace:     workdir,
+		ModelMetadata: modelMetadata(cfg),
+	}
+
 	irt, err := runtime.New(runtime.Options{
 		Workspace:    workdir,
 		Provider:     llm.NewClient(),
@@ -183,7 +210,11 @@ func startTui(cmd *cobra.Command, args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := tui.Run(ctx, irisAgent); err != nil {
+	if err := tui.Run(ctx, tui.Options{
+		Agent:           irisAgent,
+		Sessions:        sessions,
+		SessionDefaults: sessionDefaults,
+	}); err != nil {
 		Logger.Error("TUI failed to start", "error", err)
 		// Exit uses os.Exit, which skips deferred cleanup.
 		if closeErr := irisAgent.Close(); closeErr != nil {
@@ -194,6 +225,41 @@ func startTui(cmd *cobra.Command, args []string) {
 		}
 		Exit()
 	}
+}
+
+func modelMetadata(cfg config.Config) map[string]string {
+	metadata := map[string]string{
+		"provider": "openai-compatible",
+		"base_url": cfg.BaseURL,
+	}
+
+	model := config.DefaultModel()
+	if model.CtxSize > 0 {
+		metadata["context_size"] = strconv.Itoa(model.CtxSize)
+	}
+	if model.Temperature != 0 {
+		metadata["temperature"] = strconv.FormatFloat(float64(model.Temperature), 'f', -1, 32)
+	}
+	if model.TopP != 0 {
+		metadata["top_p"] = strconv.FormatFloat(float64(model.TopP), 'f', -1, 32)
+	}
+	if model.TopK != 0 {
+		metadata["top_k"] = strconv.Itoa(model.TopK)
+	}
+	if model.MinP != 0 {
+		metadata["min_p"] = strconv.FormatFloat(float64(model.MinP), 'f', -1, 32)
+	}
+	if model.RepeatPenalty != 0 {
+		metadata["repeat_penalty"] = strconv.FormatFloat(float64(model.RepeatPenalty), 'f', -1, 32)
+	}
+	if model.PresencePenalty != 0 {
+		metadata["presence_penalty"] = strconv.FormatFloat(float64(model.PresencePenalty), 'f', -1, 32)
+	}
+	if model.FrequencyPenalty != 0 {
+		metadata["frequency_penalty"] = strconv.FormatFloat(float64(model.FrequencyPenalty), 'f', -1, 32)
+	}
+
+	return metadata
 }
 
 func runtimeSecurity(security config.SecuritySettings) runtime.Security {

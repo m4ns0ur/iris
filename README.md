@@ -231,6 +231,10 @@ temp_file_ttl_minutes = 1440
 # Optional external approval hook (argv, no shell). Exit 0 = allow.
 # approval_hook = ['/usr/local/bin/iris-approve']
 
+[session]
+# Empty uses ~/.iris/sessions.
+dir = ''
+
 [llm]
 # Deadline for one complete request, including retries and streaming.
 request_timeout_seconds = 1800
@@ -294,6 +298,8 @@ type Agent interface {
     SetApprover(Approver)
     Approver() Approver
     ApprovalTimeout() time.Duration
+    History() []provider.Message
+    LoadHistory(messages []provider.Message) error
 }
 
 type Event interface {
@@ -346,6 +352,7 @@ Stable public packages:
 - [`tool`](tool) — tool and registry interfaces.
 - [`runtime`](runtime) — constructor, runtime/security options, and the
   provider/tool composition root. Implementation details stay under `internal/`.
+- [`session`](session) — persistent session model and JSONL session manager.
 
 ```go
 rt, err := runtime.New(runtime.Options{
@@ -363,6 +370,46 @@ if err != nil {
     log.Fatal(err)
 }
 ```
+
+## Sessions
+
+Sessions are persisted as one JSONL file per conversation under
+`~/.iris/sessions` by default. Override the location with:
+
+```toml
+[session]
+dir = '/path/to/sessions'
+```
+
+The first JSONL record is session metadata (ID, timestamps, model,
+model-metadata, workspace, parent/fork information, aggregate token usage).
+Subsequent records are conversation entries with their own IDs and `parent_id`
+links:
+
+- user messages
+- assistant messages, including reasoning, tool calls, and per-turn usage
+- tool results, including the originating tool-call ID and tool name
+
+Message history is reconstructed from these entries when a session is resumed.
+System prompts are not persisted; the agent adds its current system prompt when
+history is loaded.
+
+### Commands
+
+| Command | Purpose |
+| --- | --- |
+| `/new` | Create a new session. |
+| `/resume [id]` | Resume the latest session or one matching an ID prefix. |
+| `/fork [n]` | Fork from the nth user message (1-based); omit `n` for the latest user message. |
+| `/export` | Export the current session as Markdown under the session directory. |
+| `/help` | List commands. |
+
+The session ID is shown when a session starts or is created, and in the export
+path. Forked sessions retain a `parent_session_id` and `forked_from_entry_id`,
+and copy the conversation entries through the selected user message.
+
+Resuming and forking restore conversation history and metadata; new turns use
+the provider and model configured for the current Iris launch.
 
 ## Making Custom Tools
 

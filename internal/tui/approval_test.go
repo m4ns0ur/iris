@@ -82,7 +82,10 @@ func TestSummarizeCommandCollapsesWhitespace(t *testing.T) {
 func newApprovalModel(t *testing.T) *model {
 	t.Helper()
 
-	m := initialModel(nil)
+	m, err := initialModel(Options{})
+	if err != nil {
+		t.Fatalf("initialModel() error = %v", err)
+	}
 	// Tests drive events directly; provide an approval channel so re-arm
 	// commands are observable.
 	m.approvals = make(chan approvalRequestMsg)

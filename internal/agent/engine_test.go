@@ -16,6 +16,7 @@ import (
 	publicagent "github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/policy"
+	"github.com/m4ns0ur/iris/provider"
 )
 
 const toolCallRead = `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"missing.txt\"}"}}]},"finish_reason":"tool_calls"}]}`
@@ -421,5 +422,66 @@ func TestAgentAllowsRerunAfterFinishedEvent(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("first Run() did not return")
+	}
+}
+
+func TestAgentLoadHistoryAndSnapshot(t *testing.T) {
+	pol, err := policy.New(t.TempDir(), policy.Options{})
+	if err != nil {
+		t.Fatalf("policy.New() error = %v", err)
+	}
+
+	fake := provider.ProviderFunc(func(
+		context.Context,
+		provider.Request,
+		func(provider.Delta),
+	) (provider.Response, error) {
+		return provider.Response{Content: "ok", FinishReason: "stop"}, nil
+	})
+
+	instance, err := NewAgent(fake, pol)
+	if err != nil {
+		t.Fatalf("NewAgent() error = %v", err)
+	}
+	defer instance.Close()
+
+	if got := instance.History(); len(got) != 0 {
+		t.Fatalf("initial history = %d, want 0", len(got))
+	}
+
+	messages := []provider.Message{
+		{Role: "user", Content: []provider.Content{{Type: "text", Text: "hi"}}},
+		{Role: "assistant", Content: "hello"},
+	}
+	if err := instance.LoadHistory(messages); err != nil {
+		t.Fatalf("LoadHistory() error = %v", err)
+	}
+
+	history := instance.History()
+	if len(history) != 3 {
+		t.Fatalf("history = %d, want 3 (system + 2)", len(history))
+	}
+	if history[0].Role != "system" || history[1].Role != "user" || history[2].Role != "assistant" {
+		t.Fatalf("history roles = %q, %q, %q", history[0].Role, history[1].Role, history[2].Role)
+	}
+
+	// History is a snapshot, not the internal slice.
+	history[1].Role = "mutated"
+	if got := instance.History()[1].Role; got != "user" {
+		t.Fatalf("history was mutated through snapshot: %q", got)
+	}
+
+	if err := instance.LoadHistory(nil); err != nil {
+		t.Fatalf("LoadHistory(nil) error = %v", err)
+	}
+	if got := instance.History(); len(got) != 0 {
+		t.Fatalf("cleared history = %d, want 0", len(got))
+	}
+
+	if err := instance.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := instance.LoadHistory(messages); !errors.Is(err, ErrAgentClosed) {
+		t.Fatalf("LoadHistory() after Close error = %v, want ErrAgentClosed", err)
 	}
 }

@@ -67,6 +67,10 @@ type Agent struct {
 	subMu       sync.RWMutex
 	subscribers []func(publicagent.Event)
 
+	// historyMu guards conversation history. It is separate from mu so readers
+	// can snapshot a run in progress without touching the lifecycle lock.
+	historyMu sync.RWMutex
+
 	provider         provider.Provider
 	model            string
 	state            string
@@ -196,13 +200,75 @@ func (a *Agent) Approver() publicagent.Approver {
 	}
 }
 
-// Cancel stops the current run, if any.
+// History returns a snapshot of the current conversation history.
+func (a *Agent) History() []provider.Message {
+	a.historyMu.RLock()
+	defer a.historyMu.RUnlock()
+
+	return cloneMessages(a.history)
+}
+
+// LoadHistory replaces the conversation while the agent is idle.
+func (a *Agent) LoadHistory(messages []provider.Message) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.closed {
+		return ErrAgentClosed
+	}
+	if a.running {
+		return ErrAgentBusy
+	}
+
+	history := cloneMessages(messages)
+	if len(history) > 0 && history[0].Role != "system" {
+		history = append([]provider.Message{{
+			Role:    "system",
+			Content: prompt.BuildSystemPrompt(a.toolContext),
+		}}, history...)
+	}
+
+	a.historyMu.Lock()
+	a.history = history
+	a.historyMu.Unlock()
+
+	a.step = 0
+	a.toolCalls = 0
+	a.state = "idle"
+	a.pendingToolCalls = nil
+
+	return nil
+}
+
+func cloneMessages(messages []provider.Message) []provider.Message {
+	cloned := make([]provider.Message, len(messages))
+	copy(cloned, messages)
+
+	for i := range cloned {
+		if len(cloned[i].ToolCalls) > 0 {
+			cloned[i].ToolCalls = append([]provider.ToolCall(nil), cloned[i].ToolCalls...)
+		}
+		if content, ok := cloned[i].Content.([]provider.Content); ok {
+			cloned[i].Content = append([]provider.Content(nil), content...)
+		}
+	}
+
+	return cloned
+}
+
+func (a *Agent) appendHistory(message provider.Message) {
+	a.historyMu.Lock()
+	a.history = append(a.history, message)
+	a.historyMu.Unlock()
+}
+
 // ApprovalTimeout reports the shell approval deadline configured on the
 // security policy.
 func (a *Agent) ApprovalTimeout() time.Duration {
 	return a.policy.ShellOptions().ApprovalTimeout
 }
 
+// Cancel stops the current run, if any.
 func (a *Agent) Cancel() {
 	a.mu.Lock()
 	cancel := a.runCancel
@@ -309,6 +375,7 @@ func (a *Agent) Run(ctx context.Context, input string) (runErr error) {
 	}()
 	defer a.finishRun()
 
+	a.historyMu.Lock()
 	if len(a.history) == 0 {
 		a.history = append(a.history, provider.Message{
 			Role:    "system",
@@ -319,6 +386,7 @@ func (a *Agent) Run(ctx context.Context, input string) (runErr error) {
 		Role:    "user",
 		Content: []provider.Content{{Type: "text", Text: input}},
 	})
+	a.historyMu.Unlock()
 
 	a.emit(publicagent.AgentStarted{At: time.Now(), Input: input})
 
@@ -507,7 +575,7 @@ func (a *Agent) appendToolResult(call PendingToolCall, content string) {
 		"result", content,
 	)
 
-	a.history = append(a.history, provider.Message{
+	a.appendHistory(provider.Message{
 		Role:       "tool",
 		Content:    content,
 		ToolCallID: call.ID,
@@ -516,7 +584,9 @@ func (a *Agent) appendToolResult(call PendingToolCall, content string) {
 
 func (a *Agent) next(ctx context.Context) error {
 	Logger.Info("Generating next response from LLM")
-	Logger.Debug("Next response", "historyLength", len(a.history))
+
+	history := a.History()
+	Logger.Debug("Next response", "historyLength", len(history))
 
 	progress := make(map[int]struct {
 		id   string
@@ -527,7 +597,7 @@ func (a *Agent) next(ctx context.Context) error {
 		ctx,
 		provider.Request{
 			Model:    a.model,
-			Messages: a.history,
+			Messages: history,
 			Tools:    a.toolContext.Registry.Specs(),
 		},
 		func(delta provider.Delta) {
@@ -613,14 +683,14 @@ func (a *Agent) next(ctx context.Context) error {
 		}
 
 		Logger.Debug("Message added to history", "message", msg)
-		a.history = append(a.history, msg)
+		a.appendHistory(msg)
 		a.state = "tool"
 		return nil
 	}
 
 	if response.Content != "" {
 		Logger.Debug("Message added to history", "message", msg)
-		a.history = append(a.history, msg)
+		a.appendHistory(msg)
 	}
 
 	a.state = "done"
