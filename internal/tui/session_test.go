@@ -272,3 +272,57 @@ func TestSessionPersistsToolCallsAndUsage(t *testing.T) {
 		t.Fatalf("restored history = %+v", history)
 	}
 }
+
+func TestContextCompactionNotice(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	m.state = StateStreaming
+
+	updated, _ := m.Update(agentEventMsg{event: agent.ContextCompactionStarted{
+		At:           time.Now(),
+		Window:       4096,
+		BeforeTokens: 3600,
+		Forced:       true,
+	}})
+	m = updated.(*model)
+	if !m.compacting {
+		t.Fatal("compaction status was not set")
+	}
+	if !strings.Contains(m.spinnerBar(), "Compacting context") {
+		t.Fatalf("spinner bar = %q, want compaction status", m.spinnerBar())
+	}
+
+	updated, _ = m.Update(agentEventMsg{event: agent.ContextCompactionFinished{
+		At:                      time.Now(),
+		Window:                  4096,
+		BeforeTokens:            3600,
+		AfterTokens:             1200,
+		SummarizedMessages:      24,
+		TrimmedToolResults:      2,
+		SummaryPromptTokens:     100,
+		SummaryCompletionTokens: 30,
+		SummaryFallback:         true,
+		Forced:                  true,
+	}})
+	m = updated.(*model)
+	if m.compacting {
+		t.Fatal("compaction status was not cleared")
+	}
+
+	found := false
+	for _, message := range m.messages {
+		if strings.Contains(message.content, "Context compacted") {
+			found = true
+			for _, want := range []string{"24 messages summarized", "2 tool results trimmed", "forced after context error", "fallback summary"} {
+				if !strings.Contains(message.content, want) {
+					t.Fatalf("notice missing %q: %q", want, message.content)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("compaction notice not found in %+v", m.messages)
+	}
+	if m.currentSession.Usage.TotalTokens != 130 {
+		t.Fatalf("session summary usage = %+v, want 130", m.currentSession.Usage)
+	}
+}

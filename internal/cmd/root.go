@@ -13,6 +13,7 @@ import (
 
 	"github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/internal/config"
+	"github.com/m4ns0ur/iris/internal/contextmgr"
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/internal/tui"
@@ -86,6 +87,11 @@ func initConfig() {
 	viper.SetDefault("agent.max_tool_calls", agent.DefaultMaxToolCalls)
 	viper.SetDefault("agent.tool_timeout_seconds", int(agent.DefaultToolTimeout.Seconds()))
 	viper.SetDefault("session.dir", "")
+	viper.SetDefault("context.window", 0)
+	viper.SetDefault("context.reserve_tokens", contextmgr.DefaultReserveTokens)
+	viper.SetDefault("context.compact_at", contextmgr.DefaultCompactAt)
+	viper.SetDefault("context.keep_recent_tokens", contextmgr.DefaultKeepRecentTokens)
+	viper.SetDefault("context.summary_max_tokens", contextmgr.DefaultSummaryMaxTokens)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
@@ -164,20 +170,34 @@ func startTui(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
+	modelSettings := config.DefaultModel()
+	contextWindow := modelSettings.CtxSize
+	if cfg.Context.Window > 0 {
+		contextWindow = cfg.Context.Window
+	}
+	if contextWindow <= 0 {
+		contextWindow = contextmgr.DefaultWindow
+	}
+
 	sessionDefaults := session.CreateOptions{
 		Model:         cfg.DefaultModel,
 		Workspace:     workdir,
-		ModelMetadata: modelMetadata(cfg),
+		ModelMetadata: modelMetadata(cfg, contextWindow),
 	}
 
 	irt, err := runtime.New(runtime.Options{
-		Workspace:    workdir,
-		Provider:     llm.NewClient(),
-		Model:        cfg.DefaultModel,
-		MaxTurns:     cfg.Agent.MaxTurns,
-		MaxToolCalls: cfg.Agent.MaxToolCalls,
-		ToolTimeout:  cfg.Agent.ToolTimeout(),
-		Security:     runtimeSecurity(cfg.Security),
+		Workspace:        workdir,
+		Provider:         llm.NewClient(),
+		Model:            cfg.DefaultModel,
+		MaxTurns:         cfg.Agent.MaxTurns,
+		MaxToolCalls:     cfg.Agent.MaxToolCalls,
+		ToolTimeout:      cfg.Agent.ToolTimeout(),
+		ContextWindow:    contextWindow,
+		ReserveTokens:    cfg.Context.ReserveTokens,
+		CompactAt:        cfg.Context.CompactAt,
+		KeepRecentTokens: cfg.Context.KeepRecentTokens,
+		SummaryMaxTokens: cfg.Context.SummaryMaxTokens,
+		Security:         runtimeSecurity(cfg.Security),
 	})
 	if err != nil {
 		Logger.Error("invalid runtime configuration", "error", err)
@@ -227,7 +247,7 @@ func startTui(cmd *cobra.Command, args []string) {
 	}
 }
 
-func modelMetadata(cfg config.Config) map[string]string {
+func modelMetadata(cfg config.Config, contextWindow int) map[string]string {
 	metadata := map[string]string{
 		"provider": "openai-compatible",
 		"base_url": cfg.BaseURL,
@@ -236,6 +256,12 @@ func modelMetadata(cfg config.Config) map[string]string {
 	model := config.DefaultModel()
 	if model.CtxSize > 0 {
 		metadata["context_size"] = strconv.Itoa(model.CtxSize)
+	}
+	if contextWindow > 0 {
+		metadata["context_window"] = strconv.Itoa(contextWindow)
+	}
+	if cfg.Context.ReserveTokens > 0 {
+		metadata["reserve_tokens"] = strconv.Itoa(cfg.Context.ReserveTokens)
 	}
 	if model.Temperature != 0 {
 		metadata["temperature"] = strconv.FormatFloat(float64(model.Temperature), 'f', -1, 32)

@@ -106,6 +106,7 @@ type model struct {
 	approvalTimeout  time.Duration
 	canceling        bool
 	agentErrored     bool
+	compacting       bool
 	totalTokens      int
 	lifecycle        *lifecycle
 	sessions         session.Manager
@@ -318,6 +319,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.previewCommand = ""
 				m.canceling = false
 				m.agentErrored = false
+				m.compacting = false
 				m.totalTokens = 0
 				m.state = StateStreaming
 				m.resizeLayout()
@@ -432,6 +434,8 @@ func (m *model) spinnerBar() string {
 		switch {
 		case m.canceling:
 			color, label = ColorRedSoft, " canceling..."
+		case m.compacting:
+			color, label = ColorYellow, " Compacting context..."
 		case m.fullReason.Len() > 0 && m.fullResponse.Len() == 0:
 			color, label = ColorYellow, " Iris reasoning..."
 		case m.toolName != "" && m.fullResponse.Len() == 0:
@@ -502,6 +506,9 @@ func (m *model) statusLine() string {
 	}
 	if m.canceling {
 		help = style.Render("canceling… · ctrl+c: quit")
+	}
+	if m.compacting && !m.canceling {
+		help = style.Render("compacting context… · ctrl+c: cancel")
 	}
 	if m.pendingApproval != nil {
 		help = style.Render("y: allow once · n: deny · ctrl+c: cancel")
@@ -711,6 +718,46 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 			TotalTokens:      e.TotalTokens,
 		})
 
+	case agent.ContextCompactionStarted:
+		m.compacting = true
+
+	case agent.ContextCompactionFinished:
+		m.compacting = false
+		text := fmt.Sprintf(
+			"Context compacted: %d → %d estimated tokens",
+			e.BeforeTokens,
+			e.AfterTokens,
+		)
+		if e.SummarizedMessages > 0 {
+			text += fmt.Sprintf(" · %d messages summarized", e.SummarizedMessages)
+		}
+		if e.TrimmedToolResults > 0 {
+			text += fmt.Sprintf(" · %d tool results trimmed", e.TrimmedToolResults)
+		}
+		if e.Forced {
+			text += " · forced after context error"
+		}
+		if e.SummaryFallback {
+			text += " · fallback summary"
+		}
+		text += "."
+		if e.SummarizedMessages == 0 && e.TrimmedToolResults == 0 {
+			text = "Context compaction finished without changes."
+		}
+		m.notice(text)
+
+		// Compaction summaries are real provider calls; include their usage in
+		// the session aggregate even though they do not map to an assistant
+		// entry in the conversation.
+		if m.currentSession != nil {
+			m.currentSession.Usage.PromptTokens += e.SummaryPromptTokens
+			m.currentSession.Usage.CompletionTokens += e.SummaryCompletionTokens
+			m.currentSession.Usage.TotalTokens += e.SummaryPromptTokens + e.SummaryCompletionTokens
+			if e.SummaryPromptTokens > 0 || e.SummaryCompletionTokens > 0 {
+				m.sessionDirty = true
+			}
+		}
+
 	case agent.AgentError:
 		m.flushPartialStream()
 		m.messages = append(m.messages, message{role: "error", content: e.Message})
@@ -734,6 +781,7 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 		}
 
 		m.canceling = false
+		m.compacting = false
 		m.state = StateInput
 		m.persistSession()
 	}

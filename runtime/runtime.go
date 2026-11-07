@@ -76,6 +76,24 @@ type Options struct {
 	// default.
 	ToolTimeout time.Duration
 
+	// ContextWindow is the model context window. Zero uses the context
+	// manager default.
+	ContextWindow int
+
+	// ReserveTokens is reserved for the next assistant response. Zero uses
+	// the context manager default.
+	ReserveTokens int
+
+	// CompactAt is the fraction of the prompt budget that triggers
+	// compaction. Zero uses the context manager default.
+	CompactAt float64
+
+	// KeepRecentTokens is the amount of recent history kept verbatim.
+	KeepRecentTokens int
+
+	// SummaryMaxTokens bounds generated conversation summaries.
+	SummaryMaxTokens int
+
 	// Security configures the execution boundary. Zero values use secure
 	// defaults.
 	Security Security
@@ -101,16 +119,21 @@ type Runtime interface {
 }
 
 type runtimeImpl struct {
-	workspace    string
-	provider     provider.Provider
-	model        string
-	tools        []tool.Tool
-	maxTurns     int
-	maxToolCalls int
-	toolTimeout  time.Duration
-	approver     agent.Approver
-	policyOpts   policy.Options
-	warnings     []string
+	workspace     string
+	provider      provider.Provider
+	model         string
+	tools         []tool.Tool
+	maxTurns      int
+	maxToolCalls  int
+	toolTimeout   time.Duration
+	contextWindow int
+	reserveTokens int
+	compactAt     float64
+	keepRecent    int
+	summaryMax    int
+	approver      agent.Approver
+	policyOpts    policy.Options
+	warnings      []string
 
 	mu     sync.Mutex
 	closed bool
@@ -142,16 +165,21 @@ func New(options Options) (Runtime, error) {
 	}
 
 	return &runtimeImpl{
-		workspace:    workspace,
-		provider:     options.Provider,
-		model:        options.Model,
-		tools:        append([]tool.Tool(nil), options.Tools...),
-		maxTurns:     options.MaxTurns,
-		maxToolCalls: options.MaxToolCalls,
-		toolTimeout:  options.ToolTimeout,
-		approver:     options.Approver,
-		policyOpts:   policyOpts,
-		warnings:     probe.Warnings(),
+		workspace:     workspace,
+		provider:      options.Provider,
+		model:         options.Model,
+		tools:         append([]tool.Tool(nil), options.Tools...),
+		maxTurns:      options.MaxTurns,
+		maxToolCalls:  options.MaxToolCalls,
+		toolTimeout:   options.ToolTimeout,
+		contextWindow: options.ContextWindow,
+		reserveTokens: options.ReserveTokens,
+		compactAt:     options.CompactAt,
+		keepRecent:    options.KeepRecentTokens,
+		summaryMax:    options.SummaryMaxTokens,
+		approver:      options.Approver,
+		policyOpts:    policyOpts,
+		warnings:      probe.Warnings(),
 	}, nil
 }
 
@@ -169,11 +197,16 @@ func (r *runtimeImpl) NewAgent() (agent.Agent, error) {
 	}
 
 	instance, err := internalagent.NewAgent(r.provider, pol, internalagent.Options{
-		Model:        r.model,
-		MaxTurns:     r.maxTurns,
-		MaxToolCalls: r.maxToolCalls,
-		ToolTimeout:  r.toolTimeout,
-		Tools:        r.tools,
+		Model:            r.model,
+		MaxTurns:         r.maxTurns,
+		MaxToolCalls:     r.maxToolCalls,
+		ToolTimeout:      r.toolTimeout,
+		Tools:            r.tools,
+		ContextWindow:    r.contextWindow,
+		ReserveTokens:    r.reserveTokens,
+		CompactAt:        r.compactAt,
+		KeepRecentTokens: r.keepRecent,
+		SummaryMaxTokens: r.summaryMax,
 	})
 	if err != nil {
 		return nil, err

@@ -19,6 +19,7 @@ type Config struct {
 	LLM          LLMSettings      `mapstructure:"llm"`
 	Agent        AgentSettings    `mapstructure:"agent"`
 	Session      SessionSettings  `mapstructure:"session"`
+	Context      ContextSettings  `mapstructure:"context"`
 }
 
 // ModelSettings represents one [models.'<name>'] block
@@ -67,6 +68,24 @@ func (s AgentSettings) ToolTimeout() time.Duration {
 		return 0
 	}
 	return time.Duration(s.ToolTimeoutSeconds) * time.Second
+}
+
+// ContextSettings controls prompt construction and compaction.
+type ContextSettings struct {
+	// Window overrides the model context_size. Zero uses the model setting.
+	Window int `mapstructure:"window"`
+
+	// ReserveTokens is reserved for the next assistant response.
+	ReserveTokens int `mapstructure:"reserve_tokens"`
+
+	// CompactAt is the fraction of the prompt budget that triggers compaction.
+	CompactAt float64 `mapstructure:"compact_at"`
+
+	// KeepRecentTokens is kept verbatim during compaction.
+	KeepRecentTokens int `mapstructure:"keep_recent_tokens"`
+
+	// SummaryMaxTokens bounds generated summaries.
+	SummaryMaxTokens int `mapstructure:"summary_max_tokens"`
 }
 
 // SessionSettings controls persistent session storage.

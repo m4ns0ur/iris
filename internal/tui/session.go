@@ -224,6 +224,7 @@ func (m *model) resetStreamingUI() {
 	m.previewCommand = ""
 	m.canceling = false
 	m.agentErrored = false
+	m.compacting = false
 }
 
 func (m *model) notice(text string) {
@@ -237,6 +238,8 @@ func (m *model) persistSession() {
 		return
 	}
 
+	// History is the canonical, uncompressed conversation. Context compaction
+	// only changes the provider view, so sessions retain the original messages.
 	history := m.agent.History()
 	if m.sessionPersisted > len(history) {
 		m.sessionPersisted = 0

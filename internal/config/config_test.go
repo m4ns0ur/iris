@@ -44,6 +44,13 @@ tool_timeout_seconds = 13
 
 [session]
 dir = "/tmp/iris-sessions"
+
+[context]
+window = 6000
+reserve_tokens = 512
+compact_at = 0.75
+keep_recent_tokens = 2048
+summary_max_tokens = 256
 `)); err != nil {
 		t.Fatalf("ReadConfig() error = %v", err)
 	}
@@ -91,6 +98,11 @@ dir = "/tmp/iris-sessions"
 	}
 	if cfg.Session.Dir != "/tmp/iris-sessions" {
 		t.Fatalf("session dir = %q, want /tmp/iris-sessions", cfg.Session.Dir)
+	}
+	if cfg.Context.Window != 6000 || cfg.Context.ReserveTokens != 512 ||
+		cfg.Context.CompactAt != 0.75 || cfg.Context.KeepRecentTokens != 2048 ||
+		cfg.Context.SummaryMaxTokens != 256 {
+		t.Fatalf("context settings = %+v", cfg.Context)
 	}
 }
 

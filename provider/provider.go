@@ -2,7 +2,49 @@
 // runtime and LLM backends.
 package provider
 
-import "context"
+import (
+	"context"
+	"errors"
+	"strings"
+)
+
+// ErrContextWindow marks provider errors caused by exceeding the model's
+// context window. Providers should wrap it when they can classify the error.
+var ErrContextWindow = errors.New("context window exceeded")
+
+// IsContextWindowError reports whether err looks like a context-window
+// overflow. It checks the sentinel first, then common provider error text.
+func IsContextWindowError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrContextWindow) {
+		return true
+	}
+
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"context_length_exceeded",
+		"context length",
+		"context window",
+		"context size",
+		"maximum context",
+		"max context",
+		"maximum number of tokens",
+		"too many tokens",
+		"token limit",
+		"prompt is too long",
+		"input is too long",
+		"reduce the length",
+		"requested tokens exceed",
+		"exceeds the model",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 // Message is one conversation message.
 type Message struct {

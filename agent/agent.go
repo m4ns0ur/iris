@@ -107,8 +107,13 @@ const (
 	EventToolCompleted EventType = "tool.completed"
 	EventToolFailed    EventType = "tool.failed"
 
-	EventUsage      EventType = "usage"
-	EventAgentError EventType = "agent.error"
+	EventUsage                     EventType = "usage"
+	EventContextCompactionStarted  EventType = "context.compaction.started"
+	EventContextCompactionFinished EventType = "context.compaction.finished"
+	EventAgentError                EventType = "agent.error"
+
+	// Deprecated: use EventContextCompactionFinished.
+	EventContextCompacted = EventContextCompactionFinished
 )
 
 // Event is implemented by every typed agent event.
@@ -127,6 +132,8 @@ var (
 	_ Event = ToolCompleted{}
 	_ Event = ToolFailed{}
 	_ Event = Usage{}
+	_ Event = ContextCompactionStarted{}
+	_ Event = ContextCompactionFinished{}
 	_ Event = AgentError{}
 )
 
@@ -227,6 +234,38 @@ type Usage struct {
 }
 
 func (Usage) Type() EventType { return EventUsage }
+
+// ContextCompactionStarted is emitted before Iris begins summarizing or
+// trimming history. Consumers can show a compaction-in-progress status.
+type ContextCompactionStarted struct {
+	At           time.Time `json:"at"`
+	Window       int       `json:"window"`
+	BeforeTokens int       `json:"before_tokens"`
+	Forced       bool      `json:"forced,omitempty"`
+}
+
+func (ContextCompactionStarted) Type() EventType { return EventContextCompactionStarted }
+
+// ContextCompactionFinished reports that a compaction pass ended. The counters
+// are zero when a pass was started but made no changes (for example because it
+// failed before summarizing).
+type ContextCompactionFinished struct {
+	At                      time.Time `json:"at"`
+	Window                  int       `json:"window"`
+	BeforeTokens            int       `json:"before_tokens"`
+	AfterTokens             int       `json:"after_tokens"`
+	SummarizedMessages      int       `json:"summarized_messages"`
+	TrimmedToolResults      int       `json:"trimmed_tool_results"`
+	SummaryPromptTokens     int       `json:"summary_prompt_tokens"`
+	SummaryCompletionTokens int       `json:"summary_completion_tokens"`
+	SummaryFallback         bool      `json:"summary_fallback,omitempty"`
+	Forced                  bool      `json:"forced,omitempty"`
+}
+
+func (ContextCompactionFinished) Type() EventType { return EventContextCompactionFinished }
+
+// Deprecated: use ContextCompactionFinished.
+type ContextCompacted = ContextCompactionFinished
 
 // AgentError is emitted for a run-level error. Tool failures are reported with
 // ToolFailed instead.

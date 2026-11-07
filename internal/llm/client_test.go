@@ -225,3 +225,19 @@ func TestGenerateStreamPreCancelledContext(t *testing.T) {
 		t.Fatalf("Generate() error = %v, want context.Canceled", err)
 	}
 }
+
+func TestGenerateWrapsContextWindowClientError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "maximum context length exceeded", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := newTestClient(server)
+	_, err := client.Generate(context.Background(), provider.Request{}, nil)
+	if !errors.Is(err, provider.ErrContextWindow) {
+		t.Fatalf("Generate() error = %v, want provider.ErrContextWindow", err)
+	}
+	if !provider.IsContextWindowError(err) {
+		t.Fatalf("IsContextWindowError(%v) = false", err)
+	}
+}

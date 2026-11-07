@@ -235,6 +235,18 @@ temp_file_ttl_minutes = 1440
 # Empty uses ~/.iris/sessions.
 dir = ''
 
+[context]
+# Zero uses the selected model's context_size.
+window = 0
+# Reserved for the next assistant response and used as the request output cap.
+reserve_tokens = 8192
+# Compact when prompt tokens reach this fraction of (window - reserve_tokens).
+compact_at = 0.85
+# Recent conversation kept verbatim during compaction.
+keep_recent_tokens = 16384
+# Output budget for generated summaries.
+summary_max_tokens = 2048
+
 [llm]
 # Deadline for one complete request, including retries and streaming.
 request_timeout_seconds = 1800
@@ -319,6 +331,8 @@ type Event interface {
 | `tool.completed` | A tool finished successfully. |
 | `tool.failed` | A tool failed, timed out, or was skipped. |
 | `usage` | Token accounting for an LLM call. |
+| `context.compaction.started` | Iris began summarizing or trimming older context. |
+| `context.compaction.finished` | The compaction pass ended, with before/after estimates and counts. |
 | `agent.error` | A run-level error. |
 
 ```go
@@ -410,6 +424,48 @@ and copy the conversation entries through the selected user message.
 
 Resuming and forking restore conversation history and metadata; new turns use
 the provider and model configured for the current Iris launch.
+
+## Context Management
+
+Iris builds a prompt view for each model call instead of mutating the canonical
+conversation. The full, uncompressed conversation remains in the agent history
+and therefore in the persistent session. Compaction only affects what is sent
+to the model for that request.
+
+The effective context window is selected in this order:
+
+1. `context.window`
+2. the selected model's `context_size`
+3. a conservative default of 32768 tokens
+
+`context.reserve_tokens` is subtracted from the window to form the prompt
+budget. It is also sent as the request's `max_tokens`, so the next assistant
+response cannot consume the space needed by the prompt.
+
+Before each call, the context manager:
+
+- estimates prompt tokens from message text, tool calls, and tool schemas;
+- calibrates the estimate with the provider's reported prompt-token usage;
+- triggers compaction when the prompt reaches `compact_at` of the prompt budget;
+- preserves leading system messages, including any project instructions;
+- keeps a recent conversation tail (`keep_recent_tokens`) verbatim;
+- summarizes older turns with the same provider, instructing the summarizer to
+  preserve user constraints, decisions, file paths, commands, errors, and
+  important tool outcomes;
+- uses a deterministic fallback summary if summarization fails;
+- trims the largest recent tool results if the current turn alone is still too
+  large.
+
+If the provider rejects a prompt as exceeding its context window, Iris forces
+an aggressive compaction and retries once. Provider implementations should wrap
+`provider.ErrContextWindow` when they can classify this error; Iris also
+recognizes common provider error text.
+
+Compaction is observable through `context.compaction.started` and
+`context.compaction.finished`. The TUI shows a live “Compacting context...”
+status while the pass runs and a notice with before/after estimates when it
+finishes. Session files still contain the full original conversation, so
+resuming a session never loses the uncompressed history.
 
 ## Making Custom Tools
 

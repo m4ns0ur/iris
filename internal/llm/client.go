@@ -253,6 +253,10 @@ func (c *LLMClient) Generate(
 			statusErr.Status != http.StatusTooManyRequests {
 			// Client errors are not transient; retrying cannot help.
 			Logger.Error("LLM request rejected", "status", statusErr.Status)
+			if statusErr.Status == http.StatusRequestEntityTooLarge ||
+				provider.IsContextWindowError(statusErr) {
+				return provider.Response{}, fmt.Errorf("%w: %w", provider.ErrContextWindow, err)
+			}
 			return provider.Response{}, err
 		}
 
