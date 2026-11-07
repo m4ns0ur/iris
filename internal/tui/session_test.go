@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/provider"
+	"github.com/m4ns0ur/iris/resource"
 	"github.com/m4ns0ur/iris/session"
 )
 
@@ -325,4 +326,56 @@ func TestContextCompactionNotice(t *testing.T) {
 	if m.currentSession.Usage.TotalTokens != 130 {
 		t.Fatalf("session summary usage = %+v, want 130", m.currentSession.Usage)
 	}
+}
+
+func TestSkillAndPromptCommands(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	m.resources = &resource.Resources{
+		Skills: []resource.Skill{{
+			Name:        "coding",
+			Description: "coding conventions",
+			Scope:       resource.ScopeProject,
+			Content:     "Use tabs and keep functions small.",
+		}},
+		Prompts: []resource.PromptTemplate{{
+			Name:        "review",
+			Description: "review a change",
+			Scope:       resource.ScopeProject,
+			Content:     "Review this change: {{input}}",
+		}},
+	}
+
+	updated, _ := m.handleCommand("/skills")
+	m = updated.(*model)
+	if !containsNotice(m, "coding - coding conventions (project)") {
+		t.Fatalf("skill listing missing: %+v", m.messages)
+	}
+
+	updated, _ = m.handleCommand("/skill coding")
+	m = updated.(*model)
+	if !strings.Contains(m.inputText.Value(), "Use tabs and keep functions small.") {
+		t.Fatalf("skill not inserted: %q", m.inputText.Value())
+	}
+
+	m.inputText.Reset()
+	updated, _ = m.handleCommand("/prompt review focus on errors")
+	m = updated.(*model)
+	if got := m.inputText.Value(); got != "Review this change: focus on errors" {
+		t.Fatalf("prompt render = %q", got)
+	}
+
+	updated, _ = m.handleCommand("/skill missing")
+	m = updated.(*model)
+	if !containsNotice(m, "Unknown skill missing") {
+		t.Fatalf("missing skill notice not found: %+v", m.messages)
+	}
+}
+
+func containsNotice(m *model, text string) bool {
+	for _, message := range m.messages {
+		if message.role == "notice" && strings.Contains(message.content, text) {
+			return true
+		}
+	}
+	return false
 }

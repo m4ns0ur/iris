@@ -14,6 +14,7 @@ import (
 	internalagent "github.com/m4ns0ur/iris/internal/agent"
 	"github.com/m4ns0ur/iris/internal/policy"
 	"github.com/m4ns0ur/iris/provider"
+	"github.com/m4ns0ur/iris/resource"
 	"github.com/m4ns0ur/iris/tool"
 )
 
@@ -94,6 +95,9 @@ type Options struct {
 	// SummaryMaxTokens bounds generated conversation summaries.
 	SummaryMaxTokens int
 
+	// Resources supplies SYSTEM.md, AGENTS.md, skills, and prompt templates.
+	Resources *resource.Resources
+
 	// Security configures the execution boundary. Zero values use secure
 	// defaults.
 	Security Security
@@ -131,6 +135,7 @@ type runtimeImpl struct {
 	compactAt     float64
 	keepRecent    int
 	summaryMax    int
+	resources     *resource.Resources
 	approver      agent.Approver
 	policyOpts    policy.Options
 	warnings      []string
@@ -177,6 +182,7 @@ func New(options Options) (Runtime, error) {
 		compactAt:     options.CompactAt,
 		keepRecent:    options.KeepRecentTokens,
 		summaryMax:    options.SummaryMaxTokens,
+		resources:     options.Resources,
 		approver:      options.Approver,
 		policyOpts:    policyOpts,
 		warnings:      probe.Warnings(),
@@ -207,6 +213,7 @@ func (r *runtimeImpl) NewAgent() (agent.Agent, error) {
 		CompactAt:        r.compactAt,
 		KeepRecentTokens: r.keepRecent,
 		SummaryMaxTokens: r.summaryMax,
+		Resources:        r.resources,
 	})
 	if err != nil {
 		return nil, err

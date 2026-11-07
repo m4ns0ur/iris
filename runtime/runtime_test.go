@@ -3,10 +3,12 @@ package runtime
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/provider"
+	"github.com/m4ns0ur/iris/resource"
 )
 
 func TestRuntimeCreatesAgentAndEmitsEvents(t *testing.T) {
@@ -96,5 +98,51 @@ func TestRuntimeAgentIsClosedWithRuntime(t *testing.T) {
 
 	if err := instance.Run(context.Background(), "after close"); !errors.Is(err, agent.ErrAgentClosed) {
 		t.Fatalf("Run() after runtime Close error = %v, want ErrAgentClosed", err)
+	}
+}
+
+func TestRuntimePassesResourcesToAgent(t *testing.T) {
+	var systemPrompt string
+	fake := provider.ProviderFunc(func(
+		_ context.Context,
+		request provider.Request,
+		_ func(provider.Delta),
+	) (provider.Response, error) {
+		if len(request.Messages) > 0 {
+			switch content := request.Messages[0].Content.(type) {
+			case string:
+				systemPrompt = content
+			case []provider.Content:
+				for _, part := range content {
+					systemPrompt += part.Text
+				}
+			}
+		}
+		return provider.Response{Content: "ok", FinishReason: "stop"}, nil
+	})
+
+	rt, err := New(Options{
+		Workspace: t.TempDir(),
+		Provider:  fake,
+		Resources: &resource.Resources{
+			SystemPrompt: "RUNTIME_CUSTOM_SYSTEM",
+			Instructions: []resource.Instruction{{Scope: resource.ScopeProject, Content: "RUNTIME_AGENTS"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer rt.Close()
+
+	instance, err := rt.NewAgent()
+	if err != nil {
+		t.Fatalf("NewAgent() error = %v", err)
+	}
+	if err := instance.Run(context.Background(), "hi"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !strings.Contains(systemPrompt, "RUNTIME_CUSTOM_SYSTEM") ||
+		!strings.Contains(systemPrompt, "RUNTIME_AGENTS") {
+		t.Fatalf("system prompt missing resources:\n%s", systemPrompt)
 	}
 }

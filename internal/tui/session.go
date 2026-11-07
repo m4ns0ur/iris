@@ -36,8 +36,28 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.commandFork(index)
 	case "/export":
 		m.commandExport()
+	case "/skills":
+		m.commandSkills()
+	case "/skill":
+		name := ""
+		if len(fields) > 1 {
+			name = fields[1]
+		}
+		m.commandSkill(name)
+	case "/prompts":
+		m.commandPrompts()
+	case "/prompt":
+		name := ""
+		args := ""
+		if len(fields) > 1 {
+			name = fields[1]
+		}
+		if len(fields) > 2 {
+			args = strings.Join(fields[2:], " ")
+		}
+		m.commandPrompt(name, args)
 	case "/help", "/?":
-		m.notice("Commands: /new, /resume [id], /fork [n], /export")
+		m.notice("Commands: /new, /resume [id], /fork [n], /export, /skills, /skill <name>, /prompts, /prompt <name> [input]")
 	default:
 		m.notice("Unknown command " + command + ". Try /help.")
 	}
@@ -339,4 +359,84 @@ func messageText(content any) string {
 	default:
 		return fmt.Sprint(value)
 	}
+}
+
+func (m *model) commandSkills() {
+	if m.resources == nil || len(m.resources.Skills) == 0 {
+		m.notice("No skills loaded.")
+		return
+	}
+
+	lines := make([]string, 0, len(m.resources.Skills))
+	for _, skill := range m.resources.Skills {
+		line := skill.Name
+		if skill.Description != "" {
+			line += " - " + skill.Description
+		}
+		line += " (" + string(skill.Scope) + ")"
+		lines = append(lines, line)
+	}
+	m.notice("Skills:\n" + strings.Join(lines, "\n"))
+}
+
+func (m *model) commandSkill(name string) {
+	if name == "" {
+		m.notice("Usage: /skill <name>")
+		return
+	}
+	if m.resources == nil {
+		m.notice("No skills loaded.")
+		return
+	}
+
+	skill, ok := m.resources.Skill(name)
+	if !ok {
+		m.notice("Unknown skill " + name + ". Try /skills.")
+		return
+	}
+
+	m.inputText.SetValue("[Skill: " + skill.Name + "]\n" + skill.Content + "\n\n")
+	m.inputText.CursorEnd()
+	m.inputText.Focus()
+	m.notice("Loaded skill " + skill.Name + " into the prompt. Add your request and press Enter.")
+}
+
+func (m *model) commandPrompts() {
+	if m.resources == nil || len(m.resources.Prompts) == 0 {
+		m.notice("No prompt templates loaded.")
+		return
+	}
+
+	lines := make([]string, 0, len(m.resources.Prompts))
+	for _, prompt := range m.resources.Prompts {
+		line := prompt.Name
+		if prompt.Description != "" {
+			line += " - " + prompt.Description
+		}
+		line += " (" + string(prompt.Scope) + ")"
+		lines = append(lines, line)
+	}
+	m.notice("Prompt templates:\n" + strings.Join(lines, "\n"))
+}
+
+func (m *model) commandPrompt(name, args string) {
+	if name == "" {
+		m.notice("Usage: /prompt <name> [input]")
+		return
+	}
+	if m.resources == nil {
+		m.notice("No prompt templates loaded.")
+		return
+	}
+
+	prompt, ok := m.resources.Prompt(name)
+	if !ok {
+		m.notice("Unknown prompt template " + name + ". Try /prompts.")
+		return
+	}
+
+	m.inputText.SetValue(prompt.Render(args))
+	m.inputText.CursorEnd()
+	m.inputText.Focus()
+	m.notice("Loaded prompt template " + prompt.Name + " into the input.")
 }

@@ -367,6 +367,7 @@ Stable public packages:
 - [`runtime`](runtime) — constructor, runtime/security options, and the
   provider/tool composition root. Implementation details stay under `internal/`.
 - [`session`](session) — persistent session model and JSONL session manager.
+- [`resource`](resource) — global/project Markdown resource discovery and precedence.
 
 ```go
 rt, err := runtime.New(runtime.Options{
@@ -424,6 +425,80 @@ and copy the conversation entries through the selected user message.
 
 Resuming and forking restore conversation history and metadata; new turns use
 the provider and model configured for the current Iris launch.
+
+## Resources
+
+Iris loads Markdown instruction resources from a global directory and the
+current project. `AGENTS.md` is intentionally project-only: it describes the
+directory the agent is working in, so a global copy would not make sense.
+
+```text
+~/.iris/
+├── SYSTEM.md
+├── skills/
+│   ├── coding/SKILL.md
+│   └── debugging.md
+└── prompts/
+    └── review.md
+
+project/
+├── AGENTS.md
+└── .iris/
+    ├── AGENTS.md
+    ├── SYSTEM.md
+    ├── skills/
+    │   └── coding/SKILL.md
+    └── prompts/
+        └── review.md
+```
+
+| Resource | Global | Project | Precedence |
+| --- | --- | --- | --- |
+| `AGENTS.md` | Not loaded | `<workdir>/AGENTS.md`, `<workdir>/.iris/AGENTS.md` | Project-only. Root instructions are followed by `.iris` instructions. |
+| `SYSTEM.md` | `~/.iris/SYSTEM.md` | `<workdir>/.iris/SYSTEM.md` | The project file replaces the global file. Its content is appended as custom system instructions; Iris' built-in tool and security instructions remain. |
+| Skills | `~/.iris/skills/` | `<workdir>/.iris/skills/` | Markdown only. Project skills replace global skills with the same name. |
+| Prompt templates | `~/.iris/prompts/` | `<workdir>/.iris/prompts/` | Markdown only. Project prompts replace global prompts with the same name. |
+
+### Skills
+
+- `skills/name/SKILL.md` and `skills/name.md` both load as skill `name`.
+- Nested files such as `skills/name/advanced.md` load as `name/advanced`.
+- Skills and prompts may start with an optional simple front matter block:
+
+  ```markdown
+  ---
+  name: coding
+  description: Project coding conventions
+  ---
+  # Coding
+
+  Use the project's conventions.
+  ```
+
+  `name` overrides a skill's path-derived name. `description` is shown in
+  listings. Prompt names always come from their file path.
+
+### Prompt templates
+
+- `prompts/review.md` loads as prompt `review`; nested files use their relative
+  path without `.md`.
+- `{{input}}` is replaced when the template is rendered.
+- If there is no `{{input}}` placeholder, provided input is appended after the
+  template.
+
+### Commands
+
+| Command | Purpose |
+| --- | --- |
+| `/skills` | List discovered skills. |
+| `/skill <name>` | Insert a skill into the input box. Add your request after it. |
+| `/prompts` | List prompt templates. |
+| `/prompt <name> [input]` | Render a template into the input box for editing. |
+
+Skills and prompt templates are Markdown data, not executable plugins. Hidden
+files/directories and symlinks are ignored, files over 512 KiB are skipped with a
+warning, and missing resource directories are not an error. Loader warnings are
+written to the log and shown in the TUI.
 
 ## Context Management
 

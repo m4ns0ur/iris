@@ -11,6 +11,7 @@ import (
 	publicagent "github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/internal/policy"
 	"github.com/m4ns0ur/iris/provider"
+	"github.com/m4ns0ur/iris/resource"
 )
 
 func TestAgentCompactsContextButPreservesFullHistory(t *testing.T) {
@@ -257,5 +258,50 @@ func messageTextForTest(content any) string {
 		return builder.String()
 	default:
 		return fmt.Sprint(value)
+	}
+}
+
+func TestAgentIncludesResourcesInSystemPrompt(t *testing.T) {
+	pol, err := policy.New(t.TempDir(), policy.Options{})
+	if err != nil {
+		t.Fatalf("policy.New() error = %v", err)
+	}
+
+	var systemPrompt string
+	fake := provider.ProviderFunc(func(
+		_ context.Context,
+		request provider.Request,
+		_ func(provider.Delta),
+	) (provider.Response, error) {
+		if len(request.Messages) > 0 {
+			systemPrompt = messageTextForTest(request.Messages[0].Content)
+		}
+		return provider.Response{Content: "ok"}, nil
+	})
+
+	resources := &resource.Resources{
+		SystemPrompt: "CUSTOM_SYSTEM_INSTRUCTION",
+		Instructions: []resource.Instruction{
+			{Scope: resource.ScopeProject, Content: "PROJECT_AGENTS_INSTRUCTION"},
+		},
+	}
+	instance, err := NewAgent(fake, pol, Options{Resources: resources})
+	if err != nil {
+		t.Fatalf("NewAgent() error = %v", err)
+	}
+	defer instance.Close()
+
+	if err := instance.Run(context.Background(), "hello"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	for _, want := range []string{
+		"CUSTOM_SYSTEM_INSTRUCTION",
+		"PROJECT_AGENTS_INSTRUCTION",
+		"Instruction resources (AGENTS.md)",
+	} {
+		if !strings.Contains(systemPrompt, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, systemPrompt)
+		}
 	}
 }

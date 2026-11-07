@@ -17,6 +17,7 @@ import (
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/internal/tui"
+	"github.com/m4ns0ur/iris/resource"
 	"github.com/m4ns0ur/iris/runtime"
 	"github.com/m4ns0ur/iris/session"
 	"github.com/spf13/cobra"
@@ -152,15 +153,30 @@ func startTui(cmd *cobra.Command, args []string) {
 
 	cfg := config.GetConfig()
 
+	home, err := os.UserHomeDir()
+	if err != nil {
+		Logger.Error("cannot determine home directory", "error", err)
+		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
+		os.Exit(1)
+	}
+
 	sessionDir := cfg.Session.Dir
 	if sessionDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			Logger.Error("cannot determine home directory for sessions", "error", err)
-			fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
-			os.Exit(1)
-		}
 		sessionDir = filepath.Join(home, IrisHome, "sessions")
+	}
+
+	resources, err := resource.Load(resource.Options{
+		GlobalDir: filepath.Join(home, IrisHome),
+		Workdir:   workdir,
+	})
+	if err != nil {
+		Logger.Error("cannot load resources", "error", err)
+		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
+		os.Exit(1)
+	}
+	for _, warning := range resources.Warnings {
+		Logger.Warn("resource warning", "warning", warning)
+		fmt.Fprintf(os.Stderr, "iris: resource warning: %s\n", warning)
 	}
 
 	sessions, err := session.NewJSONL(sessionDir)
@@ -197,6 +213,7 @@ func startTui(cmd *cobra.Command, args []string) {
 		CompactAt:        cfg.Context.CompactAt,
 		KeepRecentTokens: cfg.Context.KeepRecentTokens,
 		SummaryMaxTokens: cfg.Context.SummaryMaxTokens,
+		Resources:        resources,
 		Security:         runtimeSecurity(cfg.Security),
 	})
 	if err != nil {
@@ -234,6 +251,7 @@ func startTui(cmd *cobra.Command, args []string) {
 		Agent:           irisAgent,
 		Sessions:        sessions,
 		SessionDefaults: sessionDefaults,
+		Resources:       resources,
 	}); err != nil {
 		Logger.Error("TUI failed to start", "error", err)
 		// Exit uses os.Exit, which skips deferred cleanup.

@@ -15,6 +15,7 @@ import (
 	"github.com/m4ns0ur/iris/internal/prompt"
 	"github.com/m4ns0ur/iris/internal/tool"
 	"github.com/m4ns0ur/iris/provider"
+	"github.com/m4ns0ur/iris/resource"
 	apitype "github.com/m4ns0ur/iris/tool"
 )
 
@@ -71,6 +72,9 @@ type Options struct {
 
 	// SummaryMaxTokens bounds generated conversation summaries.
 	SummaryMaxTokens int
+
+	// Resources supplies SYSTEM.md, AGENTS.md, skills, and prompt templates.
+	Resources *resource.Resources
 }
 
 type Agent struct {
@@ -105,6 +109,7 @@ type Agent struct {
 	registry         *tool.ToolRegistry
 	toolContext      *tool.ToolContext
 	contextManager   *contextmgr.Manager
+	resources        *resource.Resources
 }
 
 type PendingToolCall struct {
@@ -158,6 +163,7 @@ func NewAgent(prov provider.Provider, pol *policy.Policy, options ...Options) (*
 		policy:       pol,
 		registry:     registry,
 		toolContext:  toolContext,
+		resources:    opts.Resources,
 		contextManager: contextmgr.New(contextmgr.Config{
 			Window:           opts.ContextWindow,
 			ReserveTokens:    opts.ReserveTokens,
@@ -254,7 +260,7 @@ func (a *Agent) LoadHistory(messages []provider.Message) error {
 	if len(history) > 0 && history[0].Role != "system" {
 		history = append([]provider.Message{{
 			Role:    "system",
-			Content: prompt.BuildSystemPrompt(a.toolContext),
+			Content: prompt.BuildSystemPrompt(a.toolContext, a.resources),
 		}}, history...)
 	}
 
@@ -410,7 +416,7 @@ func (a *Agent) Run(ctx context.Context, input string) (runErr error) {
 	if len(a.history) == 0 {
 		a.history = append(a.history, provider.Message{
 			Role:    "system",
-			Content: prompt.BuildSystemPrompt(a.toolContext),
+			Content: prompt.BuildSystemPrompt(a.toolContext, a.resources),
 		})
 	}
 	a.history = append(a.history, provider.Message{

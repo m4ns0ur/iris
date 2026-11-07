@@ -19,6 +19,7 @@ import (
 	"github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/provider"
+	"github.com/m4ns0ur/iris/resource"
 	"github.com/m4ns0ur/iris/session"
 )
 
@@ -81,6 +82,7 @@ type Options struct {
 	Agent           agent.Agent
 	Sessions        session.Manager
 	SessionDefaults session.CreateOptions
+	Resources       *resource.Resources
 }
 
 type model struct {
@@ -115,6 +117,7 @@ type model struct {
 	sessionPersisted int
 	sessionDirty     bool
 	usagePending     []provider.Usage
+	resources        *resource.Resources
 }
 
 type message struct {
@@ -654,6 +657,15 @@ func initialModel(options Options) (model, error) {
 		})
 	}
 
+	if options.Resources != nil {
+		for _, warning := range options.Resources.Warnings {
+			initialMessages = append(initialMessages, message{
+				role:    "notice",
+				content: "Resource warning: " + warning,
+			})
+		}
+	}
+
 	return model{
 		agent:           instance,
 		fullReason:      &strings.Builder{},
@@ -669,6 +681,7 @@ func initialModel(options Options) (model, error) {
 		sessions:        options.Sessions,
 		sessionDefaults: options.SessionDefaults,
 		currentSession:  currentSession,
+		resources:       options.Resources,
 		messages:        initialMessages,
 	}, nil
 }

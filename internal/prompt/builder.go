@@ -2,12 +2,14 @@ package prompt
 
 import (
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/m4ns0ur/iris/internal/tool"
+	"github.com/m4ns0ur/iris/resource"
 )
 
-func BuildSystemPrompt(toolContext *tool.ToolContext) string {
+func BuildSystemPrompt(toolContext *tool.ToolContext, resources *resource.Resources) string {
 	toolPrompt := toolContext.BuildPrompt()
 
 	security := ""
@@ -26,7 +28,7 @@ Security posture:
 `
 	}
 
-	return `You are Iris, an autonomous AI agent, expert in coding and software control. Your goal is to help the user by analyzing the requests, breaking them down into smaller steps if necessary, and executing tasks using the available tools.
+	base := `You are Iris, an autonomous AI agent, expert in coding and software control. Your goal is to help the user by analyzing the requests, breaking them down into smaller steps if necessary, and executing tasks using the available tools.
 
 Tools:
 ` + toolPrompt + `
@@ -43,6 +45,32 @@ OS: ` + GetSimpleOS() + `
 Date: ` + time.Now().Local().Format("2006-01-02") + `
 Working Directory: ` + toolContext.Workdir + `
 `
+
+	if resources == nil {
+		return base
+	}
+
+	if custom := strings.TrimSpace(resources.SystemPrompt); custom != "" {
+		base += `
+Custom system instructions:
+` + custom + `
+`
+	}
+
+	instructions := make([]string, 0, len(resources.Instructions))
+	for _, instruction := range resources.Instructions {
+		if content := strings.TrimSpace(instruction.Content); content != "" {
+			instructions = append(instructions, content)
+		}
+	}
+	if len(instructions) > 0 {
+		base += `
+Instruction resources (AGENTS.md):
+` + strings.Join(instructions, "\n\n") + `
+`
+	}
+
+	return base
 }
 
 func GetSimpleOS() string {
