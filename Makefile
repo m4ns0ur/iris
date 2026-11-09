@@ -1,11 +1,17 @@
-.PHONY: help build lint test coverage
+.PHONY: help lint build test coverage
 
-default: build
+default: lint build
 
-all: build lint test coverage
+all: lint build test coverage
 
 help:
 	@grep -E '^##' Makefile | sed 's/^## //'
+
+## lint - Run linters (goimports, go vet, golangci-lint)
+lint:
+	goimports -w .
+	go vet ./...
+	golangci-lint run
 
 ## build - Clean, compile and install
 build:
@@ -16,12 +22,6 @@ build:
 	go build -o ./bin/iris -ldflags="-s -w" \
 		-tags netgo -trimpath .
 	go install .
-
-## lint - Run linters (goimports, go vet, golangci-lint)
-lint:
-	goimports -w .
-	go vet ./...
-	golangci-lint run
 
 ## test - Run all tests (with race detection)
 test:
