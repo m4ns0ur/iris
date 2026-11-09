@@ -27,7 +27,7 @@ build:
 test:
 	go test -race -short ./...
 
-## coverage - Run tests with coverage report (to ./coverage.out)
+## coverage - Run tests with coverage report (to ./output/coverage.out)
 coverage:
 	mkdir -p output
 	COVERAGE_MODE=count go test -covermode=count \
