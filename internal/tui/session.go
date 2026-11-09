@@ -36,6 +36,8 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.commandFork(index)
 	case "/export":
 		m.commandExport()
+	case "/clear-queue":
+		m.commandClearQueue()
 	case "/skills":
 		m.commandSkills()
 	case "/skill":
@@ -57,7 +59,7 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		}
 		m.commandPrompt(name, args)
 	case "/help", "/?":
-		m.notice("Commands: /new, /resume [id], /fork [n], /export, /skills, /skill <name>, /prompts, /prompt <name> [input]")
+		m.notice("Commands: /new, /resume [id], /fork [n], /export, /clear-queue, /skills, /skill <name>, /prompts, /prompt <name> [input]")
 	default:
 		m.notice("Unknown command " + command + ". Try /help.")
 	}
@@ -182,6 +184,28 @@ func (m *model) commandExport() {
 	m.notice("Exported session to " + path)
 }
 
+// commandClearQueue discards queued instructions and restores their text to
+// the input, matching the abort behavior.
+func (m *model) commandClearQueue() {
+	if m.agent == nil {
+		m.notice("No agent is configured.")
+		return
+	}
+
+	queue := m.agent.ClearQueue()
+	m.pendingSteering = nil
+	m.pendingFollowUps = nil
+
+	texts := append(append([]string(nil), queue.Steering...), queue.FollowUps...)
+	if len(texts) == 0 {
+		m.notice("No queued instructions.")
+		return
+	}
+
+	m.restoreInstructionText(strings.Join(texts, "\n"))
+	m.notice(fmt.Sprintf("Cleared %d queued instruction(s); restored to the input.", len(texts)))
+}
+
 func (m *model) findSession(prefix string) (*session.Session, error) {
 	summaries, err := m.sessions.List()
 	if err != nil {
@@ -245,6 +269,9 @@ func (m *model) resetStreamingUI() {
 	m.canceling = false
 	m.agentErrored = false
 	m.compacting = false
+	m.pendingSteering = nil
+	m.pendingFollowUps = nil
+	m.inputText.Placeholder = "Ask Iris..."
 }
 
 func (m *model) notice(text string) {

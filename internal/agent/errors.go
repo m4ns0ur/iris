@@ -7,6 +7,8 @@ import publicagent "github.com/m4ns0ur/iris/agent"
 var (
 	ErrAgentBusy          = publicagent.ErrAgentBusy
 	ErrAgentClosed        = publicagent.ErrAgentClosed
+	ErrAgentIdle          = publicagent.ErrAgentIdle
+	ErrEmptyInput         = publicagent.ErrEmptyInput
 	ErrTurnBudgetExceeded = publicagent.ErrTurnBudgetExceeded
 	ErrToolBudgetExceeded = publicagent.ErrToolBudgetExceeded
 	ErrToolTimeout        = publicagent.ErrToolTimeout

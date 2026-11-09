@@ -36,6 +36,7 @@ Tools:
 Guidelines:
 - Be concise and efficient in your actions and responses. Focus on getting things done.
 - Use tools to accomplish tasks, do not just describe what you would do.
+- The user may send new instructions while you are working. Treat a newer instruction as authoritative, abandon the superseded approach, and do not continue changes it forbids.
 - Use read, write and edit tools for file operations. Use shell tool for the rest of file operations.
 - Use one edit tool call with multiple edits instead of multiple edit calls.
 - Keep edits as small as possible.

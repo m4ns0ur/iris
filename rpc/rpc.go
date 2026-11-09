@@ -10,6 +10,9 @@
 //   - ping
 //   - agent.run {"prompt":"..."}
 //   - agent.cancel
+//   - agent.steer {"prompt":"..."}
+//   - agent.follow_up {"prompt":"..."}
+//   - agent.clear_queue
 //   - agent.status
 //   - session.new
 //   - session.resume {"id":"..."} (empty id resumes latest)
@@ -43,6 +46,7 @@ const (
 	codeInvalidParams  = -32602
 	codeInternal       = -32603
 	codeBusy           = -32000
+	codeIdle           = -32001
 )
 
 // Server serves JSON-RPC requests for one headless client.
@@ -152,12 +156,20 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 
 			id := cloneRaw(req.ID)
 			prompt := params.Prompt
+			started := make(chan struct{})
+			done := make(chan struct{})
+			var startOnce sync.Once
+
 			runWG.Add(1)
 			go func() {
 				defer runWG.Done()
 				defer s.endRun()
+				defer close(done)
 
 				result, err := s.client.RunStream(ctx, prompt, func(event agent.Event) {
+					if _, ok := event.(agent.AgentStarted); ok {
+						startOnce.Do(func() { close(started) })
+					}
 					_ = s.notify("agent.event", client.Record(event))
 				})
 				if err != nil {
@@ -167,15 +179,67 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 				_ = s.writeResult(id, result)
 			}()
 
+			// Do not process the next request until the run has started (or
+			// failed to start). This makes a steer/follow-up sent immediately
+			// after agent.run deterministic instead of racing Run.
+			select {
+			case <-started:
+			case <-done:
+			case <-ctx.Done():
+			}
+
 		case "agent.cancel":
 			wasRunning := s.isRunning()
-			s.client.Cancel()
-			_ = s.writeResult(req.ID, map[string]any{"canceled": wasRunning})
+			queue := s.client.Abort()
+			_ = s.writeResult(req.ID, map[string]any{
+				"canceled":   wasRunning,
+				"steering":   emptyIfNil(queue.Steering),
+				"follow_ups": emptyIfNil(queue.FollowUps),
+			})
+
+		case "agent.steer", "agent.follow_up":
+			var params struct {
+				Prompt string `json:"prompt"`
+			}
+			if err := decodeParams(req.Params, &params); err != nil {
+				_ = s.writeError(req.ID, codeInvalidParams, err.Error(), nil)
+				continue
+			}
+			if strings.TrimSpace(params.Prompt) == "" {
+				_ = s.writeError(req.ID, codeInvalidParams, "prompt is required", nil)
+				continue
+			}
+
+			var err error
+			if req.Method == "agent.steer" {
+				err = s.client.Steer(params.Prompt)
+			} else {
+				err = s.client.FollowUp(params.Prompt)
+			}
+			if err != nil {
+				code := codeInternal
+				if errors.Is(err, agent.ErrAgentIdle) {
+					code = codeIdle
+				}
+				_ = s.writeError(req.ID, code, err.Error(), nil)
+				continue
+			}
+			_ = s.writeResult(req.ID, map[string]any{"queued": true})
+
+		case "agent.clear_queue":
+			queue := s.client.ClearQueue()
+			_ = s.writeResult(req.ID, map[string]any{
+				"steering":   emptyIfNil(queue.Steering),
+				"follow_ups": emptyIfNil(queue.FollowUps),
+			})
 
 		case "agent.status":
+			queue := s.client.Pending()
 			_ = s.writeResult(req.ID, map[string]any{
-				"running":    s.isRunning(),
-				"session_id": s.client.SessionID(),
+				"running":            s.isRunning(),
+				"session_id":         s.client.SessionID(),
+				"pending_steering":   len(queue.Steering),
+				"pending_follow_ups": len(queue.FollowUps),
 			})
 
 		case "session.new":
@@ -382,6 +446,13 @@ func decodeParams(raw json.RawMessage, target any) error {
 
 func cloneRaw(raw json.RawMessage) json.RawMessage {
 	return append(json.RawMessage(nil), raw...)
+}
+
+func emptyIfNil(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
 
 func infoForSession(s *session.Session) sessionInfo {

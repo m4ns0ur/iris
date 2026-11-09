@@ -16,22 +16,32 @@ import (
 )
 
 type fakeAgent struct {
-	mu       sync.Mutex
-	history  []provider.Message
-	handlers []func(agent.Event)
-	block    chan struct{}
-	canceled chan struct{}
-	once     sync.Once
-	approver agent.Approver
+	mu        sync.Mutex
+	history   []provider.Message
+	handlers  []func(agent.Event)
+	block     chan struct{}
+	canceled  chan struct{}
+	once      sync.Once
+	approver  agent.Approver
+	running   bool
+	steering  []string
+	followUps []string
 }
 
 func (f *fakeAgent) Run(ctx context.Context, input string) error {
 	f.mu.Lock()
+	f.running = true
 	f.history = append(f.history, provider.Message{
 		Role:    "user",
 		Content: []provider.Content{{Type: "text", Text: input}},
 	})
 	f.mu.Unlock()
+
+	defer func() {
+		f.mu.Lock()
+		f.running = false
+		f.mu.Unlock()
+	}()
 
 	f.emit(agent.AgentStarted{At: time.Now(), Input: input})
 	if f.block != nil {
@@ -88,6 +98,67 @@ func (f *fakeAgent) Cancel() {
 		return
 	}
 	f.once.Do(func() { close(f.canceled) })
+}
+
+func (f *fakeAgent) Abort() agent.Queue {
+	f.mu.Lock()
+	queue := agent.Queue{
+		Steering:  append([]string(nil), f.steering...),
+		FollowUps: append([]string(nil), f.followUps...),
+	}
+	f.steering = nil
+	f.followUps = nil
+	f.mu.Unlock()
+
+	f.Cancel()
+	return queue
+}
+
+func (f *fakeAgent) canQueue() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.running
+}
+
+func (f *fakeAgent) Steer(input string) error {
+	if !f.canQueue() {
+		return agent.ErrAgentIdle
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.steering = append(f.steering, input)
+	return nil
+}
+
+func (f *fakeAgent) FollowUp(input string) error {
+	if !f.canQueue() {
+		return agent.ErrAgentIdle
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.followUps = append(f.followUps, input)
+	return nil
+}
+
+func (f *fakeAgent) ClearQueue() agent.Queue {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	queue := agent.Queue{
+		Steering:  append([]string(nil), f.steering...),
+		FollowUps: append([]string(nil), f.followUps...),
+	}
+	f.steering = nil
+	f.followUps = nil
+	return queue
+}
+
+func (f *fakeAgent) Pending() agent.Queue {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return agent.Queue{
+		Steering:  append([]string(nil), f.steering...),
+		FollowUps: append([]string(nil), f.followUps...),
+	}
 }
 
 func (f *fakeAgent) Close() error                        { return nil }
@@ -299,5 +370,140 @@ func TestServerInvalidRequest(t *testing.T) {
 	frames := decodeFrames(t, output.String())
 	if len(frames) != 1 || frames[0].Error == nil || frames[0].Error.Code != codeParse {
 		t.Fatalf("frames = %+v", frames)
+	}
+}
+
+func TestServerSteerFollowUpStatusAndClearQueue(t *testing.T) {
+	server, fake, _ := newTestServer(t)
+	fake.block = make(chan struct{})
+	fake.canceled = make(chan struct{})
+
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"agent.run","params":{"prompt":"slow"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"agent.steer","params":{"prompt":"Do not modify the schema"}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"agent.follow_up","params":{"prompt":"Then summarize"}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"agent.status"}`,
+		`{"jsonrpc":"2.0","id":5,"method":"agent.clear_queue"}`,
+		`{"jsonrpc":"2.0","id":6,"method":"agent.cancel"}`,
+		`{"jsonrpc":"2.0","id":7,"method":"shutdown"}`,
+	}, "\n")
+
+	var output bytes.Buffer
+	if err := server.Serve(context.Background(), strings.NewReader(input), &output); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	frames := decodeFrames(t, output.String())
+
+	for _, id := range []string{"2", "3"} {
+		response := findResponse(t, frames, id)
+		if response.Error != nil {
+			t.Fatalf("response %s error = %+v", id, response.Error)
+		}
+		if !strings.Contains(string(response.Result), `"queued":true`) {
+			t.Fatalf("response %s result = %s, want queued", id, response.Result)
+		}
+	}
+
+	status := findResponse(t, frames, "4")
+	var statusValue struct {
+		Running          bool `json:"running"`
+		PendingSteering  int  `json:"pending_steering"`
+		PendingFollowUps int  `json:"pending_follow_ups"`
+	}
+	if err := json.Unmarshal(status.Result, &statusValue); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if !statusValue.Running || statusValue.PendingSteering != 1 || statusValue.PendingFollowUps != 1 {
+		t.Fatalf("status = %+v", statusValue)
+	}
+
+	cleared := findResponse(t, frames, "5")
+	var queue struct {
+		Steering  []string `json:"steering"`
+		FollowUps []string `json:"follow_ups"`
+	}
+	if err := json.Unmarshal(cleared.Result, &queue); err != nil {
+		t.Fatalf("decode clear_queue: %v", err)
+	}
+	if len(queue.Steering) != 1 || queue.Steering[0] != "Do not modify the schema" {
+		t.Fatalf("cleared steering = %+v", queue.Steering)
+	}
+	if len(queue.FollowUps) != 1 || queue.FollowUps[0] != "Then summarize" {
+		t.Fatalf("cleared follow-ups = %+v", queue.FollowUps)
+	}
+
+	cancel := findResponse(t, frames, "6")
+	if !strings.Contains(string(cancel.Result), `"canceled":true`) {
+		t.Fatalf("agent.cancel result = %s", cancel.Result)
+	}
+
+	if pending := fake.Pending(); len(pending.Steering) != 0 || len(pending.FollowUps) != 0 {
+		t.Fatalf("agent queue after clear and cancel = %+v", pending)
+	}
+}
+
+func TestServerSteerWhileIdleReturnsIdleError(t *testing.T) {
+	server, _, _ := newTestServer(t)
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"agent.steer","params":{"prompt":"too early"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"agent.follow_up","params":{"prompt":"too early"}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"agent.clear_queue"}`,
+	}, "\n")
+
+	var output bytes.Buffer
+	if err := server.Serve(context.Background(), strings.NewReader(input), &output); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	frames := decodeFrames(t, output.String())
+
+	for _, id := range []string{"1", "2"} {
+		response := findResponse(t, frames, id)
+		if response.Error == nil || response.Error.Code != codeIdle {
+			t.Fatalf("response %s = %+v, want idle error", id, response.Error)
+		}
+	}
+
+	clear := findResponse(t, frames, "3")
+	if clear.Error != nil {
+		t.Fatalf("clear_queue while idle error = %+v", clear.Error)
+	}
+}
+
+func TestServerCancelReturnsUndeliveredInstructions(t *testing.T) {
+	server, fake, _ := newTestServer(t)
+	fake.block = make(chan struct{})
+	fake.canceled = make(chan struct{})
+
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"agent.run","params":{"prompt":"slow"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"agent.steer","params":{"prompt":"stop that"}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"agent.follow_up","params":{"prompt":"then summarize"}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"agent.cancel"}`,
+		`{"jsonrpc":"2.0","id":5,"method":"shutdown"}`,
+	}, "\n")
+
+	var output bytes.Buffer
+	if err := server.Serve(context.Background(), strings.NewReader(input), &output); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	frames := decodeFrames(t, output.String())
+
+	cancel := findResponse(t, frames, "4")
+	var result struct {
+		Canceled  bool     `json:"canceled"`
+		Steering  []string `json:"steering"`
+		FollowUps []string `json:"follow_ups"`
+	}
+	if err := json.Unmarshal(cancel.Result, &result); err != nil {
+		t.Fatalf("decode cancel: %v", err)
+	}
+	if !result.Canceled {
+		t.Fatalf("cancel result = %+v, want canceled", result)
+	}
+	if len(result.Steering) != 1 || result.Steering[0] != "stop that" {
+		t.Fatalf("returned steering = %+v", result.Steering)
+	}
+	if len(result.FollowUps) != 1 || result.FollowUps[0] != "then summarize" {
+		t.Fatalf("returned follow-ups = %+v", result.FollowUps)
 	}
 }

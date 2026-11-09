@@ -10,7 +10,11 @@ import (
 
 func TestBuildSystemPromptWithoutResources(t *testing.T) {
 	prompt := BuildSystemPrompt(&tool.ToolContext{Workdir: "/work"}, nil)
-	for _, want := range []string{"You are Iris", "Working Directory: /work"} {
+	for _, want := range []string{
+		"You are Iris",
+		"Working Directory: /work",
+		"The user may send new instructions while you are working",
+	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q", want)
 		}

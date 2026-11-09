@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,6 +90,14 @@ type Agent struct {
 	// subMu guards event subscribers.
 	subMu       sync.RWMutex
 	subscribers []func(publicagent.Event)
+
+	// queueMu guards instructions queued for the active run. It is separate
+	// from mu so queue methods never block on run lifecycle operations.
+	queueMu       sync.Mutex
+	steeringQueue []string
+	followUpQueue []string
+	runOpen       bool
+	queueClosed   bool
 
 	// historyMu guards conversation history. It is separate from mu so readers
 	// can snapshot a run in progress without touching the lifecycle lock.
@@ -316,6 +325,155 @@ func (a *Agent) Cancel() {
 	}
 }
 
+// Abort stops the current run and returns instructions that had not been
+// delivered. It holds the lifecycle lock while closing the queue so it cannot
+// interleave with beginRun, and closes the queue before canceling so every
+// queued instruction is either returned or delivered.
+func (a *Agent) Abort() publicagent.Queue {
+	a.mu.Lock()
+
+	a.queueMu.Lock()
+	a.runOpen = false
+	queue := a.pendingLocked()
+	a.steeringQueue = nil
+	a.followUpQueue = nil
+	a.queueMu.Unlock()
+
+	cancel := a.runCancel
+	a.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	return queue
+}
+
+// Steer queues an instruction for the active run. It is delivered at the next
+// turn boundary and never interrupts an in-flight request or tool.
+func (a *Agent) Steer(input string) error {
+	return a.enqueue(input, false)
+}
+
+// FollowUp queues a request for when the active run would otherwise stop.
+func (a *Agent) FollowUp(input string) error {
+	return a.enqueue(input, true)
+}
+
+func (a *Agent) enqueue(input string, followUp bool) error {
+	if strings.TrimSpace(input) == "" {
+		return ErrEmptyInput
+	}
+
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+
+	if a.queueClosed {
+		return ErrAgentClosed
+	}
+	if !a.runOpen {
+		return ErrAgentIdle
+	}
+
+	if followUp {
+		a.followUpQueue = append(a.followUpQueue, input)
+	} else {
+		a.steeringQueue = append(a.steeringQueue, input)
+	}
+	return nil
+}
+
+// ClearQueue removes and returns all queued instructions.
+func (a *Agent) ClearQueue() publicagent.Queue {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+
+	queue := a.pendingLocked()
+	a.steeringQueue = nil
+	a.followUpQueue = nil
+	return queue
+}
+
+// Pending returns a snapshot of queued instructions.
+func (a *Agent) Pending() publicagent.Queue {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+
+	return a.pendingLocked()
+}
+
+func (a *Agent) pendingLocked() publicagent.Queue {
+	return publicagent.Queue{
+		Steering:  append([]string(nil), a.steeringQueue...),
+		FollowUps: append([]string(nil), a.followUpQueue...),
+	}
+}
+
+// drainSteering takes all steering instructions queued for the next turn.
+func (a *Agent) drainSteering() []string {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+
+	if len(a.steeringQueue) == 0 {
+		return nil
+	}
+	messages := a.steeringQueue
+	a.steeringQueue = nil
+	return messages
+}
+
+// deliverAtStop decides whether the run can stop. Steering instructions take
+// priority over follow-ups; when neither is queued it closes the queue so no
+// instruction can be accepted after the terminal event.
+func (a *Agent) deliverAtStop() ([]string, publicagent.InstructionKind, bool) {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+
+	if len(a.steeringQueue) > 0 {
+		messages := a.steeringQueue
+		a.steeringQueue = nil
+		return messages, publicagent.InstructionSteering, false
+	}
+	if len(a.followUpQueue) > 0 {
+		messages := a.followUpQueue
+		a.followUpQueue = nil
+		return messages, publicagent.InstructionFollowUp, false
+	}
+
+	a.runOpen = false
+	return nil, "", true
+}
+
+// deliverInstructions appends queued instructions to the conversation and
+// reports them to subscribers. It must run on the run goroutine.
+func (a *Agent) deliverInstructions(kind publicagent.InstructionKind, messages []string) {
+	if len(messages) == 0 {
+		return
+	}
+
+	for _, text := range messages {
+		a.appendHistory(userMessage(text))
+		a.emit(publicagent.InstructionDelivered{
+			At:   time.Now(),
+			Kind: kind,
+			Text: text,
+		})
+	}
+
+	queue := a.Pending()
+	a.emit(publicagent.QueueUpdated{
+		At:        time.Now(),
+		Steering:  queue.Steering,
+		FollowUps: queue.FollowUps,
+	})
+}
+
+func userMessage(text string) provider.Message {
+	return provider.Message{
+		Role:    "user",
+		Content: []provider.Content{{Type: "text", Text: text}},
+	}
+}
+
 // Close cancels any active run, waits for it to release tool resources, and
 // removes the session's temporary files. It must not be called from inside an
 // event handler.
@@ -324,6 +482,15 @@ func (a *Agent) Close() error {
 	a.closed = true
 	cancel := a.runCancel
 	a.mu.Unlock()
+
+	// Stop accepting instructions before waiting for the run to release
+	// resources, so a concurrent Steer cannot leave text behind.
+	a.queueMu.Lock()
+	a.queueClosed = true
+	a.runOpen = false
+	a.steeringQueue = nil
+	a.followUpQueue = nil
+	a.queueMu.Unlock()
 
 	if cancel != nil {
 		cancel()
@@ -361,6 +528,12 @@ func (a *Agent) beginRun(parent context.Context) (context.Context, error) {
 	a.state = "idle"
 	a.pendingToolCalls = nil
 
+	a.queueMu.Lock()
+	a.steeringQueue = nil
+	a.followUpQueue = nil
+	a.runOpen = true
+	a.queueMu.Unlock()
+
 	runCtx, cancel := context.WithCancel(parent)
 	a.runCancel = cancel
 	a.runWG.Add(1)
@@ -374,6 +547,20 @@ func (a *Agent) finishRun() {
 	a.runCancel = nil
 	a.running = false
 	a.mu.Unlock()
+
+	a.queueMu.Lock()
+	a.runOpen = false
+	discarded := len(a.steeringQueue) > 0 || len(a.followUpQueue) > 0
+	a.steeringQueue = nil
+	a.followUpQueue = nil
+	a.queueMu.Unlock()
+
+	// Report discarded instructions before the terminal event so consumers do
+	// not keep showing a queue that no longer exists. This runs on the run
+	// goroutine, like every other event.
+	if discarded {
+		a.emit(publicagent.QueueUpdated{At: time.Now()})
+	}
 
 	if cancel != nil {
 		cancel()
@@ -419,10 +606,7 @@ func (a *Agent) Run(ctx context.Context, input string) (runErr error) {
 			Content: prompt.BuildSystemPrompt(a.toolContext, a.resources),
 		})
 	}
-	a.history = append(a.history, provider.Message{
-		Role:    "user",
-		Content: []provider.Content{{Type: "text", Text: input}},
-	})
+	a.history = append(a.history, userMessage(input))
 	a.historyMu.Unlock()
 
 	a.emit(publicagent.AgentStarted{At: time.Now(), Input: input})
@@ -455,6 +639,24 @@ func (a *Agent) loop(ctx context.Context) error {
 			return fmt.Errorf("%w: max_turns=%d", ErrTurnBudgetExceeded, a.maxTurns)
 		}
 
+		// Decide what the turn will deliver before announcing it. A stop point
+		// is only reached when the previous assistant turn produced no tool
+		// calls. Steering always takes priority over follow-ups.
+		deliveredKind := publicagent.InstructionSteering
+		var delivered []string
+
+		if a.state == "done" {
+			messages, kind, stop := a.deliverAtStop()
+			if stop {
+				Logger.Info("Agentic loop completed")
+				return nil
+			}
+			delivered = messages
+			deliveredKind = kind
+		} else {
+			delivered = a.drainSteering()
+		}
+
 		Logger.Debug(
 			"Agentic Loop",
 			"step", a.step,
@@ -462,6 +664,7 @@ func (a *Agent) loop(ctx context.Context) error {
 		)
 
 		a.emit(publicagent.TurnStarted{At: time.Now(), Turn: a.step})
+		a.deliverInstructions(deliveredKind, delivered)
 
 		if err := a.next(ctx); err != nil {
 			return err
@@ -474,8 +677,8 @@ func (a *Agent) loop(ctx context.Context) error {
 			}
 
 		case "done":
-			Logger.Info("Agentic loop completed")
-			return nil
+			// The stop point is evaluated at the top of the next iteration so
+			// instructions queued during the final turn can revive the run.
 
 		default:
 			return fmt.Errorf("unknown agent state %q", a.state)

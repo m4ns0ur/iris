@@ -118,11 +118,14 @@ type model struct {
 	sessionDirty     bool
 	usagePending     []provider.Usage
 	resources        *resource.Resources
+	pendingSteering  []string
+	pendingFollowUps []string
 }
 
 type message struct {
 	role           string
 	content        string
+	tag            string
 	toolName       string
 	toolArgs       string
 	previewPath    string
@@ -180,7 +183,11 @@ func (m *model) renderMessage(msg message) string {
 	var sb strings.Builder
 	switch msg.role {
 	case "user":
-		sb.WriteString(m.renderFor(UserPrompt, "You> "))
+		label := "You> "
+		if msg.tag != "" {
+			label = "You (" + msg.tag + ")> "
+		}
+		sb.WriteString(m.renderFor(UserPrompt, label))
 		sb.WriteString(m.renderFor(User, msg.content))
 	case "reasoning":
 		sb.WriteString(m.renderFor(ReasoningPrompt, "Reasoning> "))
@@ -285,6 +292,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentEventMsg:
 		return m.handleAgentEvent(msg.event)
+
+	case instructionResultMsg:
+		return m.handleInstructionResult(msg)
+
+	case abortResultMsg:
+		return m.handleAbortResult(msg)
 	}
 
 	if key, ok := msg.(tea.KeyPressMsg); ok && m.pendingApproval != nil {
@@ -324,6 +337,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.agentErrored = false
 				m.compacting = false
 				m.totalTokens = 0
+				m.pendingSteering = nil
+				m.pendingFollowUps = nil
+				m.inputText.Placeholder = "Type to steer Iris..."
 				m.state = StateStreaming
 				m.resizeLayout()
 				m.viewport.GotoBottom()
@@ -372,12 +388,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.quit()
 				}
 				m.canceling = true
-				if m.agent != nil {
-					m.agent.Cancel()
-				}
 				m.resizeLayout()
 				m.viewport.GotoBottom()
-				return m, nil
+				return m, abortRunCommand(m.agent)
+			case "enter":
+				return m.submitStreamingInstruction(instructionSteer)
+			case "alt+enter":
+				return m.submitStreamingInstruction(instructionFollowUp)
 			case "pgup", "ctrl+u":
 				m.viewport, _ = m.viewport.Update(msg)
 				return m, nil
@@ -395,12 +412,28 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
-
 		}
 
+		// Keep the prompt editable during a run so the user can type a
+		// steering instruction without aborting first. Editing keys (including
+		// shift+enter / ctrl+j for a newline) are handled by the textarea.
 		var vpCmd tea.Cmd
 		m.viewport, vpCmd = m.viewport.Update(msg)
 		cmds = append(cmds, vpCmd)
+
+		oldHeight := m.inputText.Height()
+		var taCmd tea.Cmd
+		m.inputText, taCmd = m.inputText.Update(msg)
+		cmds = append(cmds, taCmd)
+
+		if m.inputText.Height() != oldHeight {
+			if m.inputText.Height() > InputHeightMax {
+				m.inputText.SetHeight(InputHeightMax)
+			}
+			m.viewport.SetHeight(m.viewportHeight())
+			m.viewport.GotoBottom()
+		}
+
 		return m, tea.Batch(cmds...)
 	}
 
@@ -448,6 +481,12 @@ func (m *model) spinnerBar() string {
 		}
 		m.spinner.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(color))
 		left := m.spinner.View() + lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(label)
+
+		if summary := m.pendingSummary(); summary != "" {
+			left += lipgloss.NewStyle().
+				Foreground(lipgloss.Color(ColorMuted)).
+				Render(" · " + summary)
+		}
 
 		if !m.viewport.AtBottom() {
 			hint := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorMuted)).Render("↓ pgdn")
@@ -505,16 +544,16 @@ func (m *model) statusLine() string {
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorDim))
 	help := style.Render("enter: send · shift+enter: newline · /help: commands · ctrl+c: quit")
 	if m.state == StateStreaming {
-		help = style.Render("pgup/pgdn: scroll · ctrl+c: cancel")
+		help = style.Render("enter: steer · alt+enter: follow-up · ctrl+c: abort")
 	}
 	if m.canceling {
 		help = style.Render("canceling… · ctrl+c: quit")
 	}
 	if m.compacting && !m.canceling {
-		help = style.Render("compacting context… · ctrl+c: cancel")
+		help = style.Render("compacting context… · ctrl+c: abort")
 	}
 	if m.pendingApproval != nil {
-		help = style.Render("y: allow once · n: deny · ctrl+c: cancel")
+		help = style.Render("y: allow once · n: deny · ctrl+c: abort")
 	}
 	pctText := fmt.Sprintf(" %3.0f%% ", m.viewport.ScrollPercent()*100)
 	if m.totalTokens > 0 {
@@ -771,6 +810,21 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case agent.QueueUpdated:
+		m.pendingSteering = append([]string(nil), e.Steering...)
+		m.pendingFollowUps = append([]string(nil), e.FollowUps...)
+
+	case agent.InstructionDelivered:
+		tag := "steer"
+		if e.Kind == agent.InstructionFollowUp {
+			tag = "follow-up"
+		}
+		m.messages = append(m.messages, message{
+			role:    "user",
+			content: e.Text,
+			tag:     tag,
+		})
+
 	case agent.AgentError:
 		m.flushPartialStream()
 		m.messages = append(m.messages, message{role: "error", content: e.Message})
@@ -795,6 +849,10 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 
 		m.canceling = false
 		m.compacting = false
+		m.pendingSteering = nil
+		m.pendingFollowUps = nil
+		m.inputText.Placeholder = "Ask Iris..."
+		m.inputText.Focus()
 		m.state = StateInput
 		m.persistSession()
 	}
@@ -807,6 +865,123 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitApproval())
 	}
 	return m, tea.Batch(cmds...)
+}
+
+// submitStreamingInstruction turns the current input into a steering message
+// or follow-up without leaving the streaming state. The input stays editable
+// while the run is active, so this mirrors the idle Enter behavior.
+func (m *model) submitStreamingInstruction(kind instructionKind) (tea.Model, tea.Cmd) {
+	input := strings.TrimSpace(m.inputText.Value())
+	if input == "" {
+		return m, nil
+	}
+
+	if strings.HasPrefix(input, "/") {
+		switch strings.Fields(input)[0] {
+		case "/clear-queue", "/help", "/?":
+			m.inputText.Reset()
+			m.resizeLayout()
+			return m.handleCommand(input)
+		default:
+			m.notice("Commands are unavailable while Iris is running. Press ctrl+c to abort first.")
+			m.resizeLayout()
+			m.viewport.GotoBottom()
+			return m, nil
+		}
+	}
+
+	m.inputText.Reset()
+
+	if kind == instructionFollowUp {
+		m.pendingFollowUps = append(m.pendingFollowUps, input)
+		m.notice("Follow-up queued until the current run stops.")
+	} else {
+		m.pendingSteering = append(m.pendingSteering, input)
+		m.notice("Steering queued for the next turn.")
+	}
+
+	m.resizeLayout()
+	m.viewport.GotoBottom()
+
+	return m, submitInstructionCommand(m.agent, kind, input)
+}
+
+// handleInstructionResult restores text when the run ended before an
+// instruction could be accepted.
+func (m *model) handleInstructionResult(msg instructionResultMsg) (tea.Model, tea.Cmd) {
+	if msg.err == nil {
+		return m, nil
+	}
+
+	if errors.Is(msg.err, agent.ErrAgentIdle) {
+		m.removePending(msg.kind, msg.text)
+		m.restoreInstructionText(msg.text)
+		m.notice("Iris finished before the instruction was queued; the text was restored to the input.")
+	} else {
+		m.removePending(msg.kind, msg.text)
+		m.notice("Could not queue the instruction: " + msg.err.Error())
+	}
+
+	m.resizeLayout()
+	m.viewport.GotoBottom()
+	return m, nil
+}
+
+// handleAbortResult restores instructions recovered by the atomic abort.
+func (m *model) handleAbortResult(msg abortResultMsg) (tea.Model, tea.Cmd) {
+	texts := append(append([]string(nil), msg.steering...), msg.followUps...)
+	for _, text := range texts {
+		m.restoreInstructionText(text)
+	}
+
+	m.pendingSteering = nil
+	m.pendingFollowUps = nil
+	if len(texts) > 0 {
+		m.notice("Queued instructions were restored to the input.")
+	}
+
+	m.resizeLayout()
+	m.viewport.GotoBottom()
+	return m, nil
+}
+
+func (m *model) removePending(kind instructionKind, text string) {
+	target := &m.pendingSteering
+	if kind == instructionFollowUp {
+		target = &m.pendingFollowUps
+	}
+
+	for i, value := range *target {
+		if value == text {
+			*target = append((*target)[:i], (*target)[i+1:]...)
+			return
+		}
+	}
+}
+
+func (m *model) restoreInstructionText(text string) {
+	current := m.inputText.Value()
+	if strings.TrimSpace(current) == "" {
+		m.inputText.SetValue(text)
+	} else {
+		m.inputText.SetValue(current + "\n" + text)
+	}
+	m.inputText.CursorEnd()
+	m.inputText.Focus()
+}
+
+func (m *model) pendingSummary() string {
+	parts := make([]string, 0, 2)
+	if count := len(m.pendingSteering); count > 0 {
+		parts = append(parts, fmt.Sprintf("steering: %d", count))
+	}
+	if count := len(m.pendingFollowUps); count > 0 {
+		parts = append(parts, fmt.Sprintf("follow-up: %d", count))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " · ") + " queued"
 }
 
 func (m *model) updateToolPreview(argsJSON string) {

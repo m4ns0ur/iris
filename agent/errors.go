@@ -10,6 +10,13 @@ var (
 	// ErrAgentClosed is returned after Close has been called.
 	ErrAgentClosed = errors.New("agent is closed")
 
+	// ErrAgentIdle is returned when a steering instruction or follow-up is
+	// submitted while no run is active.
+	ErrAgentIdle = errors.New("agent is not running")
+
+	// ErrEmptyInput is returned when an instruction contains only whitespace.
+	ErrEmptyInput = errors.New("instruction is empty")
+
 	// ErrTurnBudgetExceeded is returned when a run reaches its LLM turn
 	// budget.
 	ErrTurnBudgetExceeded = errors.New("agent turn budget exceeded")

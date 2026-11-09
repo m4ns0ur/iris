@@ -15,14 +15,46 @@ import (
 )
 
 type fakeAgent struct {
-	history  []provider.Message
-	approver agent.Approver
+	history   []provider.Message
+	approver  agent.Approver
+	steering  []string
+	followUps []string
+	steerErr  error
 }
 
 func (f *fakeAgent) Run(context.Context, string) error { return nil }
 func (f *fakeAgent) Subscribe(func(agent.Event))       {}
 func (f *fakeAgent) Cancel()                           {}
-func (f *fakeAgent) Close() error                      { return nil }
+func (f *fakeAgent) Abort() agent.Queue {
+	queue := f.Pending()
+	f.steering = nil
+	f.followUps = nil
+	return queue
+}
+func (f *fakeAgent) Steer(input string) error {
+	if f.steerErr != nil {
+		return f.steerErr
+	}
+	f.steering = append(f.steering, input)
+	return nil
+}
+func (f *fakeAgent) FollowUp(input string) error {
+	f.followUps = append(f.followUps, input)
+	return nil
+}
+func (f *fakeAgent) ClearQueue() agent.Queue {
+	queue := f.Pending()
+	f.steering = nil
+	f.followUps = nil
+	return queue
+}
+func (f *fakeAgent) Pending() agent.Queue {
+	return agent.Queue{
+		Steering:  append([]string(nil), f.steering...),
+		FollowUps: append([]string(nil), f.followUps...),
+	}
+}
+func (f *fakeAgent) Close() error { return nil }
 func (f *fakeAgent) SetApprover(approver agent.Approver) {
 	f.approver = approver
 }

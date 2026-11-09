@@ -234,6 +234,34 @@ func (c *Client) Cancel() {
 	c.agent.Cancel()
 }
 
+// Abort stops the active run and returns instructions that were queued but not
+// delivered.
+func (c *Client) Abort() agent.Queue {
+	return c.agent.Abort()
+}
+
+// Steer queues an instruction for the active run. It is delivered at the next
+// turn boundary without interrupting the current request or tool.
+func (c *Client) Steer(prompt string) error {
+	return c.agent.Steer(prompt)
+}
+
+// FollowUp queues a request for when the active run would otherwise stop.
+func (c *Client) FollowUp(prompt string) error {
+	return c.agent.FollowUp(prompt)
+}
+
+// ClearQueue removes queued instructions and returns their text. It is safe
+// while a run is active.
+func (c *Client) ClearQueue() agent.Queue {
+	return c.agent.ClearQueue()
+}
+
+// Pending returns the queued instructions without clearing them.
+func (c *Client) Pending() agent.Queue {
+	return c.agent.Pending()
+}
+
 // SessionID returns the active session ID, if any.
 func (c *Client) SessionID() string {
 	c.mu.Lock()

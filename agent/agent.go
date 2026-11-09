@@ -23,7 +23,12 @@ const (
 
 // Agent is a stateful conversational agent. A single run is active at a time;
 // events are delivered to subscribers synchronously from the run goroutine, so
-// handlers must be fast and must not call Run or Close.
+// handlers must be fast and must not call Run, Close, or LoadHistory.
+//
+// While a run is active, callers can control it without stopping the process:
+// Cancel and Abort stop the run, Steer queues instructions for the next turn,
+// and FollowUp queues requests for when the run would otherwise stop. Queue
+// methods may be called from event handlers.
 type Agent interface {
 	// Run executes one turn of the agentic loop. It returns when the run
 	// finishes, is cancelled, or fails. Cancellation is propagated to the
@@ -45,8 +50,43 @@ type Agent interface {
 	// its system prompt. Loading an empty history clears the conversation.
 	LoadHistory(messages []provider.Message) error
 
-	// Cancel cancels the current run, if any.
+	// Cancel aborts the current run, if any. It is the "abort" operation:
+	// the run stops promptly, while conversation history remains valid for a
+	// later run. Queued instructions that have not been delivered are
+	// discarded when the run ends; use Abort or ClearQueue first to recover
+	// their text.
 	Cancel()
+
+	// Abort stops the current run and atomically returns instructions that
+	// were queued but not delivered. After Abort, no further instruction is
+	// accepted for that run. It is the recommended way to implement an abort
+	// UI that restores queued text to the editor.
+	Abort() Queue
+
+	// Steer queues an instruction for the active run. It is delivered as a
+	// user message at the next turn boundary: after the current assistant turn
+	// and all of its tool calls finish, before the next LLM request. If the run
+	// would otherwise stop, a steering instruction gives it one more turn.
+	//
+	// Steer never interrupts an in-flight provider request or tool execution;
+	// use Cancel for that. It returns ErrAgentIdle when no run is active,
+	// ErrAgentClosed after Close, and ErrEmptyInput for blank input.
+	Steer(input string) error
+
+	// FollowUp queues a request for after the active run would otherwise stop.
+	// Follow-ups are delivered only once no tool calls remain and no steering
+	// instructions are pending. A delivered follow-up continues the same run,
+	// preserving conversation state and budgets. It returns the same errors as
+	// Steer.
+	FollowUp(input string) error
+
+	// ClearQueue removes and returns all queued steering instructions and
+	// follow-ups. It is safe to call while a run is active, from an event
+	// handler, or while idle.
+	ClearQueue() Queue
+
+	// Pending returns a snapshot of queued instructions without clearing them.
+	Pending() Queue
 
 	// Close cancels the active run, waits for cleanup, and releases resources.
 	Close() error
@@ -91,6 +131,26 @@ func (f ApproverFunc) Approve(ctx context.Context, request ApprovalRequest) (App
 	return f(ctx, request)
 }
 
+// Queue is a snapshot of instructions waiting for delivery.
+type Queue struct {
+	// Steering holds instructions delivered at the next turn boundary.
+	Steering []string `json:"steering,omitempty"`
+
+	// FollowUps holds requests delivered when the run would otherwise stop.
+	FollowUps []string `json:"follow_ups,omitempty"`
+}
+
+// InstructionKind identifies where a queued instruction is delivered.
+type InstructionKind string
+
+const (
+	// InstructionSteering is delivered at the next turn boundary.
+	InstructionSteering InstructionKind = "steering"
+
+	// InstructionFollowUp is delivered when the run would otherwise stop.
+	InstructionFollowUp InstructionKind = "follow_up"
+)
+
 // EventType identifies an event in the agent stream.
 type EventType string
 
@@ -111,6 +171,14 @@ const (
 	EventContextCompactionStarted  EventType = "context.compaction.started"
 	EventContextCompactionFinished EventType = "context.compaction.finished"
 	EventAgentError                EventType = "agent.error"
+
+	// EventQueueUpdated reports the instructions still waiting after the
+	// runtime delivered or discarded messages.
+	EventQueueUpdated EventType = "agent.queue.updated"
+
+	// EventInstructionDelivered reports that a queued instruction became a
+	// user message in the conversation.
+	EventInstructionDelivered EventType = "agent.instruction.delivered"
 
 	// Deprecated: use EventContextCompactionFinished.
 	EventContextCompacted = EventContextCompactionFinished
@@ -135,6 +203,8 @@ var (
 	_ Event = ContextCompactionStarted{}
 	_ Event = ContextCompactionFinished{}
 	_ Event = AgentError{}
+	_ Event = QueueUpdated{}
+	_ Event = InstructionDelivered{}
 )
 
 // AgentStarted is emitted once at the beginning of a run.
@@ -275,3 +345,26 @@ type AgentError struct {
 }
 
 func (AgentError) Type() EventType { return EventAgentError }
+
+// QueueUpdated reports the instructions that are still waiting to be delivered
+// after the runtime delivered some (or discarded them when the run ended). It
+// is emitted from the run goroutine; enqueueing itself is acknowledged by the
+// return value of Steer and FollowUp.
+type QueueUpdated struct {
+	At        time.Time `json:"at"`
+	Steering  []string  `json:"steering,omitempty"`
+	FollowUps []string  `json:"follow_ups,omitempty"`
+}
+
+func (QueueUpdated) Type() EventType { return EventQueueUpdated }
+
+// InstructionDelivered reports that a queued instruction was appended to the
+// conversation as a user message and will be visible to the model on the
+// current turn.
+type InstructionDelivered struct {
+	At   time.Time       `json:"at"`
+	Kind InstructionKind `json:"kind"`
+	Text string          `json:"text"`
+}
+
+func (InstructionDelivered) Type() EventType { return EventInstructionDelivered }

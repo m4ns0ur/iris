@@ -15,11 +15,13 @@ import (
 )
 
 type fakeAgent struct {
-	mu       sync.Mutex
-	history  []provider.Message
-	handlers []func(agent.Event)
-	approver agent.Approver
-	block    chan struct{}
+	mu        sync.Mutex
+	history   []provider.Message
+	handlers  []func(agent.Event)
+	approver  agent.Approver
+	block     chan struct{}
+	steering  []string
+	followUps []string
 }
 
 func (f *fakeAgent) Run(ctx context.Context, input string) error {
@@ -78,7 +80,49 @@ func (f *fakeAgent) LoadHistory(messages []provider.Message) error {
 	return nil
 }
 
-func (f *fakeAgent) Cancel()                             {}
+func (f *fakeAgent) Cancel() {}
+func (f *fakeAgent) Abort() agent.Queue {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	queue := agent.Queue{
+		Steering:  append([]string(nil), f.steering...),
+		FollowUps: append([]string(nil), f.followUps...),
+	}
+	f.steering = nil
+	f.followUps = nil
+	return queue
+}
+func (f *fakeAgent) Steer(input string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.steering = append(f.steering, input)
+	return nil
+}
+func (f *fakeAgent) FollowUp(input string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.followUps = append(f.followUps, input)
+	return nil
+}
+func (f *fakeAgent) ClearQueue() agent.Queue {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	queue := agent.Queue{
+		Steering:  append([]string(nil), f.steering...),
+		FollowUps: append([]string(nil), f.followUps...),
+	}
+	f.steering = nil
+	f.followUps = nil
+	return queue
+}
+func (f *fakeAgent) Pending() agent.Queue {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return agent.Queue{
+		Steering:  append([]string(nil), f.steering...),
+		FollowUps: append([]string(nil), f.followUps...),
+	}
+}
 func (f *fakeAgent) Close() error                        { return nil }
 func (f *fakeAgent) SetApprover(approver agent.Approver) { f.approver = approver }
 func (f *fakeAgent) Approver() agent.Approver            { return f.approver }
@@ -256,4 +300,31 @@ func containsEvent(values []agent.EventType, want agent.EventType) bool {
 		}
 	}
 	return false
+}
+
+func TestClientExecutionControlDelegatesToAgent(t *testing.T) {
+	c, fake, _ := newTestClient(t)
+
+	if err := c.Steer("change direction"); err != nil {
+		t.Fatalf("Steer() error = %v", err)
+	}
+	if err := c.FollowUp("then summarize"); err != nil {
+		t.Fatalf("FollowUp() error = %v", err)
+	}
+
+	pending := c.Pending()
+	if len(pending.Steering) != 1 || pending.Steering[0] != "change direction" {
+		t.Fatalf("pending steering = %+v", pending.Steering)
+	}
+	if len(pending.FollowUps) != 1 || pending.FollowUps[0] != "then summarize" {
+		t.Fatalf("pending follow-ups = %+v", pending.FollowUps)
+	}
+
+	cleared := c.ClearQueue()
+	if len(cleared.Steering) != 1 || len(cleared.FollowUps) != 1 {
+		t.Fatalf("ClearQueue() = %+v", cleared)
+	}
+	if pending := fake.Pending(); len(pending.Steering) != 0 || len(pending.FollowUps) != 0 {
+		t.Fatalf("agent queue after clear = %+v", pending)
+	}
 }

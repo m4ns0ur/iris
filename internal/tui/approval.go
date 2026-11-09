@@ -88,10 +88,7 @@ func (m *model) handleApprovalKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.resolveApproval(agent.ApprovalDecision{Allow: false, Reason: "canceled by user"})
 		m.canceling = true
-		if m.agent != nil {
-			m.agent.Cancel()
-		}
-		return m, m.waitApproval()
+		return m, tea.Batch(m.waitApproval(), abortRunCommand(m.agent))
 	}
 	return m, nil
 }
