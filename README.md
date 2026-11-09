@@ -278,14 +278,156 @@ iris is an AI agent that can perform various tasks based on user input.
 
 Usage:
   iris [flags]
+  iris [command]
+
+Available Commands:
+  jsonl       Stream structured execution events as JSONL
+  print       Execute one prompt and print the final response
+  rpc         Control a headless agent session over JSON-RPC
 
 Flags:
   -b, --base-url string   Set the LLM API URL (Defaults to http://127.0.0.1:8080/v1)
   -d, --debug             Enable debug logging
   -h, --help              help for iris
-  -m, --model string      Set the LLM model name (e.g. unsloth/Qwen3.5-9B-GGUF:UD-Q5_K_XL)
+  -m, --model string      Set the LLM model name
   -w, --workdir string    Set the working directory for the agent (Defaults to current directory)
 ```
+
+## Headless and Programmatic Execution
+
+Iris can run without the TUI. These modes share the same agent, tools,
+security policy, resources, context manager, and persistent sessions.
+
+### Print
+
+```bash
+iris print "Summarize the failing tests"
+cat prompt.txt | iris print
+```
+
+Print mode writes only the final assistant response to stdout. Diagnostics and
+errors go to stderr, and the command exits non-zero on failure. Print and JSONL
+each create a new persistent session.
+
+### JSONL
+
+```bash
+iris jsonl "Implement the requested change"
+```
+
+JSONL mode streams one JSON object per line:
+
+```json
+{"type":"agent.started","event":{"at":"...","input":"..."}}
+{"type":"agent.turn.started","event":{"at":"...","turn":0}}
+{"type":"assistant.delta","event":{"at":"...","text":"..."}}
+{"type":"usage","event":{"at":"...","prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}
+{"type":"agent.finished","event":{"at":"..."}}
+{"type":"result","event":{"content":"...","session_id":"s-...","usage":{...}}}
+```
+
+The `type` field matches the typed agent event names (`agent.started`,
+`assistant.delta`, `tool.started`, `context.compaction.started`, etc.). A final
+`result` record carries the final response, session ID, and usage. Failures add
+an `error` record and exit non-zero.
+
+### RPC
+
+```bash
+iris rpc
+```
+
+RPC mode speaks JSON-RPC 2.0 over stdin/stdout. Agent events are sent as
+`agent.event` notifications with the same `{type,event}` envelope as JSONL.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `ping` | — | `"pong"` |
+| `agent.run` | `{"prompt":"..."}` | Final `client.Result` when the run completes |
+| `agent.cancel` | — | `{"canceled":true|false}` |
+| `agent.status` | — | Running state and current session ID |
+| `session.new` | — | New session ID and metadata |
+| `session.resume` | `{"id":"..."}` or none for latest | Session metadata |
+| `session.list` | — | Session summaries |
+| `session.export` | — | `{"path":"..."}` |
+| `session.fork` | `{"entry_id":"..."}` or `{"user_index":1}` | Forked session metadata |
+| `session.current` | — | Current session ID |
+| `shutdown` | — | Stops the server |
+
+`agent.run` is asynchronous so `agent.cancel` can be processed while it runs.
+Mutating session methods are rejected with a busy error during a run. New
+sessions are written after their first completed run.
+
+Example:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"agent.run","params":{"prompt":"hello"}}
+{"jsonrpc":"2.0","method":"agent.event","params":{"type":"assistant.delta","event":{"at":"...","text":"hi"}}}
+{"jsonrpc":"2.0","id":1,"result":{"content":"hi","session_id":"s-...","usage":{...}}}
+```
+
+### Headless approvals
+
+There is no interactive TUI approval prompt in headless modes. Shell commands
+that require approval fail closed unless an allowlist, approval hook, or custom
+approver is configured. This is deliberate: `print`, `jsonl`, and `rpc` must not
+silently approve risky commands. Go embedders can install an `agent.Approver`
+through `runtime.Options.Approver` or `Agent.SetApprover`.
+
+### Embeddable Go API
+
+```go
+llmProvider := openai.New(openai.Options{
+    BaseURL: "http://127.0.0.1:8080/v1",
+    Model:   "local-model",
+})
+
+rt, err := runtime.New(runtime.Options{
+    Workspace: ".",
+    Provider:  llmProvider,
+    // Resources: optional *resource.Resources
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer rt.Close()
+
+ag, err := rt.NewAgent()
+if err != nil {
+    log.Fatal(err)
+}
+
+home, _ := os.UserHomeDir()
+sessions, err := session.NewJSONL(filepath.Join(home, ".iris", "sessions"))
+if err != nil {
+    log.Fatal(err)
+}
+
+c, err := client.New(client.Options{
+    Agent:    ag,
+    Sessions: sessions,
+    SessionDefaults: session.CreateOptions{
+        Model:     "local-model",
+        Workspace: ".",
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+ctx := context.Background()
+result, err := c.RunStream(ctx, "Implement the feature", func(event agent.Event) {
+    if delta, ok := event.(agent.AssistantDelta); ok {
+        fmt.Print(delta.Text)
+    }
+})
+fmt.Println(result.SessionID)
+```
+
+The lower-level [`agent.Agent`](agent) API remains available when session
+management is not needed. `client` adds session-aware runs and JSON-friendly
+event envelopes; `rpc.NewServer(c).Serve(ctx, in, out)` exposes the same
+client over JSON-RPC.
 
 ## TUI Key Bindings
 
@@ -368,6 +510,9 @@ Stable public packages:
   provider/tool composition root. Implementation details stay under `internal/`.
 - [`session`](session) — persistent session model and JSONL session manager.
 - [`resource`](resource) — global/project Markdown resource discovery and precedence.
+- [`client`](client) — session-aware headless API and event envelope.
+- [`rpc`](rpc) — JSON-RPC 2.0 server for remote control.
+- [`provider/openai`](provider/openai) — OpenAI-compatible provider transport.
 
 ```go
 rt, err := runtime.New(runtime.Options{

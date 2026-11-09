@@ -1,14 +1,11 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/m4ns0ur/iris/agent"
@@ -16,10 +13,7 @@ import (
 	"github.com/m4ns0ur/iris/internal/contextmgr"
 	"github.com/m4ns0ur/iris/internal/llm"
 	"github.com/m4ns0ur/iris/internal/logger"
-	"github.com/m4ns0ur/iris/internal/tui"
-	"github.com/m4ns0ur/iris/resource"
 	"github.com/m4ns0ur/iris/runtime"
-	"github.com/m4ns0ur/iris/session"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -35,9 +29,11 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "iris",
-	Short: "iris is an AI agent that can perform various tasks based on user input.",
-	Run:   startTui,
+	Use:           "iris",
+	Short:         "iris is an AI agent that can perform various tasks based on user input.",
+	RunE:          runTUI,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 func init() {
@@ -123,145 +119,9 @@ func initConfig() {
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		Logger.Error("Failed to execute the root command", "error", err)
-		Exit()
-	}
-}
-
-func startTui(cmd *cobra.Command, args []string) {
-	if err := config.Load(); err != nil {
-		Logger.Error("error unmarshaling config", "error", err)
-		Exit()
-	}
-
-	Logger.Info("Starting TUI")
-	logger.SetDebug(debug)
-
-	if workdir != "" {
-		if _, err := os.Stat(workdir); os.IsNotExist(err) {
-			Logger.Error("Specified working directory does not exist", "workdir", workdir)
-			Exit()
-		}
-	} else {
-		var err error
-		workdir, err = os.Getwd()
-		if err != nil {
-			Logger.Error("Failed to get current working directory", "error", err)
-			Exit()
-		}
-	}
-
-	cfg := config.GetConfig()
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		Logger.Error("cannot determine home directory", "error", err)
-		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
+		Logger.Error("command failed", "error", err)
+		fmt.Fprintf(os.Stderr, "iris: %v\n", err)
 		os.Exit(1)
-	}
-
-	sessionDir := cfg.Session.Dir
-	if sessionDir == "" {
-		sessionDir = filepath.Join(home, IrisHome, "sessions")
-	}
-
-	resources, err := resource.Load(resource.Options{
-		GlobalDir: filepath.Join(home, IrisHome),
-		Workdir:   workdir,
-	})
-	if err != nil {
-		Logger.Error("cannot load resources", "error", err)
-		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
-		os.Exit(1)
-	}
-	for _, warning := range resources.Warnings {
-		Logger.Warn("resource warning", "warning", warning)
-		fmt.Fprintf(os.Stderr, "iris: resource warning: %s\n", warning)
-	}
-
-	sessions, err := session.NewJSONL(sessionDir)
-	if err != nil {
-		Logger.Error("cannot initialize session store", "error", err)
-		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
-		os.Exit(1)
-	}
-
-	modelSettings := config.DefaultModel()
-	contextWindow := modelSettings.CtxSize
-	if cfg.Context.Window > 0 {
-		contextWindow = cfg.Context.Window
-	}
-	if contextWindow <= 0 {
-		contextWindow = contextmgr.DefaultWindow
-	}
-
-	sessionDefaults := session.CreateOptions{
-		Model:         cfg.DefaultModel,
-		Workspace:     workdir,
-		ModelMetadata: modelMetadata(cfg, contextWindow),
-	}
-
-	irt, err := runtime.New(runtime.Options{
-		Workspace:        workdir,
-		Provider:         llm.NewClient(),
-		Model:            cfg.DefaultModel,
-		MaxTurns:         cfg.Agent.MaxTurns,
-		MaxToolCalls:     cfg.Agent.MaxToolCalls,
-		ToolTimeout:      cfg.Agent.ToolTimeout(),
-		ContextWindow:    contextWindow,
-		ReserveTokens:    cfg.Context.ReserveTokens,
-		CompactAt:        cfg.Context.CompactAt,
-		KeepRecentTokens: cfg.Context.KeepRecentTokens,
-		SummaryMaxTokens: cfg.Context.SummaryMaxTokens,
-		Resources:        resources,
-		Security:         runtimeSecurity(cfg.Security),
-	})
-	if err != nil {
-		Logger.Error("invalid runtime configuration", "error", err)
-		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
-		os.Exit(1)
-	}
-	defer func() {
-		if err := irt.Close(); err != nil {
-			Logger.Warn("failed to clean up runtime resources", "error", err)
-		}
-	}()
-
-	for _, warning := range irt.Warnings() {
-		Logger.Warn("security warning", "warning", warning)
-		fmt.Fprintf(os.Stderr, "iris: warning: %s\n", warning)
-	}
-
-	irisAgent, err := irt.NewAgent()
-	if err != nil {
-		Logger.Error("failed to create agent", "error", err)
-		fmt.Fprintf(os.Stderr, "Iris cannot start: %v\n", err)
-		os.Exit(1)
-	}
-	defer func() {
-		if err := irisAgent.Close(); err != nil {
-			Logger.Warn("failed to clean up agent resources", "error", err)
-		}
-	}()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	if err := tui.Run(ctx, tui.Options{
-		Agent:           irisAgent,
-		Sessions:        sessions,
-		SessionDefaults: sessionDefaults,
-		Resources:       resources,
-	}); err != nil {
-		Logger.Error("TUI failed to start", "error", err)
-		// Exit uses os.Exit, which skips deferred cleanup.
-		if closeErr := irisAgent.Close(); closeErr != nil {
-			Logger.Warn("failed to clean up agent resources", "error", closeErr)
-		}
-		if closeErr := irt.Close(); closeErr != nil {
-			Logger.Warn("failed to clean up runtime resources", "error", closeErr)
-		}
-		Exit()
 	}
 }
 

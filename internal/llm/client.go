@@ -90,6 +90,7 @@ var _ provider.Provider = (*LLMClient)(nil)
 
 type LLMClient struct {
 	URL            string
+	APIKey         string
 	MaxRetries     int
 	RequestTimeout time.Duration
 	Model          string
@@ -182,6 +183,9 @@ func (c *LLMClient) Generate(
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "text/event-stream")
+		if c.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+c.APIKey)
+		}
 
 		res, err := httpClient.Do(req)
 		if err != nil {
