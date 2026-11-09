@@ -28,10 +28,9 @@ func TestAgentCompactsContextButPreservesFullHistory(t *testing.T) {
 		mainMaxTokens int
 	)
 
-	fake := provider.ProviderFunc(func(
+	fake := provider.ResponseFunc(func(
 		_ context.Context,
 		request provider.Request,
-		_ func(provider.Delta),
 	) (provider.Response, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -173,10 +172,9 @@ func TestAgentRecoversFromProviderContextWindowError(t *testing.T) {
 		summaryCalls int
 	)
 
-	fake := provider.ProviderFunc(func(
+	fake := provider.ResponseFunc(func(
 		_ context.Context,
 		request provider.Request,
-		_ func(provider.Delta),
 	) (provider.Response, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -268,10 +266,9 @@ func TestAgentIncludesResourcesInSystemPrompt(t *testing.T) {
 	}
 
 	var systemPrompt string
-	fake := provider.ProviderFunc(func(
+	fake := provider.ResponseFunc(func(
 		_ context.Context,
 		request provider.Request,
-		_ func(provider.Delta),
 	) (provider.Response, error) {
 		if len(request.Messages) > 0 {
 			systemPrompt = messageTextForTest(request.Messages[0].Content)

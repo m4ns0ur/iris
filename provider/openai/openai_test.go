@@ -43,9 +43,9 @@ func TestNewSendsAuthAndUsesBaseURL(t *testing.T) {
 		HTTPClient:     server.Client(),
 	})
 
-	response, err := p.Generate(context.Background(), provider.Request{Model: "request-model"}, nil)
+	response, err := provider.Collect(context.Background(), p, provider.Request{Model: "request-model"})
 	if err != nil {
-		t.Fatalf("Generate() error = %v", err)
+		t.Fatalf("Collect() error = %v", err)
 	}
 	if response.Content != "ok" {
 		t.Fatalf("content = %q", response.Content)

@@ -51,6 +51,15 @@ reserve_tokens = 512
 compact_at = 0.75
 keep_recent_tokens = 2048
 summary_max_tokens = 256
+
+[[models]]
+name = "test-model"
+context_size = 9000
+tool_calling = true
+reasoning = true
+structured_output = true
+vision = true
+sampling_parameters = ["temperature", "top_p"]
 `)); err != nil {
 		t.Fatalf("ReadConfig() error = %v", err)
 	}
@@ -103,6 +112,15 @@ summary_max_tokens = 256
 		cfg.Context.CompactAt != 0.75 || cfg.Context.KeepRecentTokens != 2048 ||
 		cfg.Context.SummaryMaxTokens != 256 {
 		t.Fatalf("context settings = %+v", cfg.Context)
+	}
+	if len(cfg.Models) != 1 {
+		t.Fatalf("models = %+v", cfg.Models)
+	}
+	capabilities := cfg.Models[0].Capabilities()
+	if capabilities.ContextWindow != 9000 || !capabilities.ToolCalling ||
+		!capabilities.Reasoning || !capabilities.StructuredOutput ||
+		!capabilities.Vision || len(capabilities.SamplingParameters) != 2 {
+		t.Fatalf("model capabilities = %+v", capabilities)
 	}
 }
 

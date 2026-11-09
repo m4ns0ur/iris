@@ -136,28 +136,28 @@ func (e *HTTPStatusError) Error() string {
 	return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body)
 }
 
-// Generate implements provider.Provider. Cancellation of ctx aborts the HTTP
-// request, any retry backoff, and stream reading.
-func (c *LLMClient) Generate(
+// Stream implements provider.Provider. Connection/setup errors are returned
+// directly; errors after the stream starts are sent as ErrorEvent.
+func (c *LLMClient) Stream(
 	ctx context.Context,
 	request provider.Request,
-	onDelta func(provider.Delta),
-) (provider.Response, error) {
+) (<-chan provider.StreamEvent, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return provider.Response{}, err
-	}
-	if onDelta == nil {
-		onDelta = func(provider.Delta) {}
+		return nil, err
 	}
 
 	callCtx := ctx
 	var cancel context.CancelFunc
 	if c.RequestTimeout > 0 {
 		callCtx, cancel = context.WithTimeout(ctx, c.RequestTimeout)
-		defer cancel()
+	}
+	cleanup := func() {
+		if cancel != nil {
+			cancel()
+		}
 	}
 
 	payload := createPayload(c.Model, request)
@@ -221,7 +221,8 @@ func (c *LLMClient) Generate(
 
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if callCtx.Err() != nil {
-			return provider.Response{}, c.requestContextError(ctx, callCtx)
+			cleanup()
+			return nil, c.requestContextError(ctx, callCtx)
 		}
 
 		if attempt > 1 {
@@ -235,7 +236,8 @@ func (c *LLMClient) Generate(
 			select {
 			case <-callCtx.Done():
 				timer.Stop()
-				return provider.Response{}, c.requestContextError(ctx, callCtx)
+				cleanup()
+				return nil, c.requestContextError(ctx, callCtx)
 			case <-timer.C:
 			}
 			retryDelay *= 2
@@ -247,7 +249,8 @@ func (c *LLMClient) Generate(
 		}
 
 		if callCtx.Err() != nil {
-			return provider.Response{}, c.requestContextError(ctx, callCtx)
+			cleanup()
+			return nil, c.requestContextError(ctx, callCtx)
 		}
 
 		var statusErr *HTTPStatusError
@@ -257,11 +260,12 @@ func (c *LLMClient) Generate(
 			statusErr.Status != http.StatusTooManyRequests {
 			// Client errors are not transient; retrying cannot help.
 			Logger.Error("LLM request rejected", "status", statusErr.Status)
+			cleanup()
 			if statusErr.Status == http.StatusRequestEntityTooLarge ||
 				provider.IsContextWindowError(statusErr) {
-				return provider.Response{}, fmt.Errorf("%w: %w", provider.ErrContextWindow, err)
+				return nil, fmt.Errorf("%w: %w", provider.ErrContextWindow, err)
 			}
-			return provider.Response{}, err
+			return nil, err
 		}
 
 		if attempt < attempts {
@@ -280,13 +284,33 @@ func (c *LLMClient) Generate(
 			err = errors.New("LLM server returned no response")
 		}
 		if callCtx.Err() != nil {
-			return provider.Response{}, c.requestContextError(ctx, callCtx)
+			cleanup()
+			return nil, c.requestContextError(ctx, callCtx)
 		}
-		return provider.Response{}, fmt.Errorf("failed to connect to LLM server after %d attempts: %w", attempts, err)
+		cleanup()
+		return nil, fmt.Errorf("failed to connect to LLM server after %d attempts: %w", attempts, err)
 	}
-	defer res.Body.Close()
 
-	reader := bufio.NewReader(res.Body)
+	events := make(chan provider.StreamEvent)
+	go func() {
+		defer close(events)
+		defer res.Body.Close()
+		if cancel != nil {
+			defer cancel()
+		}
+		c.readStream(callCtx, ctx, res.Body, events)
+	}()
+
+	return events, nil
+}
+
+func (c *LLMClient) readStream(
+	callCtx context.Context,
+	parent context.Context,
+	body io.Reader,
+	events chan<- provider.StreamEvent,
+) {
+	reader := bufio.NewReader(body)
 
 	var (
 		fullResponse  strings.Builder
@@ -314,20 +338,44 @@ func (c *LLMClient) Generate(
 		}
 	}
 
+	send := func(event provider.StreamEvent) bool {
+		// Prefer delivering the event if a consumer is ready, even when the
+		// request context has just been cancelled or timed out. This keeps
+		// terminal error events observable.
+		select {
+		case events <- event:
+			return true
+		default:
+		}
+		select {
+		case events <- event:
+			return true
+		case <-callCtx.Done():
+			return false
+		}
+	}
+
+	fail := func(err error) {
+		_ = send(provider.ErrorEvent{Err: err})
+	}
+
 	for {
 		if callCtx.Err() != nil {
-			return assembledResponse(), c.requestContextError(ctx, callCtx)
+			fail(c.requestContextError(parent, callCtx))
+			return
 		}
 
 		line, readErr := reader.ReadBytes('\n')
 		if readErr != nil {
 			if callCtx.Err() != nil {
-				return assembledResponse(), c.requestContextError(ctx, callCtx)
+				fail(c.requestContextError(parent, callCtx))
+				return
 			}
 			if errors.Is(readErr, io.EOF) {
 				break
 			}
-			return assembledResponse(), fmt.Errorf("error reading stream: %w", readErr)
+			fail(fmt.Errorf("error reading stream: %w", readErr))
+			return
 		}
 
 		line = bytes.TrimSpace(line)
@@ -361,7 +409,8 @@ func (c *LLMClient) Generate(
 		}
 
 		if callCtx.Err() != nil {
-			return assembledResponse(), c.requestContextError(ctx, callCtx)
+			fail(c.requestContextError(parent, callCtx))
+			return
 		}
 
 		choice := chunk.Choices[0]
@@ -401,15 +450,18 @@ func (c *LLMClient) Generate(
 		}
 
 		if delta.ReasoningContent != "" || delta.Content != "" || len(delta.ToolCalls) > 0 {
-			onDelta(delta)
+			if !send(provider.DeltaEvent{Delta: delta}) {
+				return
+			}
 		}
 	}
 
 	if callCtx.Err() != nil {
-		return assembledResponse(), c.requestContextError(ctx, callCtx)
+		fail(c.requestContextError(parent, callCtx))
+		return
 	}
 
-	return assembledResponse(), nil
+	_ = send(provider.DoneEvent{Response: assembledResponse()})
 }
 
 // requestContextError turns a cancelled call context into the most useful

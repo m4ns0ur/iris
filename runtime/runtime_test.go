@@ -15,16 +15,16 @@ func TestRuntimeCreatesAgentAndEmitsEvents(t *testing.T) {
 	fake := provider.ProviderFunc(func(
 		_ context.Context,
 		_ provider.Request,
-		onDelta func(provider.Delta),
-	) (provider.Response, error) {
-		if onDelta != nil {
-			onDelta(provider.Delta{Content: "hello"})
-		}
-		return provider.Response{
+	) (<-chan provider.StreamEvent, error) {
+		events := make(chan provider.StreamEvent, 2)
+		events <- provider.DeltaEvent{Delta: provider.Delta{Content: "hello"}}
+		events <- provider.DoneEvent{Response: provider.Response{
 			Content:      "hello",
 			FinishReason: "stop",
 			Usage:        provider.Usage{TotalTokens: 3},
-		}, nil
+		}}
+		close(events)
+		return events, nil
 	})
 
 	rt, err := New(Options{
@@ -74,10 +74,9 @@ func TestRuntimeRejectsNilProvider(t *testing.T) {
 }
 
 func TestRuntimeAgentIsClosedWithRuntime(t *testing.T) {
-	fake := provider.ProviderFunc(func(
+	fake := provider.ResponseFunc(func(
 		context.Context,
 		provider.Request,
-		func(provider.Delta),
 	) (provider.Response, error) {
 		return provider.Response{Content: "ok", FinishReason: "stop"}, nil
 	})
@@ -103,10 +102,9 @@ func TestRuntimeAgentIsClosedWithRuntime(t *testing.T) {
 
 func TestRuntimePassesResourcesToAgent(t *testing.T) {
 	var systemPrompt string
-	fake := provider.ProviderFunc(func(
+	fake := provider.ResponseFunc(func(
 		_ context.Context,
 		request provider.Request,
-		_ func(provider.Delta),
 	) (provider.Response, error) {
 		if len(request.Messages) > 0 {
 			switch content := request.Messages[0].Content.(type) {

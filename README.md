@@ -183,6 +183,12 @@ default_model = 'bartowski/deepreinforce-ai_Ornith-1.0-9B-GGUF:Q5_K_M'
 [[models]]
 name = 'bartowski/deepreinforce-ai_Ornith-1.0-9B-GGUF:Q5_K_M'
 context_size = 75000
+# Descriptive capabilities. See "Providers" below.
+tool_calling = true
+reasoning = true
+structured_output = false
+vision = false
+sampling_parameters = ['temperature', 'top_p', 'top_k']
 temperature = 0.6
 top_p = 0.95
 top_k = 20
@@ -503,8 +509,8 @@ this stream.
 Stable public packages:
 
 - [`agent`](agent) — agent interface, typed events, approval hooks, errors.
-- [`provider`](provider) — LLM provider interface and provider-neutral request,
-  response, message, tool, delta, and usage types.
+- [`provider`](provider) — streaming LLM provider interface, stream events,
+  capabilities, and provider-neutral request/response types.
 - [`tool`](tool) — tool and registry interfaces.
 - [`runtime`](runtime) — constructor, runtime/security options, and the
   provider/tool composition root. Implementation details stay under `internal/`.
@@ -513,6 +519,50 @@ Stable public packages:
 - [`client`](client) — session-aware headless API and event envelope.
 - [`rpc`](rpc) — JSON-RPC 2.0 server for remote control.
 - [`provider/openai`](provider/openai) — OpenAI-compatible provider transport.
+
+### Providers
+
+Providers stream typed events:
+
+```go
+type Provider interface {
+    Stream(ctx context.Context, request Request) (<-chan StreamEvent, error)
+}
+
+type StreamEvent interface{ ... }
+
+type DeltaEvent struct { Delta Delta }
+type DoneEvent struct { Response Response }
+type ErrorEvent struct { Err error }
+```
+
+A stream contains zero or more `DeltaEvent`s followed by exactly one `DoneEvent`
+or `ErrorEvent`. Setup failures are returned directly from `Stream`; failures
+after the stream starts arrive as `ErrorEvent`. The channel must be closed after
+the terminal event, and context cancellation must stop the request.
+
+OpenAI-compatible Chat Completions is the first implementation, available
+through [`provider/openai`](provider/openai). `provider.Collect` is a convenience
+for non-streaming callers. Native provider integrations should be added when
+there is a concrete need.
+
+Model capabilities are descriptive for now:
+
+```toml
+[[models]]
+name = 'local-model'
+context_size = 75000
+tool_calling = true
+reasoning = true
+structured_output = false
+vision = false
+sampling_parameters = ['temperature', 'top_p', 'top_k']
+```
+
+The corresponding Go type is `provider.Capabilities`. Zero values mean the
+capability was not declared; providers must not assume support. Existing
+chat-completion behavior is unchanged until a provider has a concrete reason to
+branch on these capabilities.
 
 ```go
 rt, err := runtime.New(runtime.Options{

@@ -24,7 +24,7 @@ func newTestClient(server *httptest.Server) *LLMClient {
 	}
 }
 
-func TestGenerateStreamCancellation(t *testing.T) {
+func TestStreamCancellation(t *testing.T) {
 	firstChunk := make(chan struct{})
 	var once sync.Once
 
@@ -47,14 +47,32 @@ func TestGenerateStreamCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	events, err := client.Stream(ctx, provider.Request{})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := client.Generate(ctx, provider.Request{}, func(delta provider.Delta) {
-			if delta.Content == "first" {
-				once.Do(func() { close(firstChunk) })
+		for event := range events {
+			switch value := event.(type) {
+			case provider.DeltaEvent:
+				if value.Delta.Content == "first" {
+					once.Do(func() { close(firstChunk) })
+				}
+			case provider.ErrorEvent:
+				errCh <- value.Err
+				return
+			case provider.DoneEvent:
+				errCh <- nil
+				return
 			}
-		})
-		errCh <- err
+		}
+		if ctx.Err() != nil {
+			errCh <- ctx.Err()
+			return
+		}
+		errCh <- errors.New("stream closed without a terminal event")
 	}()
 
 	select {
@@ -68,14 +86,14 @@ func TestGenerateStreamCancellation(t *testing.T) {
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Generate() error = %v, want context.Canceled", err)
+			t.Fatalf("Stream() error = %v, want context.Canceled", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Generate() did not return after cancellation")
+		t.Fatal("stream did not stop after cancellation")
 	}
 }
 
-func TestGenerateStreamRequestDeadline(t *testing.T) {
+func TestStreamRequestDeadline(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -92,16 +110,16 @@ func TestGenerateStreamRequestDeadline(t *testing.T) {
 		HTTP:           server.Client(),
 	}
 
-	_, err := client.Generate(context.Background(), provider.Request{}, nil)
+	_, err := provider.Collect(context.Background(), client, provider.Request{})
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Generate() error = %v, want context.DeadlineExceeded", err)
+		t.Fatalf("Collect() error = %v, want context.DeadlineExceeded", err)
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("error = %v, want a timeout explanation", err)
 	}
 }
 
-func TestGenerateStreamRetryCancellation(t *testing.T) {
+func TestStreamRetryCancellation(t *testing.T) {
 	var requests atomic.Int32
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -123,7 +141,7 @@ func TestGenerateStreamRetryCancellation(t *testing.T) {
 	start := time.Now()
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := client.Generate(ctx, provider.Request{}, nil)
+		_, err := client.Stream(ctx, provider.Request{})
 		errCh <- err
 	}()
 
@@ -133,13 +151,13 @@ func TestGenerateStreamRetryCancellation(t *testing.T) {
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Generate() error = %v, want context.Canceled", err)
+			t.Fatalf("Stream() error = %v, want context.Canceled", err)
 		}
 		if elapsed := time.Since(start); elapsed > 2*time.Second {
 			t.Fatalf("retry cancellation took too long: %s", elapsed)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Generate() did not return after cancelling retries")
+		t.Fatal("Stream() did not return after cancelling retries")
 	}
 
 	if requests.Load() < 1 {
@@ -147,7 +165,7 @@ func TestGenerateStreamRetryCancellation(t *testing.T) {
 	}
 }
 
-func TestGenerateStreamRetriesThenSucceeds(t *testing.T) {
+func TestStreamRetriesThenSucceeds(t *testing.T) {
 	var attempts atomic.Int32
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -170,9 +188,9 @@ func TestGenerateStreamRetriesThenSucceeds(t *testing.T) {
 		HTTP:           server.Client(),
 	}
 
-	response, err := client.Generate(context.Background(), provider.Request{}, nil)
+	response, err := provider.Collect(context.Background(), client, provider.Request{})
 	if err != nil {
-		t.Fatalf("Generate() error = %v", err)
+		t.Fatalf("Collect() error = %v", err)
 	}
 	if got := response.Content; got != "ok" {
 		t.Fatalf("content = %q, want ok", got)
@@ -185,7 +203,7 @@ func TestGenerateStreamRetriesThenSucceeds(t *testing.T) {
 	}
 }
 
-func TestGenerateStreamDoesNotRetryClientErrors(t *testing.T) {
+func TestStreamDoesNotRetryClientErrors(t *testing.T) {
 	var attempts atomic.Int32
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -201,16 +219,16 @@ func TestGenerateStreamDoesNotRetryClientErrors(t *testing.T) {
 		HTTP:           server.Client(),
 	}
 
-	_, err := client.Generate(context.Background(), provider.Request{}, nil)
+	_, err := client.Stream(context.Background(), provider.Request{})
 	if err == nil {
-		t.Fatal("Generate() error = nil, want HTTP status error")
+		t.Fatal("Stream() error = nil, want HTTP status error")
 	}
 	if attempts.Load() != 1 {
 		t.Fatalf("attempts = %d, want 1 (4xx must not be retried)", attempts.Load())
 	}
 }
 
-func TestGenerateStreamPreCancelledContext(t *testing.T) {
+func TestStreamPreCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -220,22 +238,22 @@ func TestGenerateStreamPreCancelledContext(t *testing.T) {
 		RequestTimeout: time.Second,
 	}
 
-	_, err := client.Generate(ctx, provider.Request{}, nil)
+	_, err := client.Stream(ctx, provider.Request{})
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Generate() error = %v, want context.Canceled", err)
+		t.Fatalf("Stream() error = %v, want context.Canceled", err)
 	}
 }
 
-func TestGenerateWrapsContextWindowClientError(t *testing.T) {
+func TestStreamWrapsContextWindowClientError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "maximum context length exceeded", http.StatusBadRequest)
 	}))
 	defer server.Close()
 
 	client := newTestClient(server)
-	_, err := client.Generate(context.Background(), provider.Request{}, nil)
+	_, err := client.Stream(context.Background(), provider.Request{})
 	if !errors.Is(err, provider.ErrContextWindow) {
-		t.Fatalf("Generate() error = %v, want provider.ErrContextWindow", err)
+		t.Fatalf("Stream() error = %v, want provider.ErrContextWindow", err)
 	}
 	if !provider.IsContextWindowError(err) {
 		t.Fatalf("IsContextWindowError(%v) = false", err)

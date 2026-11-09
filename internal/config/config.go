@@ -6,6 +6,7 @@ import (
 
 	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/internal/policy"
+	"github.com/m4ns0ur/iris/provider"
 	"github.com/spf13/viper"
 )
 
@@ -24,15 +25,33 @@ type Config struct {
 
 // ModelSettings represents one [models.'<name>'] block
 type ModelSettings struct {
-	Name             string  `mapstructure:"name"`
-	CtxSize          int     `mapstructure:"context_size"`
-	Temperature      float32 `mapstructure:"temperature"`
-	TopP             float32 `mapstructure:"top_p"`
-	TopK             int     `mapstructure:"top_k"`
-	MinP             float32 `mapstructure:"min_p"`
-	RepeatPenalty    float32 `mapstructure:"repeat_penalty"`
-	PresencePenalty  float32 `mapstructure:"presence_penalty"`
-	FrequencyPenalty float32 `mapstructure:"frequency_penalty"`
+	Name               string   `mapstructure:"name"`
+	CtxSize            int      `mapstructure:"context_size"`
+	ToolCalling        bool     `mapstructure:"tool_calling"`
+	Reasoning          bool     `mapstructure:"reasoning"`
+	StructuredOutput   bool     `mapstructure:"structured_output"`
+	Vision             bool     `mapstructure:"vision"`
+	SamplingParameters []string `mapstructure:"sampling_parameters"`
+	Temperature        float32  `mapstructure:"temperature"`
+	TopP               float32  `mapstructure:"top_p"`
+	TopK               int      `mapstructure:"top_k"`
+	MinP               float32  `mapstructure:"min_p"`
+	RepeatPenalty      float32  `mapstructure:"repeat_penalty"`
+	PresencePenalty    float32  `mapstructure:"presence_penalty"`
+	FrequencyPenalty   float32  `mapstructure:"frequency_penalty"`
+}
+
+// Capabilities returns descriptive model capabilities. They are metadata for
+// now; provider integrations can begin honoring them as concrete needs arise.
+func (m ModelSettings) Capabilities() provider.Capabilities {
+	return provider.Capabilities{
+		ContextWindow:      m.CtxSize,
+		ToolCalling:        m.ToolCalling,
+		Reasoning:          m.Reasoning,
+		StructuredOutput:   m.StructuredOutput,
+		Vision:             m.Vision,
+		SamplingParameters: append([]string(nil), m.SamplingParameters...),
+	}
 }
 
 // LLMSettings controls LLM request lifecycle.

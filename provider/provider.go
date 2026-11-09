@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -44,6 +45,17 @@ func IsContextWindowError(err error) bool {
 		}
 	}
 	return false
+}
+
+// Capabilities describes optional model features. Zero values mean the
+// capability was not declared; providers must not assume it is supported.
+type Capabilities struct {
+	ContextWindow      int      `json:"context_window,omitempty"`
+	ToolCalling        bool     `json:"tool_calling,omitempty"`
+	Reasoning          bool     `json:"reasoning,omitempty"`
+	StructuredOutput   bool     `json:"structured_output,omitempty"`
+	Vision             bool     `json:"vision,omitempty"`
+	SamplingParameters []string `json:"sampling_parameters,omitempty"`
 }
 
 // Message is one conversation message.
@@ -142,17 +154,109 @@ type Response struct {
 	Usage            Usage      `json:"usage"`
 }
 
-// Provider is the stable LLM backend interface. Generate streams deltas to
-// onDelta (which may be nil) and returns the assembled response. Implementations
-// must honour context cancellation for the request, retries, and streaming.
+// StreamEvent is one item in a provider stream. Implementations send zero or
+// more DeltaEvents followed by exactly one DoneEvent or ErrorEvent.
+type StreamEvent interface {
+	streamEvent()
+}
+
+// DeltaEvent carries one incremental assistant, reasoning, or tool-call update.
+type DeltaEvent struct {
+	Delta Delta
+}
+
+func (DeltaEvent) streamEvent() {}
+
+// DoneEvent is the terminal successful event and contains the assembled
+// response.
+type DoneEvent struct {
+	Response Response
+}
+
+func (DoneEvent) streamEvent() {}
+
+// ErrorEvent is the terminal error event for failures that occur after a
+// stream has started.
+type ErrorEvent struct {
+	Err error
+}
+
+func (ErrorEvent) streamEvent() {}
+
+// Provider is the stable LLM backend interface. Stream starts a request and
+// returns a channel of events. Setup errors are returned directly; errors after
+// the stream starts are sent as an ErrorEvent. Implementations must close the
+// channel after the terminal event and must honour context cancellation for
+// the request, retries, and streaming.
 type Provider interface {
-	Generate(ctx context.Context, request Request, onDelta func(Delta)) (Response, error)
+	Stream(ctx context.Context, request Request) (<-chan StreamEvent, error)
 }
 
 // ProviderFunc adapts a function to Provider.
-type ProviderFunc func(ctx context.Context, request Request, onDelta func(Delta)) (Response, error)
+type ProviderFunc func(ctx context.Context, request Request) (<-chan StreamEvent, error)
 
-// Generate implements Provider.
-func (f ProviderFunc) Generate(ctx context.Context, request Request, onDelta func(Delta)) (Response, error) {
-	return f(ctx, request, onDelta)
+// Stream implements Provider.
+func (f ProviderFunc) Stream(ctx context.Context, request Request) (<-chan StreamEvent, error) {
+	return f(ctx, request)
+}
+
+// ResponseFunc adapts a non-streaming completion function to Provider. It is
+// useful for simple providers and tests.
+type ResponseFunc func(ctx context.Context, request Request) (Response, error)
+
+// Stream implements Provider.
+func (f ResponseFunc) Stream(ctx context.Context, request Request) (<-chan StreamEvent, error) {
+	response, err := f(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	events := make(chan StreamEvent, 1)
+	events <- DoneEvent{Response: response}
+	close(events)
+	return events, nil
+}
+
+// Collect consumes a provider stream and returns its final response. It is a
+// convenience for non-streaming callers and tests.
+func Collect(ctx context.Context, p Provider, request Request) (Response, error) {
+	if p == nil {
+		return Response{}, fmt.Errorf("provider is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	events, err := p.Stream(ctx, request)
+	if err != nil {
+		return Response{}, err
+	}
+	if events == nil {
+		return Response{}, fmt.Errorf("provider returned a nil stream")
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return Response{}, ctx.Err()
+		case event, ok := <-events:
+			if !ok {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return Response{}, ctxErr
+				}
+				return Response{}, fmt.Errorf("provider stream closed without a terminal event")
+			}
+			switch value := event.(type) {
+			case DeltaEvent:
+				continue
+			case DoneEvent:
+				return value.Response, nil
+			case ErrorEvent:
+				if value.Err == nil {
+					return Response{}, fmt.Errorf("provider stream failed")
+				}
+				return Response{}, value.Err
+			default:
+				return Response{}, fmt.Errorf("unknown provider stream event %T", event)
+			}
+		}
+	}
 }

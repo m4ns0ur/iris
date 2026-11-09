@@ -431,10 +431,9 @@ func TestAgentLoadHistoryAndSnapshot(t *testing.T) {
 		t.Fatalf("policy.New() error = %v", err)
 	}
 
-	fake := provider.ProviderFunc(func(
+	fake := provider.ResponseFunc(func(
 		context.Context,
 		provider.Request,
-		func(provider.Delta),
 	) (provider.Response, error) {
 		return provider.Response{Content: "ok", FinishReason: "stop"}, nil
 	})

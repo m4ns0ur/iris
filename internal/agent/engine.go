@@ -620,7 +620,7 @@ func (a *Agent) summarize(
 	transcript string,
 	maxTokens int,
 ) (contextmgr.SummarizeResult, error) {
-	response, err := a.provider.Generate(ctx, provider.Request{
+	response, err := a.streamResponse(ctx, provider.Request{
 		Model: a.model,
 		Messages: []provider.Message{
 			{Role: "system", Content: contextSummaryPrompt},
@@ -636,6 +636,47 @@ func (a *Agent) summarize(
 		Summary: response.Content,
 		Usage:   response.Usage,
 	}, nil
+}
+
+func (a *Agent) streamResponse(
+	ctx context.Context,
+	request provider.Request,
+	onDelta func(provider.Delta),
+) (provider.Response, error) {
+	events, err := a.provider.Stream(ctx, request)
+	if err != nil {
+		return provider.Response{}, err
+	}
+	if events == nil {
+		return provider.Response{}, errors.New("provider returned a nil stream")
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return provider.Response{}, ctx.Err()
+		case event, ok := <-events:
+			if !ok {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return provider.Response{}, ctxErr
+				}
+				return provider.Response{}, errors.New("provider stream closed without a terminal event")
+			}
+			switch value := event.(type) {
+			case provider.DeltaEvent:
+				if onDelta != nil {
+					onDelta(value.Delta)
+				}
+			case provider.DoneEvent:
+				return value.Response, nil
+			case provider.ErrorEvent:
+				if value.Err == nil {
+					return provider.Response{}, errors.New("provider stream failed")
+				}
+				return provider.Response{}, value.Err
+			}
+		}
+	}
 }
 
 // CompactionStarted implements contextmgr.Observer.
@@ -742,7 +783,7 @@ func (a *Agent) next(ctx context.Context) error {
 		}
 	}
 
-	response, err := a.provider.Generate(ctx, request, onDelta)
+	response, err := a.streamResponse(ctx, request, onDelta)
 	if err != nil && provider.IsContextWindowError(err) {
 		Logger.Warn("LLM rejected the prompt for exceeding its context window; forcing compaction")
 
@@ -753,7 +794,7 @@ func (a *Agent) next(ctx context.Context) error {
 				id   string
 				name string
 			})
-			response, err = a.provider.Generate(ctx, request, onDelta)
+			response, err = a.streamResponse(ctx, request, onDelta)
 		} else {
 			Logger.Warn("Context recovery failed", "error", forceErr)
 			err = fmt.Errorf("%w (forced compaction failed: %v)", err, forceErr)
