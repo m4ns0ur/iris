@@ -95,7 +95,8 @@ type Options struct {
 	// SummaryMaxTokens bounds generated conversation summaries.
 	SummaryMaxTokens int
 
-	// Resources supplies SYSTEM.md, AGENTS.md, skills, and prompt templates.
+	// Resources supplies trusted user-level and untrusted project instruction
+	// resources. Project content is framed as untrusted data.
 	Resources *resource.Resources
 
 	// Security configures the execution boundary. Zero values use secure

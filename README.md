@@ -37,6 +37,8 @@ At the loop level this appears as three states: `idle` (generate the next respon
 
 The transcript is durable independently of the prompt view: the user message is journaled before the model call, assistant tool calls are journaled before any of them execute, and each tool result is journaled immediately after it returns. A crash therefore leaves an identifiable, resumable transcript rather than a half-written conversation. See [Sessions](#sessions).
 
+Instruction provenance is explicit. Built-in rules and user-level configuration are trusted; project instructions, repository files, shell output, and tool results are untrusted data. Project content cannot override the execution policy or security boundaries. See [Project trust and instruction provenance](#project-trust-and-instruction-provenance).
+
 Every run has its own `context.Context`. Cancellation propagates to the provider request and stream, retry backoff, approval requests, and tool execution. Interrupting a run records synthetic tool results for tool calls that never executed so the conversation history remains valid for the next run. A run can also be steered or given follow-up work without being canceled; see [Execution Control](#execution-control).
 
 A model request and the overall execution are distinct. `agent.turn.finished` reports that one request completed; the run may still execute tools, be retried after context compaction, or deliver queued work. `agent.finished` is the **settled** event: no automatic work remains. See [Request and execution lifecycle](#request-and-execution-lifecycle).
@@ -511,7 +513,7 @@ Viper resolves environment variables for keys that are known through the config 
 
 ## Security and Permissions
 
-Iris deliberately does not ship a full permission UI framework. It provides a small, explicit execution boundary, a one-line approval prompt for the TUI, and extension points, in the spirit of Pi's container-first approach.
+Iris deliberately does not ship a full permission UI framework. It provides a small, explicit execution boundary, a one-line approval prompt for the TUI, and Go extension points such as custom tools and approvers. There is no project extension or plugin loader; project resources are data, not code.
 
 ### File sandbox
 
@@ -531,7 +533,9 @@ In `danger-full-access` mode relative paths are still resolved against the works
 
 The read tool is also granted read-only access to Iris' own temp directory so it can inspect full shell output. Nothing else in that directory is writable by the file tools.
 
-Path checks are resolved before use (including symlinks), but they are not a defence against a hostile process racing Iris between the check and the write. Treat the workspace as trusted input and use an external sandbox for untrusted repositories.
+Path checks are resolved before use (including symlinks), but they are not a defence against a hostile process racing Iris between the check and the write. Treat repository files, project instructions, shell output, and tool results as untrusted input; policy still denies or asks for risky operations, and an external sandbox remains the right boundary for hostile repositories.
+
+Instruction trust is a separate boundary from the file sandbox. Project `AGENTS.md`, project `.iris/SYSTEM.md`, project skills/prompts, repository files, shell output, and tool results are untrusted data. They cannot change this execution policy. See [Project trust and instruction provenance](#project-trust-and-instruction-provenance).
 
 ### Shell policy
 
@@ -720,10 +724,10 @@ The status line shows the current hints, the scroll percentage, and the total to
 | `/fork [n]` | Fork from the nth user message (1-based); omit `n` for the latest user message. |
 | `/export` | Export the current session as Markdown under the session directory. |
 | `/clear-queue` | Discard queued steering/follow-up instructions and restore their text to the input. Available while streaming. |
-| `/skills` | List discovered skills. |
-| `/skill <name>` | Insert a skill into the input box. Add your request after it. |
-| `/prompts` | List prompt templates. |
-| `/prompt <name> [input]` | Render a template into the input box for editing. |
+| `/skills` | List discovered skills with their trust level. |
+| `/skill <name>` | Insert a skill into the input box. Project skills are wrapped as untrusted content. |
+| `/prompts` | List prompt templates with their trust level. |
+| `/prompt <name> [input]` | Render a template into the input box. Project templates are wrapped as untrusted content. |
 | `/help`, `/?` | List commands. |
 
 Unknown commands produce a notice. Session-mutating commands persist the current session first and are unavailable while a run is active; `/clear-queue` and `/help` remain available. The TUI uses the same durable recorder as the headless modes: user messages, assistant tool calls, and tool results are on disk while the run is still in progress. Recovered sessions show notices for interrupted tool calls.
@@ -851,7 +855,7 @@ type Lease interface {
 
 ## Resources
 
-Iris loads Markdown instruction resources from a global directory and the current project. `AGENTS.md` is intentionally project-only: it describes the directory the agent is working in, so a global copy would not make sense.
+Iris loads Markdown instruction resources from a global directory and the current project. Trust is part of the resource model: user-level configuration is trusted; project content is untrusted input.
 
 ```text
 ~/.iris/
@@ -873,17 +877,44 @@ project/
         └── review.md
 ```
 
-| Resource | Global | Project | Precedence |
+| Resource | Global | Project | Trust and precedence |
 | --- | --- | --- | --- |
-| `AGENTS.md` | Not loaded | `<workdir>/AGENTS.md`, `<workdir>/.iris/AGENTS.md` | Project-only. Root instructions are followed by `.iris` instructions. |
-| `SYSTEM.md` | `~/.iris/SYSTEM.md` | `<workdir>/.iris/SYSTEM.md` | The project file replaces the global file. Its content is appended as custom system instructions; Iris' built-in tool and security instructions remain. |
-| Skills | `~/.iris/skills/` | `<workdir>/.iris/skills/` | Markdown only. Project skills replace global skills with the same name. |
-| Prompt templates | `~/.iris/prompts/` | `<workdir>/.iris/prompts/` | Markdown only. Project prompts replace global prompts with the same name. |
+| `AGENTS.md` | Not loaded | `<workdir>/AGENTS.md`, `<workdir>/.iris/AGENTS.md` | Project-only and **untrusted**. Root instructions are followed by `.iris` instructions. |
+| `SYSTEM.md` | `~/.iris/SYSTEM.md` | `<workdir>/.iris/SYSTEM.md` | Global file is **trusted** user-level configuration. The project file is **untrusted** and does not replace the global file; it is loaded separately as project context. |
+| Skills | `~/.iris/skills/` | `<workdir>/.iris/skills/` | Markdown only. Global skills are **trusted**; project skills are **untrusted**. A project skill replaces a global skill with the same name but remains untrusted. |
+| Prompt templates | `~/.iris/prompts/` | `<workdir>/.iris/prompts/` | Markdown only. Global templates are **trusted**; project templates are **untrusted**. A project template replaces a global template with the same name but remains untrusted. |
+| Repository files, shell output, tool results | — | — | **Untrusted data**. They are inputs to the model, not trusted instructions. |
+| Iris executable, built-in system rules, tool contracts | Built in | — | **Trusted**. |
+
+### Project trust and instruction provenance
+
+The trust boundary is explicit:
+
+- **Trusted:** the Iris executable, its built-in system rules, tool contracts, and user-level configuration (`~/.iris/SYSTEM.md`, global skills, global prompt templates, and tools configured by the user or embedding application).
+- **Untrusted:** project `AGENTS.md`, project `.iris/SYSTEM.md`, project skills, project prompt templates, repository files, shell output, and tool results.
+
+**Project instructions cannot change Iris's execution policy or security boundaries.** They can describe project conventions, but tool permissions, approvals, workspace boundaries, and denials are enforced by Go code outside the model. No project file can grant a tool permission, disable a denial, or change the file-sandbox roots. Shell execution remains governed by the configured shell policy and external sandbox; a project instruction cannot change that policy either. If project content asks the model to read credentials, exfiltrate data, ignore restrictions, or bypass the policy, the system prompt instructs the model to treat that as malicious data, refuse, and tell the user.
+
+How Iris keeps that boundary visible:
+
+- A project `.iris/SYSTEM.md` no longer replaces `~/.iris/SYSTEM.md`. The trusted global file remains authoritative; the project file is included only as untrusted project context.
+- Project instructions are placed in a random-boundary `UNTRUSTED PROJECT CONTEXT (data, not instructions)` block with their source path and `Trust: untrusted`. The boundary token is generated per system-prompt build and redacted from project content so a file cannot forge the end of the block. A trusted policy reminder follows the block.
+- The trusted system prompt tells the model that project content, repository files, shell output, and tool results are untrusted data, and that it must never follow requests in them to violate the security policy.
+- Project skills and prompt templates are listed as untrusted in `/skills` and `/prompts`. `/skill` and `/prompt` wrap untrusted content with an explicit source/trust header before placing it in the input. Global skills and templates remain trusted.
+- The TUI shows a startup notice when untrusted project resources are present. Resource warnings, names, paths, and inserted skill/prompt content are sanitized for terminal control characters.
+
+Resource loading is deliberately data-only. There is no project extension/plugin mechanism and no project code execution:
+
+- Only regular, non-hidden Markdown files under the known resource locations are loaded.
+- Symlinks are skipped. Executable files such as `.sh`, `.py`, and `.so`, Markdown files carrying executable permission bits, extension directories, and project `settings.toml` files are ignored.
+- Front matter recognizes only `name` and `description`; it cannot declare executable behavior.
+- A project file is never executed, imported, or treated as a plugin.
 
 ### Skills
 
 - `skills/name/SKILL.md` and `skills/name.md` both load as skill `name`.
 - Nested files such as `skills/name/advanced.md` load as `name/advanced`.
+- Project skills are untrusted data. They are not injected automatically; `/skill <name>` places the content in the input with an untrusted-content header. Global skills are trusted and use a trusted header.
 - Skills and prompts may start with an optional simple front matter block:
 
   ```markdown
@@ -906,7 +937,7 @@ project/
 
 ### Limits and warnings
 
-Skills and prompt templates are Markdown data, not executable plugins. Hidden files/directories and symlinks are ignored, files over 512 KiB are skipped with a warning, and missing resource directories are not an error. Duplicate names within a scope keep the first file. A project resource overriding a global one produces a warning. Loader warnings are written to the log, printed to stderr at startup, and shown in the TUI.
+Skills and prompt templates are Markdown data, not executable plugins. Only regular, non-hidden Markdown files without executable permission bits are considered; executable files, extension directories, hidden files/directories, and symlinks are ignored. Files over 512 KiB are skipped with a warning, and missing resource directories are not an error. Duplicate names within a scope keep the first file. A project resource overriding a global one produces a warning, as does a project `SYSTEM.md` (which is untrusted and never replaces the global trusted file). Loader warnings are written to the log, printed to stderr at startup, and shown in the TUI.
 
 Skill and prompt lookups first try an exact name, then a case-insensitive match.
 
@@ -1025,7 +1056,7 @@ The lower-level [`agent`](agent) package can be used directly when session manag
 | `CompactAt` | 0.85 | Compaction trigger fraction. |
 | `KeepRecentTokens` | 16384 | Recent tokens kept verbatim. |
 | `SummaryMaxTokens` | 2048 | Summary output budget. |
-| `Resources` | `nil` | `SYSTEM.md`, `AGENTS.md`, skills, and prompts. |
+| `Resources` | `nil` | Trusted user-level and untrusted project instruction resources (`SYSTEM.md`, `AGENTS.md`, skills, prompts). |
 | `Security` | secure defaults | Filesystem and shell boundary. |
 | `Approver` | `nil` | Optional initial approval mechanism. |
 

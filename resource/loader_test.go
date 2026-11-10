@@ -46,11 +46,21 @@ func TestLoaderPrecedenceAndDiscovery(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if loaded.SystemPrompt != "project system instructions" {
-		t.Fatalf("system prompt = %q", loaded.SystemPrompt)
+	if loaded.SystemPrompt != "global system instructions" {
+		t.Fatalf("trusted system prompt = %q, want the global file", loaded.SystemPrompt)
 	}
-	if loaded.SystemPromptSource.Scope != ScopeProject || loaded.SystemPromptSource.Path == "" {
-		t.Fatalf("system prompt source = %+v", loaded.SystemPromptSource)
+	if loaded.SystemPromptSource.Scope != ScopeGlobal ||
+		loaded.SystemPromptSource.EffectiveTrust() != TrustTrusted ||
+		loaded.SystemPromptSource.Path == "" {
+		t.Fatalf("trusted system prompt source = %+v", loaded.SystemPromptSource)
+	}
+	if loaded.ProjectSystemPrompt != "project system instructions" {
+		t.Fatalf("project system prompt = %q", loaded.ProjectSystemPrompt)
+	}
+	if loaded.ProjectSystemPromptSource.Scope != ScopeProject ||
+		loaded.ProjectSystemPromptSource.EffectiveTrust() != TrustUntrusted ||
+		loaded.ProjectSystemPromptSource.Path == "" {
+		t.Fatalf("project system prompt source = %+v", loaded.ProjectSystemPromptSource)
 	}
 
 	if len(loaded.Instructions) != 2 {
@@ -60,8 +70,8 @@ func TestLoaderPrecedenceAndDiscovery(t *testing.T) {
 		if strings.Contains(instruction.Content, "global agents") {
 			t.Fatalf("global AGENTS.md was loaded: %+v", loaded.Instructions)
 		}
-		if instruction.Scope != ScopeProject {
-			t.Fatalf("instruction scope = %q, want project", instruction.Scope)
+		if instruction.Scope != ScopeProject || instruction.EffectiveTrust() != TrustUntrusted {
+			t.Fatalf("instruction provenance = %+v, want project/untrusted", instruction)
 		}
 	}
 	wantInstructions := []struct {
@@ -84,13 +94,22 @@ func TestLoaderPrecedenceAndDiscovery(t *testing.T) {
 	if !ok || !strings.Contains(coding.Content, "Use tabs") || coding.Description != "coding conventions" {
 		t.Fatalf("coding skill = %+v, ok=%v", coding, ok)
 	}
+	if coding.EffectiveTrust() != TrustUntrusted {
+		t.Fatalf("coding skill trust = %q, want untrusted", coding.EffectiveTrust())
+	}
 	globalSkill, ok := loaded.Skill("global-skill")
 	if !ok || globalSkill.Scope != ScopeGlobal || globalSkill.Description != "global description" {
 		t.Fatalf("global skill = %+v, ok=%v", globalSkill, ok)
 	}
+	if globalSkill.EffectiveTrust() != TrustTrusted {
+		t.Fatalf("global skill trust = %q, want trusted", globalSkill.EffectiveTrust())
+	}
 	shared, ok := loaded.Skill("shared")
 	if !ok || shared.Scope != ScopeProject || shared.Content != "project shared skill" {
 		t.Fatalf("shared skill = %+v, ok=%v", shared, ok)
+	}
+	if shared.EffectiveTrust() != TrustUntrusted {
+		t.Fatalf("shared skill trust = %q, want untrusted", shared.EffectiveTrust())
 	}
 	if _, ok := loaded.Skill(".hidden"); ok {
 		t.Fatal("hidden skill was loaded")
@@ -100,7 +119,7 @@ func TestLoaderPrecedenceAndDiscovery(t *testing.T) {
 		t.Fatalf("prompts = %v", names)
 	}
 	review, ok := loaded.Prompt("review")
-	if !ok || review.Scope != ScopeProject {
+	if !ok || review.Scope != ScopeProject || review.EffectiveTrust() != TrustUntrusted {
 		t.Fatalf("review prompt = %+v, ok=%v", review, ok)
 	}
 	if got := review.Render("this code"); got != "Project review: this code" {
@@ -110,16 +129,26 @@ func TestLoaderPrecedenceAndDiscovery(t *testing.T) {
 	if !ok || keep.Description != "Keep" {
 		t.Fatalf("keep prompt = %+v, ok=%v", keep, ok)
 	}
+	if keep.EffectiveTrust() != TrustTrusted {
+		t.Fatalf("keep prompt trust = %q, want trusted", keep.EffectiveTrust())
+	}
 
 	foundOverride := false
+	foundProjectSystem := false
 	for _, warning := range loaded.Warnings {
 		if strings.Contains(warning, `project skill "shared" overrides`) ||
 			strings.Contains(warning, `project prompt "review" overrides`) {
 			foundOverride = true
 		}
+		if strings.Contains(warning, "project SYSTEM.md is untrusted") {
+			foundProjectSystem = true
+		}
 	}
-	if !foundOverride {
-		t.Fatalf("override warnings missing: %v", loaded.Warnings)
+	if !foundOverride || !foundProjectSystem {
+		t.Fatalf("expected override and project-system warnings: %v", loaded.Warnings)
+	}
+	if !loaded.HasUntrustedProjectContent() {
+		t.Fatal("project resources were not marked as untrusted")
 	}
 }
 
@@ -210,5 +239,66 @@ func TestNilResourcesLookups(t *testing.T) {
 	}
 	if names := resources.SkillNames(); names != nil {
 		t.Fatalf("nil skill names = %v", names)
+	}
+}
+
+func TestLoaderOnlyLoadsRegularMarkdown(t *testing.T) {
+	global := t.TempDir()
+	project := t.TempDir()
+
+	writeResource(t, project, ".iris/SYSTEM.md", "project system instructions")
+	writeResource(t, project, ".iris/skills/evil.sh", "#!/bin/sh\necho pwned")
+	writeResource(t, project, ".iris/skills/evil.py", "print('pwned')")
+	writeResource(t, project, ".iris/skills/evil.so", "binary")
+	writeResource(t, project, ".iris/skills/ok.md", "Use tabs.")
+	if runtime.GOOS != "windows" {
+		executable := writeResource(t, project, ".iris/skills/executable.md", "Executable Markdown must not load.")
+		if err := os.Chmod(executable, 0o755); err != nil {
+			t.Fatalf("Chmod() error = %v", err)
+		}
+	}
+	writeResource(t, project, ".iris/prompts/evil.sh", "#!/bin/sh")
+	writeResource(t, project, ".iris/prompts/ok.md", "Review: {{input}}")
+	writeResource(t, project, ".iris/extensions/evil.md", "extension content")
+	writeResource(t, project, ".iris/settings.toml", "security = 'allow'")
+
+	loaded, err := Load(Options{GlobalDir: global, Workdir: project})
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.SystemPrompt != "" {
+		t.Fatalf("project SYSTEM.md became a trusted system prompt: %q", loaded.SystemPrompt)
+	}
+	if loaded.ProjectSystemPrompt != "project system instructions" {
+		t.Fatalf("project system prompt = %q", loaded.ProjectSystemPrompt)
+	}
+	if loaded.ProjectSystemPromptSource.EffectiveTrust() != TrustUntrusted {
+		t.Fatalf("project system trust = %q, want untrusted", loaded.ProjectSystemPromptSource.EffectiveTrust())
+	}
+	if names := loaded.SkillNames(); strings.Join(names, ",") != "ok" {
+		t.Fatalf("skills = %v, want only regular Markdown", names)
+	}
+	if names := loaded.PromptNames(); strings.Join(names, ",") != "ok" {
+		t.Fatalf("prompts = %v, want only regular Markdown", names)
+	}
+	if !loaded.HasUntrustedProjectContent() {
+		t.Fatal("project content was not marked untrusted")
+	}
+}
+
+func TestProjectResourcesCannotBePromotedToTrusted(t *testing.T) {
+	for _, trust := range []Trust{"", TrustTrusted, TrustUntrusted} {
+		instruction := Instruction{Scope: ScopeProject, Trust: trust}
+		if got := instruction.EffectiveTrust(); got != TrustUntrusted {
+			t.Fatalf("project instruction trust = %q for explicit %q, want untrusted", got, trust)
+		}
+		skill := Skill{Scope: ScopeProject, Trust: trust}
+		if got := skill.EffectiveTrust(); got != TrustUntrusted {
+			t.Fatalf("project skill trust = %q for explicit %q, want untrusted", got, trust)
+		}
+		prompt := PromptTemplate{Scope: ScopeProject, Trust: trust}
+		if got := prompt.EffectiveTrust(); got != TrustUntrusted {
+			t.Fatalf("project prompt trust = %q for explicit %q, want untrusted", got, trust)
+		}
 	}
 }

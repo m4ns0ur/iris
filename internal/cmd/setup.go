@@ -94,6 +94,15 @@ func setupEnvironment() (*environment, error) {
 		Logger.Warn("resource warning", "warning", warning)
 		fmt.Fprintf(os.Stderr, "iris: resource warning: %s\n", warning)
 	}
+	if resources.HasUntrustedProjectContent() {
+		Logger.Info(
+			"project instruction resources loaded as untrusted data",
+			"workdir", workdir,
+			"instructions", len(resources.Instructions),
+			"skills", len(resources.Skills),
+			"prompts", len(resources.Prompts),
+		)
+	}
 
 	sessions, err := session.NewJSONL(sessionDir)
 	if err != nil {

@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // Scope identifies where a resource was discovered.
@@ -46,35 +47,94 @@ const (
 	ScopeProject Scope = "project"
 )
 
+// Trust identifies whether content may act as instructions or only as
+// untrusted data. Trusted content comes from Iris itself or user-level
+// configuration. Project content is always untrusted input.
+type Trust string
+
+const (
+	TrustTrusted   Trust = "trusted"
+	TrustUntrusted Trust = "untrusted"
+)
+
+// TrustForScope returns the default trust level for a resource scope.
+// Unknown scopes are untrusted.
+func TrustForScope(scope Scope) Trust {
+	if scope == ScopeGlobal {
+		return TrustTrusted
+	}
+	return TrustUntrusted
+}
+
+func resolveTrust(explicit Trust, scope Scope) Trust {
+	// Project content is untrusted by construction. A caller cannot promote a
+	// project resource to trusted instructions by setting the field.
+	if scope == ScopeProject {
+		return TrustUntrusted
+	}
+	if explicit == TrustTrusted || explicit == TrustUntrusted {
+		return explicit
+	}
+	return TrustForScope(scope)
+}
+
 // File identifies a discovered resource file.
 type File struct {
 	Scope Scope
 	Path  string
+	Trust Trust
 }
 
-// Instruction is an AGENTS.md layer.
+// EffectiveTrust returns the explicit trust or the scope default.
+func (f File) EffectiveTrust() Trust {
+	return resolveTrust(f.Trust, f.Scope)
+}
+
+// Instruction is a project AGENTS.md layer. Project instructions are untrusted
+// input: they can describe conventions, but they cannot change Iris's trusted
+// rules, execution policy, or security boundaries.
 type Instruction struct {
 	Scope   Scope
 	Path    string
+	Trust   Trust
 	Content string
 }
 
-// Skill is a Markdown-only reusable instruction resource.
+// EffectiveTrust returns the explicit trust or the scope default.
+func (i Instruction) EffectiveTrust() Trust {
+	return resolveTrust(i.Trust, i.Scope)
+}
+
+// Skill is a Markdown-only reusable instruction resource. Project skills are
+// untrusted data and must not become trusted system instructions.
 type Skill struct {
 	Name        string
 	Description string
 	Scope       Scope
 	Path        string
+	Trust       Trust
 	Content     string
 }
 
-// PromptTemplate is a reusable user prompt template.
+// EffectiveTrust returns the explicit trust or the scope default.
+func (s Skill) EffectiveTrust() Trust {
+	return resolveTrust(s.Trust, s.Scope)
+}
+
+// PromptTemplate is a reusable user prompt template. Project templates are
+// untrusted data and must not become trusted system instructions.
 type PromptTemplate struct {
 	Name        string
 	Description string
 	Scope       Scope
 	Path        string
+	Trust       Trust
 	Content     string
+}
+
+// EffectiveTrust returns the explicit trust or the scope default.
+func (p PromptTemplate) EffectiveTrust() Trust {
+	return resolveTrust(p.Trust, p.Scope)
 }
 
 // Render substitutes {{input}}. Without a placeholder, non-empty input is
@@ -92,12 +152,47 @@ func (t PromptTemplate) Render(input string) string {
 
 // Resources is the complete set of discovered instruction resources.
 type Resources struct {
+	// SystemPrompt is trusted user-level configuration (or programmatically
+	// supplied host configuration). It is never replaced by project content.
 	SystemPrompt       string
 	SystemPromptSource File
-	Instructions       []Instruction
-	Skills             []Skill
-	Prompts            []PromptTemplate
-	Warnings           []string
+
+	// ProjectSystemPrompt is a project .iris/SYSTEM.md. It is untrusted
+	// project context and cannot act as a trusted system prompt.
+	ProjectSystemPrompt       string
+	ProjectSystemPromptSource File
+
+	Instructions []Instruction
+	Skills       []Skill
+	Prompts      []PromptTemplate
+	Warnings     []string
+}
+
+// HasUntrustedProjectContent reports whether any project-level instructions,
+// skills, or prompt templates were discovered.
+func (r *Resources) HasUntrustedProjectContent() bool {
+	if r == nil {
+		return false
+	}
+	if strings.TrimSpace(r.ProjectSystemPrompt) != "" {
+		return true
+	}
+	for _, instruction := range r.Instructions {
+		if instruction.EffectiveTrust() == TrustUntrusted && strings.TrimSpace(instruction.Content) != "" {
+			return true
+		}
+	}
+	for _, skill := range r.Skills {
+		if skill.EffectiveTrust() == TrustUntrusted {
+			return true
+		}
+	}
+	for _, prompt := range r.Prompts {
+		if prompt.EffectiveTrust() == TrustUntrusted {
+			return true
+		}
+	}
+	return false
 }
 
 // Skill returns a skill by exact name, then case-insensitively.
@@ -163,7 +258,25 @@ func (r *Resources) PromptNames() []string {
 }
 
 func (r *Resources) warn(format string, args ...any) {
-	r.Warnings = append(r.Warnings, fmt.Sprintf(format, args...))
+	// Warnings are printed to a terminal and written to a log. Resource paths
+	// and error text can originate in an untrusted repository, so strip control
+	// characters that could inject terminal escapes or forge log lines.
+	r.Warnings = append(r.Warnings, sanitizeWarning(fmt.Sprintf(format, args...)))
+}
+
+func sanitizeWarning(text string) string {
+	var builder strings.Builder
+	for _, char := range text {
+		switch {
+		case char == '\n' || char == '\r' || char == '\t':
+			builder.WriteByte(' ')
+		case unicode.IsControl(char):
+			builder.WriteRune('?')
+		default:
+			builder.WriteRune(char)
+		}
+	}
+	return builder.String()
 }
 
 func scopeName(scope Scope) string {

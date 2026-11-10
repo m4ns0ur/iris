@@ -722,6 +722,10 @@ func initialModel(options Options) (model, error) {
 		m.notice("Session " + created.ID)
 	}
 
+	if options.Resources != nil && options.Resources.HasUntrustedProjectContent() {
+		m.notice("Project instructions and resources are untrusted input and cannot override Iris's security policy.")
+	}
+
 	return m, nil
 }
 

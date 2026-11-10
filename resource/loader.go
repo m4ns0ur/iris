@@ -98,6 +98,7 @@ func (l *Loader) loadInstructions(resources *Resources, workdir, projectDir stri
 			resources.Instructions = append(resources.Instructions, Instruction{
 				Scope:   candidate.scope,
 				Path:    candidate.path,
+				Trust:   TrustForScope(candidate.scope),
 				Content: content,
 			})
 		}
@@ -108,13 +109,25 @@ func (l *Loader) loadSystemPrompt(resources *Resources, globalDir, projectDir st
 	globalPath := join(globalDir, "SYSTEM.md")
 	if content, ok := l.readFile(resources, globalPath, ScopeGlobal); ok {
 		resources.SystemPrompt = content
-		resources.SystemPromptSource = File{Scope: ScopeGlobal, Path: globalPath}
+		resources.SystemPromptSource = File{
+			Scope: ScopeGlobal,
+			Path:  globalPath,
+			Trust: TrustTrusted,
+		}
 	}
 
 	projectPath := join(projectDir, "SYSTEM.md")
 	if content, ok := l.readFile(resources, projectPath, ScopeProject); ok {
-		resources.SystemPrompt = content
-		resources.SystemPromptSource = File{Scope: ScopeProject, Path: projectPath}
+		resources.ProjectSystemPrompt = content
+		resources.ProjectSystemPromptSource = File{
+			Scope: ScopeProject,
+			Path:  projectPath,
+			Trust: TrustUntrusted,
+		}
+		resources.warn(
+			"project SYSTEM.md is untrusted project context and does not replace user-level SYSTEM.md: %s",
+			projectPath,
+		)
 	}
 }
 
@@ -175,6 +188,7 @@ func (l *Loader) loadSkills(resources *Resources, target map[string]Skill, root 
 			Description: document.description,
 			Scope:       scope,
 			Path:        path,
+			Trust:       TrustForScope(scope),
 			Content:     document.body,
 		}
 		return nil
@@ -256,6 +270,7 @@ func (l *Loader) loadPrompts(resources *Resources, target map[string]PromptTempl
 			Description: document.description,
 			Scope:       scope,
 			Path:        path,
+			Trust:       TrustForScope(scope),
 			Content:     document.body,
 		}
 		return nil
@@ -297,6 +312,10 @@ func (l *Loader) readFile(resources *Resources, path string, scope Scope) (strin
 		return "", false
 	}
 	if !info.Mode().IsRegular() {
+		return "", false
+	}
+	if info.Mode().Perm()&0o111 != 0 {
+		resources.warn("skip %s executable resource %s", scope, path)
 		return "", false
 	}
 	if info.Size() > l.options.MaxFileBytes {
