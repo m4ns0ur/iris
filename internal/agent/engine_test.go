@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1938,5 +1940,132 @@ func TestRecorderFailureOnUserInputPreventsModelCall(t *testing.T) {
 		if message.Role == "user" {
 			t.Fatalf("unpersisted user message remained in history: %+v", message)
 		}
+	}
+}
+
+func TestAgentRunSummaryObservations(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			writeSSE(w, sseToolCalls("tool_calls", toolCallSpec{ID: "call_1", Name: "record", Args: `{}`}))
+			return
+		}
+		writeSSE(w, `{"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`)
+	}))
+	defer server.Close()
+
+	record := &recordingTool{}
+	instance, _ := newTestAgent(t, server, Options{Tools: []apitype.Tool{record}})
+	var finished publicagent.AgentFinished
+	instance.Subscribe(func(event publicagent.Event) {
+		if value, ok := event.(publicagent.AgentFinished); ok {
+			finished = value
+		}
+	})
+
+	if err := instance.Run(context.Background(), "do it"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if finished.Summary == nil {
+		t.Fatal("AgentFinished has no run summary")
+	}
+	summary := finished.Summary
+	if summary.LLMRequests != 2 {
+		t.Fatalf("LLM requests = %d, want 2", summary.LLMRequests)
+	}
+	if summary.ToolExecutions != 1 {
+		t.Fatalf("tool executions = %d, want 1", summary.ToolExecutions)
+	}
+	if summary.Usage.TotalTokens != 12 {
+		t.Fatalf("tokens = %+v, want 12", summary.Usage)
+	}
+	if summary.StartedAt.IsZero() || summary.FinishedAt.Before(summary.StartedAt) || summary.Duration() < 0 {
+		t.Fatalf("summary timing = %+v", summary)
+	}
+	if summary.GitRepository {
+		t.Fatalf("non-git workspace reported GitRepository: %+v", summary)
+	}
+	if !strings.Contains(summary.Format("Task completed"), "LLM requests: 2") {
+		t.Fatalf("formatted summary missing counters: %q", summary.Format("Task completed"))
+	}
+}
+
+type envWriteTool struct{}
+
+func (envWriteTool) Name() string            { return "env-write" }
+func (envWriteTool) Description() string     { return "Write a file through the tool environment" }
+func (envWriteTool) FullDescription() string { return "Write a file through the tool environment." }
+func (envWriteTool) Parameters() provider.Parameters {
+	return provider.Parameters{Type: "object"}
+}
+func (envWriteTool) Execute(ctx context.Context, _ map[string]any) (map[string]any, error) {
+	environment, ok := apitype.FromContext(ctx)
+	if !ok {
+		return nil, fmt.Errorf("tool environment missing")
+	}
+	path, err := environment.ResolveWrite("new.txt")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, []byte("new file\n"), 0o644); err != nil {
+		return nil, err
+	}
+	return map[string]any{"success": true}, nil
+}
+
+func TestAgentRunSummaryIncludesGitChanges(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			writeSSE(w, sseToolCalls("tool_calls", toolCallSpec{ID: "call_1", Name: "env-write", Args: `{}`}))
+			return
+		}
+		writeSSE(w, finalResponse)
+	}))
+	defer server.Close()
+
+	instance, _ := newTestAgent(t, server, Options{Tools: []apitype.Tool{envWriteTool{}}})
+	repo := instance.workdir
+	runGit := func(args ...string) {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		command.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	runGit("init", "-q")
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(base): %v", err)
+	}
+	runGit("add", "base.txt")
+	runGit("commit", "-qm", "initial")
+
+	var finished publicagent.AgentFinished
+	instance.Subscribe(func(event publicagent.Event) {
+		if value, ok := event.(publicagent.AgentFinished); ok {
+			finished = value
+		}
+	})
+	if err := instance.Run(context.Background(), "write the file"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if finished.Summary == nil || !finished.Summary.GitRepository {
+		t.Fatalf("git summary missing: %+v", finished.Summary)
+	}
+	found := false
+	for _, change := range finished.Summary.FilesChanged {
+		if change.Status == "A" && change.Path == "new.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("new.txt missing from git changes: %+v", finished.Summary.FilesChanged)
 	}
 }

@@ -511,6 +511,12 @@ func TestClientRecordsDurablyBeforeToolExecution(t *testing.T) {
 	if result.Content != "done" {
 		t.Fatalf("result content = %q", result.Content)
 	}
+	if result.Summary == nil {
+		t.Fatal("result has no run summary")
+	}
+	if result.Summary.LLMRequests != 2 || result.Summary.ToolExecutions != 1 {
+		t.Fatalf("summary counters = LLM %d tools %d, want 2/1", result.Summary.LLMRequests, result.Summary.ToolExecutions)
+	}
 
 	var observed *session.Session
 	select {

@@ -7,6 +7,7 @@
 - [How It Works](#how-it-works)
 - [Execution Control](#execution-control)
 - [Model Response and Tool Handling](#model-response-and-tool-handling)
+- [Execution Summaries](#execution-summaries)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
 - [CLI](#cli)
@@ -134,6 +135,39 @@ A failed or rejected tool call is appended to conversation history as a JSON `to
 `agent.turn.started` and `agent.turn.finished` describe one model request. `agent.turn.retried` reports a recoverable failed attempt (currently a context overflow) and tells consumers to discard partial output before the retry's deltas. `agent.finished` is the **settled** terminal event: it is emitted only after tool execution, retries, compaction, steering, and follow-ups are exhausted. In Go, `agent.AgentSettled` is an alias for `agent.AgentFinished` that names this semantic.
 
 This distinction matters to every interface: a request can complete while the execution still has more work. The TUI, JSONL, and RPC consumers receive the same `agent.turn.finished` and `agent.turn.retried` events.
+
+## Execution Summaries
+
+Every settled run produces a structured summary collected from runtime observations, never from a model-generated recap. The TUI shows it as the final notice, print mode writes it to stderr, and JSONL/RPC results include it.
+
+```text
+Task completed
+
+Files changed:
+  M internal/agent/runner.go
+  M internal/session/store.go
+  A internal/session/recovery_test.go
+
+Tool executions: 8
+LLM requests: 5
+Tokens consumed: 12,450
+Duration: 48s
+```
+
+The fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `started_at`, `finished_at`, `duration_ms` | Run timing. Duration starts when the run is admitted and ends before the Git observation. |
+| `llm_requests` | Actual provider calls, including compaction summaries and context-overflow retries. |
+| `tool_executions` | Tools that actually started. Invalid, skipped, and budget-exhausted calls are not counted. |
+| `usage` | Token usage summed from every provider response, including summaries and retries. |
+| `git_repository` | Whether the workspace was inside a Git work tree when the summary was collected. |
+| `files_changed` | Working-tree status entries (`M`, `A`, `D`, `R`, `C`, `T`, `U`) with paths. |
+
+The file list comes from `git status --porcelain` in the workspace with a short timeout. It reflects the working tree at the end of the run, so it can include changes that predated the run. For a clean repository the output says `Files changed: none`; outside a Git work tree the section is omitted. The TUI displays at most 100 files and summarizes the remainder.
+
+The summary is available as `agent.AgentFinished.Summary` and `client.Result.Summary`, and `agent.RunSummary.Format` renders the human-readable form. It is a foundation for evaluation: the counters and file observations come from the runtime, event stream, provider usage, and Git, not from assistant text.
 
 ## Requirements
 
@@ -313,7 +347,7 @@ cat prompt.txt | iris print
 
 Arguments are joined with spaces into one prompt. With no argument, the prompt is read from stdin; an empty prompt is an error.
 
-Print mode creates a new persistent session (unless persistence is disabled in an embedding). The user prompt is durably recorded before the model call; assistant messages and tool results are recorded as they complete, so a failed run still leaves a valid, resumable transcript.
+Print mode creates a new persistent session (unless persistence is disabled in an embedding). The user prompt is durably recorded before the model call; assistant messages and tool results are recorded as they complete, so a failed run still leaves a valid, resumable transcript. The execution summary is written to stderr; stdout remains the final assistant response only.
 
 ### JSONL
 
@@ -339,7 +373,7 @@ JSONL mode writes one JSON object per line. Each record has a `type` (the agent 
 - `type` matches the typed agent event names (`agent.started`, `agent.turn.finished`, `assistant.delta`, `tool.completed`, `context.compaction.started`, …).
 - `agent.turn.finished` marks one completed model request. `agent.turn.retried` precedes an in-run retry and means partial output from the failed attempt must be discarded. `agent.finished` is the settled terminal event.
 - `duration` in tool events is a Go duration in nanoseconds.
-- After the run starts, a final `result` record is written, including on failure. It carries `content`, optional `reasoning`, `session_id`, aggregated `usage`, optional `context_summary_usage`, optional `canceled`, and optional `truncated`. Setup errors that occur before the run (missing prompt, invalid configuration) are reported on stderr with no event records.
+- After the run starts, a final `result` record is written, including on failure. It carries `content`, optional `reasoning`, `session_id`, aggregated `usage`, optional `context_summary_usage`, optional `canceled`, optional `truncated`, and the runtime-observed `summary`. Setup errors that occur before the run (missing prompt, invalid configuration) are reported on stderr with no event records.
 - On failure an `error` record (`{"type":"error","error":"..."}`) follows the `result` record, the error is also written to stderr, and the process exits non-zero.
 
 ### RPC
@@ -371,7 +405,7 @@ RPC mode speaks JSON-RPC 2.0 over stdin/stdout. Agent events are sent as `agent.
 
 Steering and follow-up return the idle error when no run is active. `agent.clear_queue` works while idle and while running. `agent.cancel` is an abort: it closes the queue, returns instructions that had not been delivered, and cancels the run. See [Execution Control](#execution-control) for delivery points. A session resumed through RPC is repaired under its writer lease, and another process holding that lease makes the operation fail with `session.ErrSessionLocked`.
 
-The RPC event stream carries `agent.turn.finished`, `agent.turn.retried`, and the settled `agent.finished` event. A `agent.turn.finished` event is not the end of `agent.run`; the run may continue with tools, compaction, retries, or queued work. The final `client.Result` includes `truncated` when the last model turn hit the output token limit.
+The RPC event stream carries `agent.turn.finished`, `agent.turn.retried`, and the settled `agent.finished` event. A `agent.turn.finished` event is not the end of `agent.run`; the run may continue with tools, compaction, retries, or queued work. The final `client.Result` includes `truncated` when the last model turn hit the output token limit, and `summary` with the runtime-observed execution counters, usage, duration, and Git working-tree changes.
 
 Errors use standard JSON-RPC codes:
 
@@ -771,7 +805,7 @@ The status line shows the current hints, the scroll percentage, and the total to
 | `/prompt <name> [input]` | Render a template into the input box. Project templates are wrapped as untrusted content. |
 | `/help`, `/?` | List commands. |
 
-Unknown commands produce a notice. Session-mutating commands persist the current session first and are unavailable while a run is active; `/clear-queue` and `/help` remain available. The TUI uses the same durable recorder as the headless modes: user messages, assistant tool calls, and tool results are on disk while the run is still in progress. Recovered sessions show notices for interrupted tool calls.
+Unknown commands produce a notice. Session-mutating commands persist the current session first and are unavailable while a run is active; `/clear-queue` and `/help` remain available. The TUI uses the same durable recorder as the headless modes: user messages, assistant tool calls, and tool results are on disk while the run is still in progress. Recovered sessions show notices for interrupted tool calls. After each settled run the TUI appends the execution summary described in [Execution Summaries](#execution-summaries).
 
 ## Sessions
 
@@ -1154,6 +1188,7 @@ The lower-level [`agent`](agent) package can be used directly when session manag
 | `ContextSummaryUsage` | Token usage spent on compaction summaries, when any. |
 | `Canceled` | Whether the run ended because it was cancelled. |
 | `Truncated` | Whether the last model turn hit the output token limit. |
+| `Summary` | Runtime-observed execution summary: timing, counters, usage, and working-tree changes. |
 
 `client.ErrBusy` is returned when a run is requested while another is active. Mutating session operations are also busy-checked. With a real agent that implements `agent.RecorderAgent`, the client installs a recorder so user messages, assistant tool calls, and tool results are persisted at their durability points; agents without recorder support use the end-of-run history fallback. `RunStream` handlers run synchronously in the agent run goroutine and must return quickly. `client.EventRecord{Type, Event}` and `client.Record(event)` provide the stable JSON envelope used by JSONL and RPC. When a turn is retried, the client discards partial output from the failed attempt; consumers that maintain their own buffers should reset them on `agent.turn.retried`.
 
@@ -1267,7 +1302,7 @@ While a run is active, `Steer` and `FollowUp` queue instructions for the next tu
 | Event | Meaning |
 | --- | --- |
 | `agent.started` | A run began; carries the input. |
-| `agent.finished` | The settled terminal event: no more automatic work remains. Also exposed as `agent.AgentSettled`. |
+| `agent.finished` | The settled terminal event: no more automatic work remains. Carries `Summary`; also exposed as `agent.AgentSettled`. |
 | `agent.turn.started` | A new model request began; flush buffered deltas from the previous turn. |
 | `agent.turn.finished` | One model request completed. The run may still execute tools, retry, compact, or deliver queued work. |
 | `agent.turn.retried` | A recoverable request failure; discard partial output for this turn before the retry's deltas. |

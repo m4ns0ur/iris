@@ -521,3 +521,37 @@ func TestRenderSkillSanitizesControlCharacters(t *testing.T) {
 		t.Fatalf("content or trust header missing: %q", rendered)
 	}
 }
+
+func TestAgentFinishedShowsRunSummary(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	summary := &agent.RunSummary{
+		StartedAt:      time.Now().Add(-48 * time.Second),
+		FinishedAt:     time.Now(),
+		DurationMS:     48_000,
+		LLMRequests:    5,
+		ToolExecutions: 8,
+		Usage:          provider.Usage{PromptTokens: 10_000, CompletionTokens: 2_450, TotalTokens: 12_450},
+		GitRepository:  true,
+		FilesChanged: []agent.FileChange{
+			{Status: "M", Path: "internal/agent/runner.go"},
+			{Status: "A", Path: "internal/session/recovery_test.go"},
+		},
+	}
+	updated, _ := m.Update(agentEventMsg{event: agent.AgentFinished{At: time.Now(), Summary: summary}})
+	m = updated.(*model)
+
+	for _, want := range []string{
+		"Task completed",
+		"Files changed:",
+		"M internal/agent/runner.go",
+		"A internal/session/recovery_test.go",
+		"Tool executions: 8",
+		"LLM requests: 5",
+		"Tokens consumed: 12,450",
+		"Duration: 48s",
+	} {
+		if !containsNotice(m, want) {
+			t.Fatalf("summary notice missing %q: %+v", want, m.messages)
+		}
+	}
+}

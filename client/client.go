@@ -46,6 +46,10 @@ type Result struct {
 	Canceled            bool            `json:"canceled,omitempty"`
 	// Truncated reports that the last model turn hit the output token limit.
 	Truncated bool `json:"truncated,omitempty"`
+	// Summary contains runtime-observed execution metadata: counters, usage,
+	// duration, and working-tree changes. It is nil if the agent did not report
+	// a summary.
+	Summary *agent.RunSummary `json:"summary,omitempty"`
 }
 
 // EventRecord is the stable JSON-friendly envelope used by the JSONL and RPC
@@ -86,6 +90,7 @@ type Client struct {
 	canceled      bool
 	truncated     bool
 	lastTurnBytes int
+	summary       *agent.RunSummary
 }
 
 // New creates a headless client.
@@ -205,6 +210,7 @@ func (c *Client) handleEvent(event agent.Event) {
 		c.lastTurnBytes = e.ContentBytes + e.ReasoningBytes
 	case agent.AgentFinished:
 		c.canceled = e.Canceled
+		c.summary = e.Summary
 	}
 	handler := c.handler
 	c.mu.Unlock()
@@ -247,6 +253,7 @@ func (c *Client) RunStream(
 	c.canceled = false
 	c.truncated = false
 	c.lastTurnBytes = 0
+	c.summary = nil
 	c.mu.Unlock()
 
 	runErr := c.agent.Run(ctx, prompt)
@@ -275,6 +282,7 @@ func (c *Client) RunStream(
 		ContextSummaryUsage: summaryUsage,
 		Canceled:            c.canceled || errors.Is(runErr, context.Canceled),
 		Truncated:           c.truncated,
+		Summary:             c.summary,
 	}
 	if c.session != nil {
 		result.SessionID = c.session.ID
@@ -288,6 +296,7 @@ func (c *Client) RunStream(
 	c.canceled = false
 	c.truncated = false
 	c.lastTurnBytes = 0
+	c.summary = nil
 
 	return result, errors.Join(runErr, saveErr)
 }

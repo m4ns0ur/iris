@@ -870,6 +870,16 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 		}
 		m.lastTurnEmpty = false
 
+		if e.Summary != nil {
+			outcome := "Task completed"
+			if e.Canceled {
+				outcome = "Run canceled"
+			} else if e.Err != "" {
+				outcome = "Run failed"
+			}
+			m.notice(e.Summary.Format(outcome))
+		}
+
 		m.canceling = false
 		m.compacting = false
 		m.pendingSteering = nil

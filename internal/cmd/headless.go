@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -108,6 +109,15 @@ func runPrint(_ *cobra.Command, args []string) error {
 	result, runErr := c.Run(ctx, prompt)
 	if result.Content != "" {
 		fmt.Fprintln(os.Stdout, result.Content)
+	}
+	if result.Summary != nil {
+		outcome := "Task completed"
+		if result.Canceled || errors.Is(runErr, context.Canceled) {
+			outcome = "Run canceled"
+		} else if runErr != nil {
+			outcome = "Run failed"
+		}
+		fmt.Fprintln(os.Stderr, strings.TrimRight(result.Summary.Format(outcome), "\n"))
 	}
 	if runErr != nil {
 		return runErr

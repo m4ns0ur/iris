@@ -5,7 +5,10 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/m4ns0ur/iris/provider"
 )
@@ -286,6 +289,9 @@ type AgentFinished struct {
 	Err string `json:"error,omitempty"`
 	// Canceled reports that the run ended because its context was cancelled.
 	Canceled bool `json:"canceled,omitempty"`
+	// Summary is collected from runtime observations, not model output. It is
+	// nil when the run failed before it began.
+	Summary *RunSummary `json:"summary,omitempty"`
 }
 
 func (AgentFinished) Type() EventType { return EventAgentFinished }
@@ -293,6 +299,162 @@ func (AgentFinished) Type() EventType { return EventAgentFinished }
 // AgentSettled names AgentFinished's settled semantics. The wire event remains
 // "agent.finished".
 type AgentSettled = AgentFinished
+
+// FileChange is one working-tree entry observed with git status.
+type FileChange struct {
+	// Status is a compact git status: M, A, D, R, C, T, or U.
+	Status string `json:"status"`
+	Path   string `json:"path"`
+}
+
+// RunSummary is execution metadata collected from the runtime. It is not a
+// model-generated summary: counters come from actual requests, tool calls, and
+// usage; files come from the working tree at the end of the run.
+type RunSummary struct {
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	DurationMS int64     `json:"duration_ms"`
+
+	// LLMRequests counts provider calls, including compaction summaries and
+	// context-overflow retries.
+	LLMRequests int `json:"llm_requests"`
+
+	// ToolExecutions counts tools that actually started. Invalid, skipped, or
+	// budget-exhausted tool calls are not executions.
+	ToolExecutions int `json:"tool_executions"`
+
+	// Usage is the total reported by all provider responses in the run,
+	// including compaction summaries and retries.
+	Usage provider.Usage `json:"usage"`
+
+	// GitRepository reports whether the workspace was inside a Git work tree
+	// when the summary was collected.
+	GitRepository bool `json:"git_repository,omitempty"`
+
+	// FilesChanged is the working-tree status at the end of the run. It can
+	// include changes that predated the run.
+	FilesChanged []FileChange `json:"files_changed,omitempty"`
+}
+
+// Duration returns the run duration from the observed timestamps.
+func (s *RunSummary) Duration() time.Duration {
+	if s == nil {
+		return 0
+	}
+	if s.DurationMS > 0 {
+		return time.Duration(s.DurationMS) * time.Millisecond
+	}
+	return s.FinishedAt.Sub(s.StartedAt)
+}
+
+// Format renders a concise human-readable completion summary. outcome is
+// usually "Task completed", "Run canceled", or "Run failed".
+func (s *RunSummary) Format(outcome string) string {
+	if s == nil {
+		return ""
+	}
+	if strings.TrimSpace(outcome) == "" {
+		outcome = "Task completed"
+	}
+
+	var builder strings.Builder
+	builder.WriteString(outcome)
+	builder.WriteString("\n")
+
+	if s.GitRepository {
+		builder.WriteString("\nFiles changed:\n")
+		if len(s.FilesChanged) == 0 {
+			builder.WriteString("  none\n")
+		} else {
+			const maxFiles = 100
+			shown := len(s.FilesChanged)
+			if shown > maxFiles {
+				shown = maxFiles
+			}
+			for _, change := range s.FilesChanged[:shown] {
+				fmt.Fprintf(
+					&builder,
+					"  %s %s\n",
+					sanitizeSummaryText(change.Status),
+					sanitizeSummaryText(change.Path),
+				)
+			}
+			if len(s.FilesChanged) > shown {
+				fmt.Fprintf(&builder, "  ... %d more\n", len(s.FilesChanged)-shown)
+			}
+		}
+	}
+
+	totalTokens := s.Usage.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = s.Usage.PromptTokens + s.Usage.CompletionTokens
+	}
+
+	builder.WriteString("\n")
+	fmt.Fprintf(&builder, "Tool executions: %d\n", s.ToolExecutions)
+	fmt.Fprintf(&builder, "LLM requests: %d\n", s.LLMRequests)
+	fmt.Fprintf(&builder, "Tokens consumed: %s\n", formatCount(totalTokens))
+	fmt.Fprintf(&builder, "Duration: %s\n", formatDuration(s.Duration()))
+	return builder.String()
+}
+
+func formatCount(value int) string {
+	text := fmt.Sprintf("%d", value)
+	if len(text) <= 3 {
+		return text
+	}
+	var builder strings.Builder
+	offset := len(text) % 3
+	if offset > 0 {
+		builder.WriteString(text[:offset])
+	}
+	for index := offset; index < len(text); index += 3 {
+		if builder.Len() > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(text[index : index+3])
+	}
+	return builder.String()
+}
+
+func sanitizeSummaryText(text string) string {
+	var builder strings.Builder
+	for _, char := range text {
+		switch {
+		case char == '\n' || char == '\r' || char == '\t':
+			builder.WriteByte(' ')
+		case unicode.IsControl(char):
+			builder.WriteRune('?')
+		default:
+			builder.WriteRune(char)
+		}
+	}
+	return builder.String()
+}
+
+func formatDuration(duration time.Duration) string {
+	if duration <= 0 {
+		return "0ms"
+	}
+	if duration < time.Second {
+		millis := duration.Milliseconds()
+		if millis < 1 {
+			millis = 1
+		}
+		return fmt.Sprintf("%dms", millis)
+	}
+	if duration < time.Minute {
+		return fmt.Sprintf("%ds", int(duration.Seconds()))
+	}
+	if duration < time.Hour {
+		minutes := int(duration / time.Minute)
+		seconds := int((duration % time.Minute) / time.Second)
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	}
+	hours := int(duration / time.Hour)
+	minutes := int((duration % time.Hour) / time.Minute)
+	return fmt.Sprintf("%dh %dm", hours, minutes)
+}
 
 // TurnStarted marks the beginning of one model request. Consumers can use it
 // to flush buffered deltas from the previous turn.

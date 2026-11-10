@@ -126,6 +126,11 @@ type Agent struct {
 	toolContext      *tool.ToolContext
 	contextManager   *contextmgr.Manager
 	resources        *resource.Resources
+
+	runStartedAt   time.Time
+	llmRequests    int
+	toolExecutions int
+	runUsage       provider.Usage
 }
 
 // NewAgent creates a runtime agent. The provider is the only LLM dependency;
@@ -623,6 +628,10 @@ func (a *Agent) beginRun(parent context.Context) (context.Context, error) {
 	a.state = "idle"
 	a.pendingToolCalls = nil
 	a.runRecorder = a.recorder
+	a.runStartedAt = time.Now()
+	a.llmRequests = 0
+	a.toolExecutions = 0
+	a.runUsage = provider.Usage{}
 
 	a.queueMu.Lock()
 	a.steeringQueue = nil
@@ -678,12 +687,13 @@ func (a *Agent) Run(ctx context.Context, input string) (runErr error) {
 	// Guarantee a terminal event even if a provider or tool panics. The
 	// terminal event is emitted after finishRun clears the active-run state so
 	// a consumer can immediately start another run.
+	var summary *publicagent.RunSummary
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			runErr = fmt.Errorf("agent panicked: %v", recovered)
 		}
 
-		finished := publicagent.AgentFinished{At: time.Now()}
+		finished := publicagent.AgentFinished{At: time.Now(), Summary: summary}
 		if runErr != nil {
 			if errors.Is(runErr, context.Canceled) {
 				finished.Canceled = true
@@ -695,6 +705,10 @@ func (a *Agent) Run(ctx context.Context, input string) (runErr error) {
 		a.emit(finished)
 	}()
 	defer a.finishRun()
+	// Capture the summary before finishRun releases the active-run slot. The
+	// terminal event reads the local snapshot, so a new run cannot race these
+	// counters after it starts.
+	defer func() { summary = a.collectRunSummary() }()
 
 	if err := a.recordUser(input); err != nil {
 		return err
@@ -710,7 +724,7 @@ func (a *Agent) Run(ctx context.Context, input string) (runErr error) {
 	a.history = append(a.history, userMessage(input))
 	a.historyMu.Unlock()
 
-	a.emit(publicagent.AgentStarted{At: time.Now(), Input: input})
+	a.emit(publicagent.AgentStarted{At: a.runStartedAt, Input: input})
 
 	runErr = a.loop(runCtx)
 	return runErr
@@ -874,6 +888,7 @@ func (a *Agent) executeTools(ctx context.Context) error {
 		}
 
 		startedAt := time.Now()
+		a.toolExecutions++
 		result, err := tool.ExecuteWithTools(toolCtx, a.registry, call.Name, call.Args)
 		elapsed := time.Since(startedAt)
 
@@ -1018,6 +1033,7 @@ func (a *Agent) streamResponse(
 	request provider.Request,
 	onDelta func(provider.Delta),
 ) (provider.Response, error) {
+	a.llmRequests++
 	events, err := a.provider.Stream(ctx, request)
 	if err != nil {
 		return provider.Response{}, err
@@ -1043,6 +1059,9 @@ func (a *Agent) streamResponse(
 					onDelta(value.Delta)
 				}
 			case provider.DoneEvent:
+				a.runUsage.PromptTokens += value.Response.Usage.PromptTokens
+				a.runUsage.CompletionTokens += value.Response.Usage.CompletionTokens
+				a.runUsage.TotalTokens += value.Response.Usage.TotalTokens
 				return value.Response, nil
 			case provider.ErrorEvent:
 				if value.Err == nil {
