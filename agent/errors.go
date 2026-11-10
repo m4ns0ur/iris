@@ -26,6 +26,11 @@ var (
 	// within the configured context window.
 	ErrContextOverflow = errors.New("context cannot fit within the model window")
 
+	// ErrPersistence is returned when a transcript recorder cannot durably
+	// persist a message or tool result. The run aborts rather than continue
+	// with an unrecorded side effect.
+	ErrPersistence = errors.New("transcript persistence failed")
+
 	// ErrTurnBudgetExceeded is returned when a run reaches its LLM turn
 	// budget.
 	ErrTurnBudgetExceeded = errors.New("agent turn budget exceeded")

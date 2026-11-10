@@ -4,14 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/m4ns0ur/iris/agent"
+	internalagent "github.com/m4ns0ur/iris/internal/agent"
+	"github.com/m4ns0ur/iris/internal/policy"
 	"github.com/m4ns0ur/iris/provider"
 	"github.com/m4ns0ur/iris/session"
+	apitype "github.com/m4ns0ur/iris/tool"
 )
 
 type fakeAgent struct {
@@ -410,5 +415,256 @@ func TestClientFallsBackToHistoryForNonStreamingResult(t *testing.T) {
 	}
 	if result.Content != "answer from history" {
 		t.Fatalf("content = %q", result.Content)
+	}
+}
+
+type inspectSessionTool struct {
+	manager  *session.JSONLManager
+	id       func() string
+	observed chan *session.Session
+}
+
+func (t *inspectSessionTool) Name() string            { return "inspect" }
+func (t *inspectSessionTool) Description() string     { return "Inspect the session" }
+func (t *inspectSessionTool) FullDescription() string { return "Read the current session journal." }
+func (t *inspectSessionTool) Parameters() provider.Parameters {
+	return provider.Parameters{Type: "object"}
+}
+func (t *inspectSessionTool) Execute(context.Context, map[string]any) (map[string]any, error) {
+	current, err := t.manager.Open(t.id())
+	if err != nil {
+		return nil, err
+	}
+	t.observed <- current
+	return map[string]any{"ok": true}, nil
+}
+
+func TestClientRecordsDurablyBeforeToolExecution(t *testing.T) {
+	manager, err := session.NewJSONL(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewJSONL() error = %v", err)
+	}
+	pol, err := policy.New(t.TempDir(), policy.Options{
+		Mode:            policy.ModeWorkspaceWrite,
+		ExternalSandbox: true,
+	})
+	if err != nil {
+		t.Fatalf("policy.New() error = %v", err)
+	}
+
+	var currentID string
+	inspect := &inspectSessionTool{
+		manager:  manager,
+		id:       func() string { return currentID },
+		observed: make(chan *session.Session, 1),
+	}
+	beforeFinal := make(chan *session.Session, 1)
+	var calls atomic.Int32
+	prov := provider.ResponseFunc(func(context.Context, provider.Request) (provider.Response, error) {
+		if calls.Add(1) == 1 {
+			return provider.Response{
+				FinishReason: "tool_calls",
+				ToolCalls: []provider.ToolCall{{
+					ID:   "call_1",
+					Type: "function",
+					Function: provider.FunctionCall{
+						Name:      "inspect",
+						Arguments: `{}`,
+					},
+				}},
+			}, nil
+		}
+		current, err := manager.Open(currentID)
+		if err != nil {
+			return provider.Response{}, err
+		}
+		beforeFinal <- current
+		return provider.Response{Content: "done", FinishReason: "stop"}, nil
+	})
+
+	runtimeAgent, err := internalagent.NewAgent(prov, pol, internalagent.Options{
+		Tools: []apitype.Tool{inspect},
+	})
+	if err != nil {
+		t.Fatalf("NewAgent() error = %v", err)
+	}
+	defer runtimeAgent.Close()
+
+	c, err := New(Options{
+		Agent:    runtimeAgent,
+		Sessions: manager,
+		SessionDefaults: session.CreateOptions{
+			Model:     "test-model",
+			Workspace: "/workspace",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	currentID = c.SessionID()
+
+	result, err := c.Run(context.Background(), "inspect the session")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Content != "done" {
+		t.Fatalf("result content = %q", result.Content)
+	}
+
+	var observed *session.Session
+	select {
+	case observed = <-inspect.observed:
+	case <-time.After(time.Second):
+		t.Fatal("tool did not observe the session before execution")
+	}
+	if len(observed.Entries) != 2 {
+		t.Fatalf("entries during tool execution = %d, want user + assistant tool call: %+v", len(observed.Entries), observed.Entries)
+	}
+	if observed.Entries[0].Kind != session.EntryUser || observed.Entries[0].Content != "inspect the session" {
+		t.Fatalf("durable user entry = %+v", observed.Entries[0])
+	}
+	if observed.Entries[1].Kind != session.EntryAssistant ||
+		len(observed.Entries[1].ToolCalls) != 1 ||
+		observed.Entries[1].ToolCalls[0].ID != "call_1" {
+		t.Fatalf("durable assistant entry = %+v", observed.Entries[1])
+	}
+
+	var beforeFinalSession *session.Session
+	select {
+	case beforeFinalSession = <-beforeFinal:
+	case <-time.After(time.Second):
+		t.Fatal("provider did not observe the session before the final turn")
+	}
+	if len(beforeFinalSession.Entries) != 3 {
+		t.Fatalf("entries before final turn = %d, want user + assistant + tool result: %+v", len(beforeFinalSession.Entries), beforeFinalSession.Entries)
+	}
+	if beforeFinalSession.Entries[2].Kind != session.EntryTool || beforeFinalSession.Entries[2].Content != `{"ok":true}` {
+		t.Fatalf("tool result was not durable before the next turn: %+v", beforeFinalSession.Entries[2])
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	final, err := manager.Open(currentID)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if len(final.Entries) != 4 {
+		t.Fatalf("final entries = %d, want 4: %+v", len(final.Entries), final.Entries)
+	}
+	if final.Entries[2].Kind != session.EntryTool || final.Entries[2].Content != `{"ok":true}` {
+		t.Fatalf("durable tool result = %+v", final.Entries[2])
+	}
+	if final.Entries[3].Kind != session.EntryAssistant || final.Entries[3].Content != "done" {
+		t.Fatalf("durable final assistant = %+v", final.Entries[3])
+	}
+	if final.Revision < 2 {
+		t.Fatalf("revision = %d, want at least 2", final.Revision)
+	}
+
+	lease, err := manager.Acquire(final)
+	if err != nil {
+		t.Fatalf("Acquire() after Close error = %v, want released lease", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+}
+
+func TestCompactionDoesNotRewriteSessionTranscript(t *testing.T) {
+	manager, err := session.NewJSONL(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewJSONL() error = %v", err)
+	}
+	base, err := manager.Create(session.CreateOptions{Model: "test-model", Workspace: "/workspace"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	lease, err := manager.Acquire(base)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	long := strings.Repeat("durable transcript detail ", 200)
+	for index := 0; index < 4; index++ {
+		if _, err := manager.Append(base, session.Entry{
+			Kind:    session.EntryUser,
+			Content: fmt.Sprintf("request %d %s", index, long),
+		}); err != nil {
+			t.Fatalf("Append(user) error = %v", err)
+		}
+		if _, err := manager.Append(base, session.Entry{
+			Kind:    session.EntryAssistant,
+			Content: fmt.Sprintf("answer %d %s", index, long),
+		}); err != nil {
+			t.Fatalf("Append(assistant) error = %v", err)
+		}
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	pol, err := policy.New(t.TempDir(), policy.Options{
+		Mode:            policy.ModeWorkspaceWrite,
+		ExternalSandbox: true,
+	})
+	if err != nil {
+		t.Fatalf("policy.New() error = %v", err)
+	}
+	prov := provider.ResponseFunc(func(_ context.Context, request provider.Request) (provider.Response, error) {
+		if len(request.Tools) == 0 {
+			return provider.Response{
+				Content:      "compacted summary",
+				FinishReason: "stop",
+				Usage:        provider.Usage{PromptTokens: 30, CompletionTokens: 5, TotalTokens: 35},
+			}, nil
+		}
+		return provider.Response{Content: "final answer", FinishReason: "stop"}, nil
+	})
+	runtimeAgent, err := internalagent.NewAgent(prov, pol, internalagent.Options{
+		ContextWindow:    2048,
+		ReserveTokens:    512,
+		CompactAt:        0.5,
+		KeepRecentTokens: 256,
+		SummaryMaxTokens: 128,
+	})
+	if err != nil {
+		t.Fatalf("NewAgent() error = %v", err)
+	}
+	defer runtimeAgent.Close()
+
+	c, err := New(Options{
+		Agent:          runtimeAgent,
+		Sessions:       manager,
+		InitialSession: base,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	result, err := c.Run(context.Background(), "continue working")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Content != "final answer" {
+		t.Fatalf("result content = %q", result.Content)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	final, err := manager.Open(base.ID)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if len(final.Entries) != 10 {
+		t.Fatalf("transcript entries = %d, want 8 original + user + assistant", len(final.Entries))
+	}
+	for _, entry := range final.Entries {
+		if entry.Content == "compacted summary" {
+			t.Fatalf("compaction summary replaced the transcript: %+v", final.Entries)
+		}
+	}
+	if !strings.HasPrefix(final.Entries[0].Content, "request 0 ") {
+		t.Fatalf("original transcript lost: %+v", final.Entries[0])
 	}
 }

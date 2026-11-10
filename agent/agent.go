@@ -132,6 +132,46 @@ func (f ApproverFunc) Approve(ctx context.Context, request ApprovalRequest) (App
 	return f(ctx, request)
 }
 
+// AssistantRecord is one assistant message to persist durably. ToolCalls must
+// be persisted before any of them execute.
+type AssistantRecord struct {
+	Content   string
+	Reasoning string
+	ToolCalls []provider.ToolCall
+	Usage     provider.Usage
+	Model     string
+}
+
+// ToolResultRecord is one tool result to persist immediately after the tool
+// returns.
+type ToolResultRecord struct {
+	ToolCallID string
+	ToolName   string
+	Content    string
+}
+
+// Recorder persists transcript entries at durability points. Implementations
+// must write and sync before returning; the runtime calls these methods
+// synchronously on the run goroutine and aborts the run if they fail.
+type Recorder interface {
+	// RecordUser persists a user message before the model call that follows it.
+	RecordUser(text string) error
+
+	// RecordAssistant persists an assistant message before any of its tool
+	// calls execute.
+	RecordAssistant(record AssistantRecord) error
+
+	// RecordToolResult persists a tool result immediately after execution.
+	RecordToolResult(record ToolResultRecord) error
+}
+
+// RecorderAgent is implemented by agents that support durable transcript
+// recording. Embedders can type-assert an Agent to install a Recorder.
+type RecorderAgent interface {
+	Agent
+	SetRecorder(recorder Recorder)
+}
+
 // Queue is a snapshot of instructions waiting for delivery.
 type Queue struct {
 	// Steering holds instructions delivered at the next turn boundary.

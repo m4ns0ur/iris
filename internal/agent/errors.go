@@ -11,6 +11,7 @@ var (
 	ErrEmptyInput         = publicagent.ErrEmptyInput
 	ErrEmptyResponse      = publicagent.ErrEmptyResponse
 	ErrContextOverflow    = publicagent.ErrContextOverflow
+	ErrPersistence        = publicagent.ErrPersistence
 	ErrTurnBudgetExceeded = publicagent.ErrTurnBudgetExceeded
 	ErrToolBudgetExceeded = publicagent.ErrToolBudgetExceeded
 	ErrToolTimeout        = publicagent.ErrToolTimeout

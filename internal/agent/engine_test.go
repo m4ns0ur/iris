@@ -1015,9 +1015,10 @@ func sseToolCalls(finish string, specs ...toolCallSpec) string {
 }
 
 type recordingTool struct {
-	count    atomic.Int32
-	err      error
-	required []string
+	count     atomic.Int32
+	err       error
+	required  []string
+	onExecute func()
 }
 
 func (t *recordingTool) Name() string            { return "record" }
@@ -1034,6 +1035,9 @@ func (t *recordingTool) Parameters() provider.Parameters {
 }
 func (t *recordingTool) Execute(context.Context, map[string]any) (map[string]any, error) {
 	t.count.Add(1)
+	if t.onExecute != nil {
+		t.onExecute()
+	}
 	if t.err != nil {
 		return nil, t.err
 	}
@@ -1751,5 +1755,188 @@ func TestAgentEmitsMissingSuffixWhenTerminalResponseIsFuller(t *testing.T) {
 	history := instance.History()
 	if got := messageText(history[len(history)-1]); got != "hello" {
 		t.Fatalf("assistant history content = %q, want hello", got)
+	}
+}
+
+type durableLog struct {
+	mu      sync.Mutex
+	events  []string
+	records []publicagent.AssistantRecord
+	failOn  string
+}
+
+func (l *durableLog) add(event string) {
+	l.mu.Lock()
+	l.events = append(l.events, event)
+	l.mu.Unlock()
+}
+
+func (l *durableLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.events...)
+}
+
+func (l *durableLog) fail(operation string) error {
+	if l.failOn == operation {
+		return errors.New("recorder unavailable")
+	}
+	return nil
+}
+
+type durableRecorder struct {
+	log *durableLog
+}
+
+func (r *durableRecorder) RecordUser(text string) error {
+	r.log.add("record-user")
+	return r.log.fail("user")
+}
+
+func (r *durableRecorder) RecordAssistant(record publicagent.AssistantRecord) error {
+	r.log.mu.Lock()
+	r.log.records = append(r.log.records, record)
+	r.log.mu.Unlock()
+	r.log.add("record-assistant")
+	return r.log.fail("assistant")
+}
+
+func (r *durableRecorder) RecordToolResult(record publicagent.ToolResultRecord) error {
+	r.log.add("record-tool-result")
+	return r.log.fail("tool-result")
+}
+
+func TestAgentRecordsDurabilityPointsInOrder(t *testing.T) {
+	log := &durableLog{}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		log.add("llm-request")
+		if requests.Add(1) == 1 {
+			writeSSE(w, sseToolCalls("tool_calls", toolCallSpec{ID: "call_1", Name: "record", Args: `{}`}))
+			return
+		}
+		writeSSE(w, finalResponse)
+	}))
+	defer server.Close()
+
+	record := &recordingTool{onExecute: func() { log.add("tool-execute") }}
+	instance, _ := newTestAgent(t, server, Options{Tools: []apitype.Tool{record}})
+	instance.SetRecorder(&durableRecorder{log: log})
+
+	if err := instance.Run(context.Background(), "do it"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if record.count.Load() != 1 {
+		t.Fatalf("tool executions = %d, want 1", record.count.Load())
+	}
+
+	events := log.snapshot()
+	index := func(name string, from int) int {
+		for i := from; i < len(events); i++ {
+			if events[i] == name {
+				return i
+			}
+		}
+		return -1
+	}
+	user := index("record-user", 0)
+	firstRequest := index("llm-request", 0)
+	assistant := index("record-assistant", 0)
+	tool := index("tool-execute", 0)
+	result := index("record-tool-result", 0)
+	secondRequest := index("llm-request", tool)
+	finalAssistant := index("record-assistant", secondRequest)
+	if user < 0 || firstRequest < 0 || assistant < 0 || tool < 0 || result < 0 || secondRequest < 0 || finalAssistant < 0 {
+		t.Fatalf("missing durability events: %v", events)
+	}
+	if user >= firstRequest || firstRequest >= assistant || assistant >= tool ||
+		tool >= result || result >= secondRequest || secondRequest >= finalAssistant {
+		t.Fatalf("durability event order = %v", events)
+	}
+}
+
+func TestRecorderFailureBeforeToolExecutionPreventsSideEffects(t *testing.T) {
+	log := &durableLog{failOn: "assistant"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(w, sseToolCalls("tool_calls", toolCallSpec{ID: "call_1", Name: "record", Args: `{}`}))
+	}))
+	defer server.Close()
+
+	record := &recordingTool{}
+	instance, _ := newTestAgent(t, server, Options{Tools: []apitype.Tool{record}})
+	instance.SetRecorder(&durableRecorder{log: log})
+
+	err := instance.Run(context.Background(), "do it")
+	if !errors.Is(err, ErrPersistence) {
+		t.Fatalf("Run() error = %v, want ErrPersistence", err)
+	}
+	if record.count.Load() != 0 {
+		t.Fatalf("tool executed %d times, want 0", record.count.Load())
+	}
+	for _, message := range instance.History() {
+		if message.Role == "assistant" {
+			t.Fatalf("unpersisted assistant message remained in history: %+v", message)
+		}
+	}
+}
+
+func TestRecorderFailureAfterToolExecutionAbortsRun(t *testing.T) {
+	log := &durableLog{failOn: "tool-result"}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writeSSE(w, sseToolCalls("tool_calls", toolCallSpec{ID: "call_1", Name: "record", Args: `{}`}))
+	}))
+	defer server.Close()
+
+	record := &recordingTool{}
+	instance, _ := newTestAgent(t, server, Options{Tools: []apitype.Tool{record}})
+	instance.SetRecorder(&durableRecorder{log: log})
+
+	err := instance.Run(context.Background(), "do it")
+	if !errors.Is(err, ErrPersistence) {
+		t.Fatalf("Run() error = %v, want ErrPersistence", err)
+	}
+	if record.count.Load() != 1 {
+		t.Fatalf("tool executions = %d, want 1 (execution already happened)", record.count.Load())
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("LLM requests = %d, want 1 (abort before another turn)", requests.Load())
+	}
+	history := instance.History()
+	foundTool := false
+	for _, message := range history {
+		if message.Role == "tool" {
+			foundTool = true
+		}
+	}
+	if !foundTool {
+		t.Fatalf("executed tool result missing from history: %+v", history)
+	}
+}
+
+func TestRecorderFailureOnUserInputPreventsModelCall(t *testing.T) {
+	log := &durableLog{failOn: "user"}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writeSSE(w, finalResponse)
+	}))
+	defer server.Close()
+
+	instance, _ := newTestAgent(t, server, Options{})
+	instance.SetRecorder(&durableRecorder{log: log})
+
+	err := instance.Run(context.Background(), "do it")
+	if !errors.Is(err, ErrPersistence) {
+		t.Fatalf("Run() error = %v, want ErrPersistence", err)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("LLM requests = %d, want 0", requests.Load())
+	}
+	for _, message := range instance.History() {
+		if message.Role == "user" {
+			t.Fatalf("unpersisted user message remained in history: %+v", message)
+		}
 	}
 }

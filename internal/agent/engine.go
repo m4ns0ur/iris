@@ -22,7 +22,10 @@ import (
 
 var Logger = logger.Logger
 
-var _ publicagent.Agent = (*Agent)(nil)
+var (
+	_ publicagent.Agent         = (*Agent)(nil)
+	_ publicagent.RecorderAgent = (*Agent)(nil)
+)
 
 const (
 	// DefaultMaxTurns bounds the number of LLM turns in one run.
@@ -81,11 +84,13 @@ type Options struct {
 type Agent struct {
 	// mu guards the run lifecycle. Agent state and history are only mutated by
 	// the single active run.
-	mu        sync.Mutex
-	running   bool
-	closed    bool
-	runCancel context.CancelFunc
-	runWG     sync.WaitGroup
+	mu          sync.Mutex
+	running     bool
+	closed      bool
+	runCancel   context.CancelFunc
+	runWG       sync.WaitGroup
+	recorder    publicagent.Recorder
+	runRecorder publicagent.Recorder
 
 	// subMu guards event subscribers.
 	subMu       sync.RWMutex
@@ -209,6 +214,80 @@ func (a *Agent) emit(event publicagent.Event) {
 			}()
 			handler(event)
 		}()
+	}
+}
+
+// SetRecorder installs a durable transcript recorder. It applies to the next
+// run; an active run keeps the recorder it started with.
+func (a *Agent) SetRecorder(recorder publicagent.Recorder) {
+	a.mu.Lock()
+	a.recorder = recorder
+	a.mu.Unlock()
+}
+
+func (a *Agent) currentRecorder() publicagent.Recorder {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.runRecorder
+}
+
+func (a *Agent) recordUser(text string) error {
+	recorder := a.currentRecorder()
+	if recorder == nil {
+		return nil
+	}
+	if err := recorder.RecordUser(text); err != nil {
+		return fmt.Errorf("%w: record user message: %w", ErrPersistence, err)
+	}
+	return nil
+}
+
+func (a *Agent) recordAssistant(msg provider.Message, usage provider.Usage) error {
+	recorder := a.currentRecorder()
+	if recorder == nil {
+		return nil
+	}
+	if err := recorder.RecordAssistant(publicagent.AssistantRecord{
+		Content:   messageTextContent(msg.Content),
+		Reasoning: msg.ReasoningContent,
+		ToolCalls: append([]provider.ToolCall(nil), msg.ToolCalls...),
+		Usage:     usage,
+		Model:     a.model,
+	}); err != nil {
+		return fmt.Errorf("%w: record assistant message: %w", ErrPersistence, err)
+	}
+	return nil
+}
+
+func (a *Agent) recordToolResult(call PendingToolCall, content string) error {
+	recorder := a.currentRecorder()
+	if recorder == nil {
+		return nil
+	}
+	if err := recorder.RecordToolResult(publicagent.ToolResultRecord{
+		ToolCallID: call.ID,
+		ToolName:   call.Name,
+		Content:    content,
+	}); err != nil {
+		return fmt.Errorf("%w: record tool result: %w", ErrPersistence, err)
+	}
+	return nil
+}
+
+func messageTextContent(content any) string {
+	switch value := content.(type) {
+	case string:
+		return value
+	case []provider.Content:
+		var builder strings.Builder
+		for _, part := range value {
+			builder.WriteString(part.Text)
+		}
+		return builder.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(value)
 	}
 }
 
@@ -438,13 +517,18 @@ func (a *Agent) deliverAtStop() ([]string, publicagent.InstructionKind, bool) {
 }
 
 // deliverInstructions appends queued instructions to the conversation and
-// reports them to subscribers. It must run on the run goroutine.
-func (a *Agent) deliverInstructions(kind publicagent.InstructionKind, messages []string) {
+// reports them to subscribers. It must run on the run goroutine. An error means
+// a user message could not be durably recorded, so the run must stop before the
+// model is called.
+func (a *Agent) deliverInstructions(kind publicagent.InstructionKind, messages []string) error {
 	if len(messages) == 0 {
-		return
+		return nil
 	}
 
 	for _, text := range messages {
+		if err := a.recordUser(text); err != nil {
+			return err
+		}
 		a.appendHistory(userMessage(text))
 		a.emit(publicagent.InstructionDelivered{
 			At:   time.Now(),
@@ -459,6 +543,7 @@ func (a *Agent) deliverInstructions(kind publicagent.InstructionKind, messages [
 		Steering:  queue.Steering,
 		FollowUps: queue.FollowUps,
 	})
+	return nil
 }
 
 func userMessage(text string) provider.Message {
@@ -521,6 +606,7 @@ func (a *Agent) beginRun(parent context.Context) (context.Context, error) {
 	a.toolCalls = 0
 	a.state = "idle"
 	a.pendingToolCalls = nil
+	a.runRecorder = a.recorder
 
 	a.queueMu.Lock()
 	a.steeringQueue = nil
@@ -540,6 +626,7 @@ func (a *Agent) finishRun() {
 	cancel := a.runCancel
 	a.runCancel = nil
 	a.running = false
+	a.runRecorder = nil
 	a.mu.Unlock()
 
 	a.queueMu.Lock()
@@ -592,6 +679,10 @@ func (a *Agent) Run(ctx context.Context, input string) (runErr error) {
 		a.emit(finished)
 	}()
 	defer a.finishRun()
+
+	if err := a.recordUser(input); err != nil {
+		return err
+	}
 
 	a.historyMu.Lock()
 	if len(a.history) == 0 {
@@ -658,7 +749,14 @@ func (a *Agent) loop(ctx context.Context) error {
 		)
 
 		a.emit(publicagent.TurnStarted{At: time.Now(), Turn: a.step})
-		a.deliverInstructions(deliveredKind, delivered)
+		if err := a.deliverInstructions(deliveredKind, delivered); err != nil {
+			a.emit(publicagent.TurnFinished{
+				At:   time.Now(),
+				Turn: a.step,
+				Err:  err.Error(),
+			})
+			return err
+		}
 
 		result, err := a.next(ctx)
 		finished := publicagent.TurnFinished{
@@ -710,27 +808,32 @@ func (a *Agent) executeTools(ctx context.Context) error {
 
 	// Tools are never retried automatically. A failed tool is reported to the
 	// model once, because repeating a tool that already modified a file or ran
-	// a shell command can duplicate side effects.
+	// a shell command can duplicate side effects. Every result is durably
+	// recorded before the next tool runs.
 	for i, call := range pending {
 		if err := ctx.Err(); err != nil {
-			a.recordSkippedTools(pending[i:], toolCodeCanceled, "run canceled before execution")
+			persistErr := a.recordSkippedTools(pending[i:], toolCodeCanceled, "run canceled before execution")
 			a.pendingToolCalls = nil
-			return err
+			return errors.Join(err, persistErr)
 		}
 
 		if call.SkipCode != "" {
-			a.reportToolFailure(call, call.SkipCode, call.SkipMessage, false, retryableSkip(call.SkipCode), 0)
+			if err := a.reportToolFailure(call, call.SkipCode, call.SkipMessage, false, retryableSkip(call.SkipCode), 0); err != nil {
+				a.pendingToolCalls = nil
+				return err
+			}
 			continue
 		}
 
 		if a.toolCalls >= a.maxToolCalls {
-			a.recordSkippedTools(
+			budgetErr := fmt.Errorf("%w: max_tool_calls=%d", ErrToolBudgetExceeded, a.maxToolCalls)
+			persistErr := a.recordSkippedTools(
 				pending[i:],
 				toolCodeBudgetExhausted,
 				fmt.Sprintf("tool execution budget exhausted (max_tool_calls=%d)", a.maxToolCalls),
 			)
 			a.pendingToolCalls = nil
-			return fmt.Errorf("%w: max_tool_calls=%d", ErrToolBudgetExceeded, a.maxToolCalls)
+			return errors.Join(budgetErr, persistErr)
 		}
 
 		a.toolCalls++
@@ -764,39 +867,48 @@ func (a *Agent) executeTools(ctx context.Context) error {
 		}
 
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			a.reportToolFailure(call, toolCodeCanceled, "run canceled: "+ctxErr.Error(), true, false, elapsed)
-			a.recordSkippedTools(pending[i+1:], toolCodeCanceled, "run canceled before execution")
+			persistErr := a.reportToolFailure(call, toolCodeCanceled, "run canceled: "+ctxErr.Error(), true, false, elapsed)
+			skipErr := a.recordSkippedTools(pending[i+1:], toolCodeCanceled, "run canceled before execution")
 			a.pendingToolCalls = nil
-			return ctxErr
+			return errors.Join(ctxErr, persistErr, skipErr)
 		}
 
 		if timedOut {
-			a.reportToolFailure(
+			if err := a.reportToolFailure(
 				call,
 				toolCodeTimeout,
 				fmt.Sprintf("%v after %s", ErrToolTimeout, a.toolTimeout),
 				true,
 				false,
 				elapsed,
-			)
+			); err != nil {
+				a.pendingToolCalls = nil
+				return err
+			}
 			continue
 		}
 
 		if err != nil {
-			a.reportToolFailure(call, toolCodeExecutionFailed, err.Error(), true, false, elapsed)
+			if err := a.reportToolFailure(call, toolCodeExecutionFailed, err.Error(), true, false, elapsed); err != nil {
+				a.pendingToolCalls = nil
+				return err
+			}
 			continue
 		}
 
 		jsonBytes, jsonErr := json.Marshal(result)
 		if jsonErr != nil {
-			a.reportToolFailure(
+			if err := a.reportToolFailure(
 				call,
 				toolCodeEncodeFailed,
 				fmt.Sprintf("encode tool result: %v", jsonErr),
 				true,
 				false,
 				elapsed,
-			)
+			); err != nil {
+				a.pendingToolCalls = nil
+				return err
+			}
 			continue
 		}
 
@@ -808,7 +920,10 @@ func (a *Agent) executeTools(ctx context.Context) error {
 			Duration:   elapsed,
 		})
 
-		a.appendToolResult(call, string(jsonBytes))
+		if err := a.appendToolResult(call, string(jsonBytes)); err != nil {
+			a.pendingToolCalls = nil
+			return err
+		}
 	}
 
 	a.pendingToolCalls = nil
@@ -824,7 +939,7 @@ func (a *Agent) reportToolFailure(
 	executed bool,
 	retryable bool,
 	duration time.Duration,
-) {
+) error {
 	a.emit(publicagent.ToolFailed{
 		At:         time.Now(),
 		ToolCallID: call.ID,
@@ -835,13 +950,17 @@ func (a *Agent) reportToolFailure(
 		Executed:   executed,
 		Retryable:  retryable,
 	})
-	a.appendToolResult(call, toolErrorContent(call, code, message, executed, retryable))
+	return a.appendToolResult(call, toolErrorContent(call, code, message, executed, retryable))
 }
 
-func (a *Agent) recordSkippedTools(calls []PendingToolCall, code, reason string) {
+func (a *Agent) recordSkippedTools(calls []PendingToolCall, code, reason string) error {
+	var errs []error
 	for _, call := range calls {
-		a.reportToolFailure(call, code, reason, false, false, 0)
+		if err := a.reportToolFailure(call, code, reason, false, false, 0); err != nil {
+			errs = append(errs, err)
+		}
 	}
+	return errors.Join(errs...)
 }
 
 const contextSummaryPrompt = `You compact conversation history for a coding agent.
@@ -950,7 +1069,7 @@ func (a *Agent) CompactionFinished(info contextmgr.FinishInfo) {
 	a.emit(event)
 }
 
-func (a *Agent) appendToolResult(call PendingToolCall, content string) {
+func (a *Agent) appendToolResult(call PendingToolCall, content string) error {
 	Logger.Debug(
 		"Tool result",
 		"toolName", call.Name,
@@ -963,6 +1082,7 @@ func (a *Agent) appendToolResult(call PendingToolCall, content string) {
 		Content:    content,
 		ToolCallID: call.ID,
 	})
+	return a.recordToolResult(call, content)
 }
 
 // turnResult describes one completed model request. It is independent of tool
@@ -1141,6 +1261,10 @@ func (a *Agent) next(ctx context.Context) (turnResult, error) {
 		msg.ToolCalls = assistantCalls
 		a.pendingToolCalls = pending
 
+		if err := a.recordAssistant(msg, response.Usage); err != nil {
+			a.pendingToolCalls = nil
+			return result, err
+		}
 		Logger.Debug("Message added to history", "message", msg)
 		a.appendHistory(msg)
 		a.state = "tool"
@@ -1161,6 +1285,9 @@ func (a *Agent) next(ctx context.Context) (turnResult, error) {
 		}
 	}
 
+	if err := a.recordAssistant(msg, response.Usage); err != nil {
+		return result, err
+	}
 	Logger.Debug("Message added to history", "message", msg)
 	a.appendHistory(msg)
 

@@ -100,6 +100,7 @@ func runPrint(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = c.Close() }()
 
 	ctx, stop := signalContext()
 	defer stop()
@@ -136,6 +137,7 @@ func runJSONL(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = c.Close() }()
 
 	ctx, stop := signalContext()
 	defer stop()
@@ -180,6 +182,7 @@ func runRPC(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = c.Close() }()
 
 	ctx, stop := signalContext()
 	defer stop()

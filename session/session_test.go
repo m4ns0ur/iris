@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -302,5 +303,619 @@ func TestUnknownSession(t *testing.T) {
 	}
 	if _, err := manager.Latest(); !errors.Is(err, ErrNoSessions) {
 		t.Fatalf("Latest() error = %v, want ErrNoSessions", err)
+	}
+}
+
+func appendFile(t *testing.T, path, content string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile(append) error = %v", err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString(content); err != nil {
+		t.Fatalf("WriteString(append) error = %v", err)
+	}
+	if err := file.Sync(); err != nil {
+		t.Fatalf("Sync(append) error = %v", err)
+	}
+}
+
+func TestSaveWritesSchemaVersion(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	session.AddUser("hello")
+	if err := manager.Save(session); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(manager.Dir(), session.ID+".jsonl"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var header record
+	if err := json.Unmarshal(bytesLine(data), &header); err != nil {
+		t.Fatalf("decode header: %v", err)
+	}
+	if header.Version != FormatVersion {
+		t.Fatalf("version = %d, want %d", header.Version, FormatVersion)
+	}
+	if header.Session == nil || header.Session.Revision != 1 {
+		t.Fatalf("header revision = %+v", header.Session)
+	}
+	loaded, err := manager.Open(session.ID)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if !loaded.UpdatedAt.Equal(header.Session.UpdatedAt) {
+		t.Fatalf("loaded updated_at = %s, header updated_at = %s", loaded.UpdatedAt, header.Session.UpdatedAt)
+	}
+}
+
+func bytesLine(data []byte) []byte {
+	line, _, _ := bytes.Cut(data, []byte("\n"))
+	return line
+}
+
+func TestAppendJournalAndPartialTailRecovery(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	lease, err := manager.Acquire(session)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+
+	if _, err := manager.Append(session, Entry{Kind: EntryUser, Content: "hello"}); err != nil {
+		t.Fatalf("Append(user) error = %v", err)
+	}
+	if _, err := manager.Append(session, Entry{
+		Kind:    EntryAssistant,
+		Content: "hi",
+		Usage:   &provider.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12},
+		Model:   "m",
+	}); err != nil {
+		t.Fatalf("Append(assistant) error = %v", err)
+	}
+	if session.Revision != 2 {
+		t.Fatalf("revision = %d, want 2", session.Revision)
+	}
+
+	path := filepath.Join(manager.Dir(), session.ID+".jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("journal lines = %d, want header + 2 entries + checkpoint", len(lines))
+	}
+	var checkpointRecord record
+	if err := json.Unmarshal([]byte(lines[3]), &checkpointRecord); err != nil {
+		t.Fatalf("decode checkpoint: %v", err)
+	}
+	if checkpointRecord.Type != recordCheckpoint || checkpointRecord.Checkpoint == nil || checkpointRecord.Checkpoint.Revision != 2 {
+		t.Fatalf("checkpoint = %+v", checkpointRecord.Checkpoint)
+	}
+
+	appendFile(t, path, `{"type":"entry","entry":{`)
+
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	loaded, err := manager.Open(session.ID)
+	if err != nil {
+		t.Fatalf("Open() after partial tail error = %v", err)
+	}
+	if !loaded.Recovered {
+		t.Fatal("Open() did not mark the partial tail as recovered")
+	}
+	if len(loaded.Entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(loaded.Entries))
+	}
+	if loaded.Usage.TotalTokens != 12 {
+		t.Fatalf("usage = %+v, want 12", loaded.Usage)
+	}
+	if !loaded.UpdatedAt.Equal(loaded.Entries[1].CreatedAt) {
+		t.Fatalf("updated_at = %s, want checkpoint time %s", loaded.UpdatedAt, loaded.Entries[1].CreatedAt)
+	}
+
+	lease, err = manager.Acquire(loaded)
+	if err != nil {
+		t.Fatalf("Acquire(recovered) error = %v", err)
+	}
+	if loaded.needsRepair {
+		t.Fatal("Acquire did not clear needsRepair")
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release(recovered) error = %v", err)
+	}
+
+	reopened, err := manager.Open(session.ID)
+	if err != nil {
+		t.Fatalf("Open(repaired) error = %v", err)
+	}
+	if reopened.Recovered {
+		t.Fatal("repaired session still reports recovery")
+	}
+	if len(reopened.Entries) != 2 {
+		t.Fatalf("repaired entries = %d, want 2", len(reopened.Entries))
+	}
+}
+
+func TestInterruptedToolExecutionRecovered(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	lease, err := manager.Acquire(session)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+
+	if _, err := manager.Append(session, Entry{Kind: EntryUser, Content: "read it"}); err != nil {
+		t.Fatalf("Append(user) error = %v", err)
+	}
+	if _, err := manager.Append(session, Entry{
+		Kind: EntryAssistant,
+		ToolCalls: []provider.ToolCall{{
+			ID:   "call_1",
+			Type: "function",
+			Function: provider.FunctionCall{
+				Name:      "read",
+				Arguments: `{"path":"a.txt"}`,
+			},
+		}},
+	}); err != nil {
+		t.Fatalf("Append(assistant) error = %v", err)
+	}
+
+	// Simulate a crash after the assistant tool call was durably written but
+	// before any tool result was recorded.
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	loaded, err := manager.Open(session.ID)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if !loaded.Recovered {
+		t.Fatal("Open() did not identify the interrupted tool execution")
+	}
+	if len(loaded.Entries) != 2 {
+		t.Fatalf("entries before repair = %d, want user + assistant", len(loaded.Entries))
+	}
+
+	history := loaded.History()
+	if len(history) != 3 || history[2].Role != "tool" || history[2].ToolCallID != "call_1" {
+		t.Fatalf("history = %+v", history)
+	}
+	if !strings.Contains(history[2].Content.(string), "tool_execution_interrupted") {
+		t.Fatalf("synthesized history content = %q", history[2].Content)
+	}
+
+	lease, err = manager.Acquire(loaded)
+	if err != nil {
+		t.Fatalf("Acquire(recovered) error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release(recovered) error = %v", err)
+	}
+
+	reopened, err := manager.Open(session.ID)
+	if err != nil {
+		t.Fatalf("Open(repaired) error = %v", err)
+	}
+	if len(reopened.Entries) != 3 || reopened.Entries[2].Status != EntryStatusInterrupted || !reopened.Entries[2].Recovered {
+		t.Fatalf("persisted entries = %+v", reopened.Entries)
+	}
+	path, err := manager.ExportMarkdown(reopened)
+	if err != nil {
+		t.Fatalf("ExportMarkdown() error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(export) error = %v", err)
+	}
+	if !strings.Contains(string(data), "[interrupted]") {
+		t.Fatalf("export does not identify the interrupted tool:\n%s", data)
+	}
+}
+
+func TestRecoveryOnlyReplacesMissingToolResults(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	lease, err := manager.Acquire(session)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if _, err := manager.Append(session, Entry{Kind: EntryUser, Content: "go"}); err != nil {
+		t.Fatalf("Append(user) error = %v", err)
+	}
+	if _, err := manager.Append(session, Entry{
+		Kind: EntryAssistant,
+		ToolCalls: []provider.ToolCall{
+			{ID: "call_1", Type: "function", Function: provider.FunctionCall{Name: "read"}},
+			{ID: "call_2", Type: "function", Function: provider.FunctionCall{Name: "read"}},
+		},
+	}); err != nil {
+		t.Fatalf("Append(assistant) error = %v", err)
+	}
+	if _, err := manager.Append(session, Entry{Kind: EntryTool, ToolCallID: "call_1", ToolName: "read", Content: `{"ok":true}`}); err != nil {
+		t.Fatalf("Append(tool) error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	loaded, err := manager.Open(session.ID)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if len(loaded.Entries) != 3 {
+		t.Fatalf("entries before repair = %d, want user + assistant + existing tool", len(loaded.Entries))
+	}
+	if loaded.Entries[2].ToolCallID != "call_1" || loaded.Entries[2].Status != "" {
+		t.Fatalf("existing result changed: %+v", loaded.Entries[2])
+	}
+	history := loaded.History()
+	if len(history) != 4 || history[3].ToolCallID != "call_2" {
+		t.Fatalf("history after recovery = %+v", history)
+	}
+	if !strings.Contains(history[3].Content.(string), "tool_execution_interrupted") {
+		t.Fatalf("missing synthetic result = %+v", history[3])
+	}
+}
+
+func TestConcurrentWriterLease(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	lease, err := manager.Acquire(session)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+
+	other, err := NewJSONL(manager.Dir())
+	if err != nil {
+		t.Fatalf("NewJSONL() error = %v", err)
+	}
+	loaded, err := other.Open(session.ID)
+	if err != nil && !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if loaded == nil {
+		loaded = session
+	}
+	if _, err := other.Acquire(loaded); !errors.Is(err, ErrSessionLocked) {
+		t.Fatalf("second Acquire() error = %v, want ErrSessionLocked", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	lease, err = other.Acquire(loaded)
+	if err != nil {
+		t.Fatalf("Acquire() after release error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release(second) error = %v", err)
+	}
+}
+
+func TestSaveRejectsStaleRevision(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	session.AddUser("one")
+	if err := manager.Save(session); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	first, err := manager.Open(session.ID)
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	second, err := manager.Open(session.ID)
+	if err != nil {
+		t.Fatalf("Open(second) error = %v", err)
+	}
+
+	first.AddUser("two")
+	if err := manager.Save(first); err != nil {
+		t.Fatalf("Save(first) error = %v", err)
+	}
+
+	second.AddUser("conflict")
+	if err := manager.Save(second); !errors.Is(err, ErrSessionConflict) {
+		t.Fatalf("Save(second) error = %v, want ErrSessionConflict", err)
+	}
+}
+
+func TestUnsupportedSessionVersionRejected(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	header := record{
+		Type:    recordSession,
+		Version: FormatVersion + 1,
+		Session: &session.Metadata,
+	}
+	data, _ := json.Marshal(header)
+	path := filepath.Join(manager.Dir(), session.ID+".jsonl")
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if _, err := manager.Open(session.ID); !errors.Is(err, ErrUnsupportedSessionVersion) {
+		t.Fatalf("Open() error = %v, want ErrUnsupportedSessionVersion", err)
+	}
+}
+
+func TestLegacySessionIsUpgradedOnAcquire(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	legacy := struct {
+		Type    string    `json:"type"`
+		Session *Metadata `json:"session"`
+	}{Type: recordSession, Session: &session.Metadata}
+	headerData, _ := json.Marshal(legacy)
+	entry := session.AddUser("legacy hello")
+	entryData, _ := json.Marshal(record{Type: recordEntry, Entry: &entry})
+	path := filepath.Join(manager.Dir(), session.ID+".jsonl")
+	if err := os.WriteFile(path, append(append(headerData, '\n'), append(entryData, '\n')...), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	loaded, err := manager.Open(session.ID)
+	if err != nil {
+		t.Fatalf("Open(legacy) error = %v", err)
+	}
+	if loaded.Recovered {
+		t.Fatal("clean legacy session should not be marked recovered")
+	}
+	if !loaded.needsRepair {
+		t.Fatal("legacy session was not marked for format upgrade")
+	}
+	lease, err := manager.Acquire(loaded)
+	if err != nil {
+		t.Fatalf("Acquire(legacy) error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var header record
+	if err := json.Unmarshal(bytesLine(data), &header); err != nil {
+		t.Fatalf("decode upgraded header: %v", err)
+	}
+	if header.Version != FormatVersion {
+		t.Fatalf("upgraded version = %d, want %d", header.Version, FormatVersion)
+	}
+}
+
+func TestAppendRequiresLease(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	if _, err := manager.Append(session, Entry{Kind: EntryUser, Content: "hello"}); !errors.Is(err, ErrSessionLocked) {
+		t.Fatalf("Append() without lease error = %v, want ErrSessionLocked", err)
+	}
+}
+
+func TestHistoryOmitsOrphanToolResults(t *testing.T) {
+	session, _ := NewJSONL(t.TempDir())
+	created, _ := session.Create(CreateOptions{Model: "m"})
+	created.AddUser("hello")
+	created.AddTool("missing-call", "read", "orphan")
+	created.AddAssistant("done", "", nil, nil, "m")
+	history := created.History()
+	if len(history) != 2 {
+		t.Fatalf("history = %+v, want user + assistant", history)
+	}
+}
+
+func TestListToleratesPartialTail(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	session.AddUser("hello")
+	if err := manager.Save(session); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	appendFile(t, filepath.Join(manager.Dir(), session.ID+".jsonl"), `{"type":"entry"`)
+
+	summaries, err := manager.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].ID != session.ID || summaries[0].EntryCount != 1 {
+		t.Fatalf("summaries = %+v", summaries)
+	}
+}
+
+func TestPartialCheckpointRecovery(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	lease, err := manager.Acquire(session)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if _, err := manager.Append(session, Entry{Kind: EntryUser, Content: "hello"}); err != nil {
+		t.Fatalf("Append(user) error = %v", err)
+	}
+	if _, err := manager.Append(session, Entry{
+		Kind:    EntryAssistant,
+		Content: "hi",
+		Usage:   &provider.Usage{PromptTokens: 4, CompletionTokens: 1, TotalTokens: 5},
+	}); err != nil {
+		t.Fatalf("Append(assistant) error = %v", err)
+	}
+	appendFile(t, filepath.Join(manager.Dir(), session.ID+".jsonl"), `{"type":"checkpoint","checkpoint":{`)
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	loaded, err := manager.Open(session.ID)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if !loaded.Recovered || len(loaded.Entries) != 2 {
+		t.Fatalf("loaded = recovered %v, entries %d", loaded.Recovered, len(loaded.Entries))
+	}
+	if loaded.Usage.TotalTokens != 5 {
+		t.Fatalf("usage = %+v, want 5", loaded.Usage)
+	}
+
+	lease, err = manager.Acquire(loaded)
+	if err != nil {
+		t.Fatalf("Acquire(repaired) error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release(repaired) error = %v", err)
+	}
+}
+
+func TestTruncatedButValidFinalRecordIsRecovered(t *testing.T) {
+	for _, partial := range []string{
+		"{\"type\":\"entry\"}\n",
+		"{\"type\":\"checkpoint\"}\n",
+	} {
+		t.Run(partial, func(t *testing.T) {
+			manager := newTestManager(t)
+			session, _ := manager.Create(CreateOptions{Model: "m"})
+			session.AddUser("hello")
+			if err := manager.Save(session); err != nil {
+				t.Fatalf("Save() error = %v", err)
+			}
+			appendFile(t, filepath.Join(manager.Dir(), session.ID+".jsonl"), partial)
+
+			loaded, err := manager.Open(session.ID)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			if !loaded.Recovered || len(loaded.Entries) != 1 {
+				t.Fatalf("loaded = recovered %v, entries %d", loaded.Recovered, len(loaded.Entries))
+			}
+			lease, err := manager.Acquire(loaded)
+			if err != nil {
+				t.Fatalf("Acquire() error = %v", err)
+			}
+			if err := lease.Release(); err != nil {
+				t.Fatalf("Release() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestFileWithoutHeaderIsNotRecreated(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	path := filepath.Join(manager.Dir(), session.ID+".jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"entry","entry":{"kind":"user","content":"orphan"}}`+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := manager.Open(session.ID); err == nil {
+		t.Fatal("Open() accepted a file without a header")
+	}
+	if _, err := manager.Acquire(session); err == nil {
+		t.Fatal("Acquire() treated a corrupt file as a new session")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	lease, err := manager.Acquire(session)
+	if err != nil {
+		t.Fatalf("Acquire() after cleanup error = %v, want released lock", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+}
+
+func TestSaveUsesTransientLease(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	session.AddUser("hello")
+	lease, err := manager.Acquire(session)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+
+	other, err := NewJSONL(manager.Dir())
+	if err != nil {
+		t.Fatalf("NewJSONL() error = %v", err)
+	}
+	if err := other.Save(session); !errors.Is(err, ErrSessionLocked) {
+		t.Fatalf("Save() while leased error = %v, want ErrSessionLocked", err)
+	}
+
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if err := other.Save(session); err != nil {
+		t.Fatalf("Save() after release error = %v", err)
+	}
+}
+
+func TestAppendRepairsPartialTailInProcess(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+	lease, err := manager.Acquire(session)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if _, err := manager.Append(session, Entry{Kind: EntryUser, Content: "one"}); err != nil {
+		t.Fatalf("Append(user) error = %v", err)
+	}
+	if _, err := manager.Append(session, Entry{Kind: EntryAssistant, Content: "two"}); err != nil {
+		t.Fatalf("Append(assistant) error = %v", err)
+	}
+
+	path := filepath.Join(manager.Dir(), session.ID+".jsonl")
+	appendFile(t, path, `{"type":"entry","entry":{`)
+
+	if _, err := manager.Append(session, Entry{Kind: EntryUser, Content: "three"}); err != nil {
+		t.Fatalf("Append(after partial tail) error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+
+	loaded, err := manager.Open(session.ID)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if loaded.Recovered {
+		t.Fatal("journal still reports recovery after an in-process tail repair")
+	}
+	if len(loaded.Entries) != 3 || loaded.Entries[2].Content != "three" {
+		t.Fatalf("entries = %+v", loaded.Entries)
+	}
+}
+
+func TestHistoryPlacesSyntheticResultBeforeNextMessage(t *testing.T) {
+	manager := newTestManager(t)
+	created, _ := manager.Create(CreateOptions{Model: "m"})
+	created.AddUser("first")
+	created.AddAssistant("", "", []provider.ToolCall{{
+		ID:   "call_1",
+		Type: "function",
+		Function: provider.FunctionCall{
+			Name: "read",
+		},
+	}}, nil, "m")
+	created.AddUser("second")
+
+	history := created.History()
+	if len(history) != 4 {
+		t.Fatalf("history length = %d, want 4: %+v", len(history), history)
+	}
+	if history[2].Role != "tool" || history[2].ToolCallID != "call_1" {
+		t.Fatalf("synthetic result position = %+v", history[2])
+	}
+	if history[3].Role != "user" {
+		t.Fatalf("following message = %+v", history[3])
+	}
+	if len(created.Entries) != 3 {
+		t.Fatalf("transcript was mutated: %+v", created.Entries)
 	}
 }

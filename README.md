@@ -35,6 +35,8 @@ Iris runs a **deterministic agentic loop**. Each run repeats the same steps:
 
 At the loop level this appears as three states: `idle` (generate the next response), `tool` (execute requested tools), and `done` (stop).
 
+The transcript is durable independently of the prompt view: the user message is journaled before the model call, assistant tool calls are journaled before any of them execute, and each tool result is journaled immediately after it returns. A crash therefore leaves an identifiable, resumable transcript rather than a half-written conversation. See [Sessions](#sessions).
+
 Every run has its own `context.Context`. Cancellation propagates to the provider request and stream, retry backoff, approval requests, and tool execution. Interrupting a run records synthetic tool results for tool calls that never executed so the conversation history remains valid for the next run. A run can also be steered or given follow-up work without being canceled; see [Execution Control](#execution-control).
 
 A model request and the overall execution are distinct. `agent.turn.finished` reports that one request completed; the run may still execute tools, be retried after context compaction, or deliver queued work. `agent.finished` is the **settled** event: no automatic work remains. See [Request and execution lifecycle](#request-and-execution-lifecycle).
@@ -60,7 +62,7 @@ A run does not have to be all-or-nothing. Iris implements the Pi agent harness i
 - **Follow-up** is delivered only when the run would otherwise stop: the last turn produced no tool calls and no steering instructions are pending. Delivery continues the same run, preserving conversation history and budgets.
 - **Ordering.** Steering takes priority over follow-ups. All queued messages of one kind are delivered together in FIFO order.
 - **Abort** cancels the run context. The provider request and stream, retry backoff, approvals, and tool execution stop. Queued instructions that have not been delivered are discarded when the run ends. `Abort()` closes the queue atomically and returns the pending text so an interactive client can restore it to its editor; `Cancel()` is the plain abort.
-- **History.** Delivered instructions are ordinary user messages. They are persisted with the session and are visible to the model on that turn. The system prompt tells the model to treat newer instructions as authoritative and abandon a superseded approach. Aborting leaves valid history: tool calls that never produced results get synthetic tool results.
+- **History.** Delivered instructions are ordinary user messages. They are persisted before the model request and are visible to the model on that turn. The system prompt tells the model to treat newer instructions as authoritative and abandon a superseded approach. Aborting leaves valid history: tool calls that never produced results are recorded as interrupted tool results on recovery.
 - **Budgets.** Each delivered steering or follow-up message starts a new turn and counts against `max_turns`. Queued instructions do not bypass execution budgets.
 
 For example, while Iris is implementing a feature, you can correct its approach without losing the run:
@@ -295,7 +297,7 @@ Use "iris [command] --help" for more information about a command.
 
 The flags are persistent and accepted by every subcommand. `--model` overrides `default_model`, and `--base-url` overrides `base_url`.
 
-The headless modes share the same agent, tools, security policy, resources, context manager, and persistent sessions as the TUI.
+The headless modes share the same agent, tools, security policy, resources, context manager, and durable sessions as the TUI. Each active session holds an exclusive writer lease while the process uses it.
 
 ### Print
 
@@ -308,7 +310,7 @@ cat prompt.txt | iris print
 
 Arguments are joined with spaces into one prompt. With no argument, the prompt is read from stdin; an empty prompt is an error.
 
-Print mode creates a new persistent session (unless persistence is disabled in an embedding) and saves it after the run attempt.
+Print mode creates a new persistent session (unless persistence is disabled in an embedding). The user prompt is durably recorded before the model call; assistant messages and tool results are recorded as they complete, so a failed run still leaves a valid, resumable transcript.
 
 ### JSONL
 
@@ -364,7 +366,7 @@ RPC mode speaks JSON-RPC 2.0 over stdin/stdout. Agent events are sent as `agent.
 
 `agent.run` is asynchronous so `agent.steer`, `agent.follow_up`, `agent.clear_queue`, `agent.cancel`, `agent.status`, and `shutdown` can be processed while it runs. The server starts reading the next request only after the run has started, so a `agent.steer` sent immediately after `agent.run` is deterministic. A second concurrent run is rejected with the busy error. Mutating session methods (`session.new`, `session.resume`, `session.export`, `session.fork`) are rejected as busy during a run; reads (`agent.status`, `session.list`, `session.current`) remain available.
 
-Steering and follow-up return the idle error when no run is active. `agent.clear_queue` works while idle and while running. `agent.cancel` is an abort: it closes the queue, returns instructions that had not been delivered, and cancels the run. See [Execution Control](#execution-control) for delivery points.
+Steering and follow-up return the idle error when no run is active. `agent.clear_queue` works while idle and while running. `agent.cancel` is an abort: it closes the queue, returns instructions that had not been delivered, and cancels the run. See [Execution Control](#execution-control) for delivery points. A session resumed through RPC is repaired under its writer lease, and another process holding that lease makes the operation fail with `session.ErrSessionLocked`.
 
 The RPC event stream carries `agent.turn.finished`, `agent.turn.retried`, and the settled `agent.finished` event. A `agent.turn.finished` event is not the end of `agent.run`; the run may continue with tools, compaction, retries, or queued work. The final `client.Result` includes `truncated` when the last model turn hit the output token limit.
 
@@ -724,50 +726,104 @@ The status line shows the current hints, the scroll percentage, and the total to
 | `/prompt <name> [input]` | Render a template into the input box for editing. |
 | `/help`, `/?` | List commands. |
 
-Unknown commands produce a notice. Session-mutating commands persist the current session first and are unavailable while a run is active; `/clear-queue` and `/help` remain available. The TUI saves the session after each run (including failed runs with partial history), before switching sessions, and when quitting while idle.
+Unknown commands produce a notice. Session-mutating commands persist the current session first and are unavailable while a run is active; `/clear-queue` and `/help` remain available. The TUI uses the same durable recorder as the headless modes: user messages, assistant tool calls, and tool results are on disk while the run is still in progress. Recovered sessions show notices for interrupted tool calls.
 
 ## Sessions
 
-Sessions are persisted as one JSONL file per conversation under `~/.iris/sessions` by default. Override the location with:
+Sessions are persisted as one append-only JSONL journal per conversation under `~/.iris/sessions` by default. Override the location with:
 
 ```toml
 [session]
 dir = '/path/to/sessions'
 ```
 
-The session directory is created with `0700` permissions and session files with `0600`. Saves rewrite the file atomically via a temp file and rename.
+The session directory is created with `0700` permissions, session files with `0600`, and per-session lock files with `0600`. A session header and full rewrites are written atomically via a temp file, file sync, rename, and directory sync. Individual entries are appended and fsynced.
 
-The first record is session metadata; subsequent records are conversation entries:
+### Durability and crash recovery
+
+The runtime records the transcript at three boundaries:
+
+| Boundary | Persistence point |
+| --- | --- |
+| User message | Before the model request that consumes it, including delivered steering and follow-up messages. |
+| Assistant message | After the complete response is validated, and before any of its tool calls execute. |
+| Tool result | Immediately after the tool returns, is rejected, or is skipped, before the next tool or model call. |
+
+Recording failures abort the run instead of continuing with unrecorded work:
+
+- A failed user-message write stops the run before the model call.
+- A failed assistant-message write stops the run before any tool call executes.
+- A failed tool-result write stops the run after the tool has run. The assistant tool call remains durable without a result, and recovery identifies it as interrupted.
+
+Crash recovery is performed by `Acquire` under the exclusive writer lease:
+
+- A partially written final JSONL record is ignored when loading; the valid prefix is used.
+- The file is repaired (partial tail removed, schema upgraded) before new entries are appended.
+- Every assistant tool call without a recorded result gets a synthetic `tool` entry with `status: "interrupted"` and `recovered: true`.
+- Its content is a structured tool error with `code: "tool_execution_interrupted"`, `interrupted: true`, `executed: true`, and `retryable: false`. Iris cannot know whether the tool ran, so the model is told to verify side effects before retrying.
+- Damage in the *middle* of a journal is an error rather than a silent truncation.
+
+Only complete model responses are committed. A failed, disconnected, or retried request contributes no assistant entry, so an interrupted response cannot be mistaken for completed work in a resumed session. The TUI shows a notice for each recovered interrupted tool call.
+
+### Transcript versus model context
+
+Sessions maintain two related views:
+
+- **Transcript history** (`Session.Entries`): everything the user and agent said or did, including tool calls, tool results, errors, and recovered interruptions. It is never compacted or replaced.
+- **Model context** (`Session.History`): the messages sent to the model. Orphan tool results are omitted, dangling tool calls are represented by interrupted results, and the context manager applies compaction to a prompt view only.
+
+Context compaction therefore changes what the model sees for a request without deleting or rewriting the durable transcript. A session resumed later still contains the original messages; it does not contain compaction summaries as conversation entries.
+
+### Schema and journal format
+
+The format has an explicit schema version. The current version is **2**; unversioned and version 1 files are accepted and upgraded on `Acquire`. A newer version fails with `session.ErrUnsupportedSessionVersion`.
+
+The first record is the versioned session header. Entries and checkpoints follow. Each append writes an entry plus a checkpoint carrying the new revision, timestamp, and aggregate usage:
 
 ```json
-{"type":"session","session":{"id":"s-...","created_at":"...","updated_at":"...","model":"...","model_metadata":{...},"workspace":"...","usage":{...}}}
+{"type":"session","version":2,"session":{"id":"s-...","revision":3,"created_at":"...","updated_at":"...","model":"...","model_metadata":{...},"workspace":"...","usage":{...}}}
 {"type":"entry","entry":{"id":"e-...","session_id":"s-...","parent_id":"...","kind":"user","created_at":"...","content":"..."}}
-{"type":"entry","entry":{"id":"e-...","session_id":"s-...","parent_id":"...","kind":"assistant","content":"...","reasoning_content":"...","tool_calls":[...],"usage":{...},"model":"..."}}
-{"type":"entry","entry":{"id":"e-...","session_id":"s-...","parent_id":"...","kind":"tool","content":"...","tool_call_id":"...","tool_name":"..."}}
+{"type":"entry","entry":{"id":"e-...","session_id":"s-...","parent_id":"...","kind":"assistant","created_at":"...","content":"...","reasoning_content":"...","tool_calls":[...],"usage":{...},"model":"..."}}
+{"type":"entry","entry":{"id":"e-...","session_id":"s-...","parent_id":"...","kind":"tool","created_at":"...","content":"...","tool_call_id":"...","tool_name":"..."}}
+{"type":"checkpoint","checkpoint":{"revision":4,"updated_at":"...","usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}}
 ```
 
-Session metadata includes the ID, timestamps, model, model metadata (provider, base URL, model context size, effective context window, configured reserve tokens, non-zero sampling values), workspace, parent/fork information, and aggregate token usage.
+An interrupted tool entry adds:
+
+```json
+{"kind":"tool","status":"interrupted","recovered":true,"tool_call_id":"call_1","tool_name":"shell","content":"{\"ok\":false,\"error\":{\"code\":\"tool_execution_interrupted\",\"...\":\"...\"}}"}
+```
+
+`Save` rewrites the complete session atomically with the next header revision; `Append` uses the journal path. Unknown record types within a supported version are ignored for forward compatibility. The header's `revision` and checkpoint revisions are monotonic and used for lost-update detection.
+
+Session metadata includes the ID, timestamps, revision, model, model metadata (provider, base URL, model context size, effective context window, configured reserve tokens, non-zero sampling values), workspace, parent/fork information, and aggregate token usage (summed from recorded assistant turns and compaction summaries).
 
 Entries have IDs and `parent_id` links. Message history is reconstructed from these entries when a session is resumed. System prompts are not persisted; the agent adds its current system prompt when history is loaded. Resuming and forking restore conversation history and metadata; new turns use the provider and model configured for the current Iris launch.
 
-Steering instructions and follow-ups that were delivered during a run are ordinary user messages, so they are persisted as `user` entries. Instructions that were still queued when the run ended are not part of the conversation and are not persisted.
-
-Only successful, complete model responses are committed to history. A failed, disconnected, or retried attempt contributes no assistant message, so an interrupted response can never be mistaken for completed work in a resumed session.
+Steering instructions and follow-ups that were delivered during a run are ordinary user messages, so they are persisted as `user` entries before the next model request. Instructions that were still queued when the run ended are not part of the conversation and are not persisted.
 
 Session IDs use letters, digits, `-`, and `_`, up to 128 characters.
 
+### Concurrent writers
+
+A session has one writer at a time:
+
+- `Acquire` holds an exclusive writer lease on `<session>.lock`. On Unix it uses a non-blocking `flock`; a process-local guard also covers multiple managers in the same process. Another writer receives `session.ErrSessionLocked`.
+- The OS releases the lock automatically when a process crashes; stale Unix lock files are harmless. The non-Unix fallback uses an exclusive lock file and may require removing a stale `.lock` file after a crash.
+- `Save` also takes a transient lease when the caller does not already hold one, and compares the session `revision` with the file. A stale writer receives `session.ErrSessionConflict` instead of overwriting newer entries.
+- Read-only `Open`, `List`, `Latest`, and exports do not require the writer lease. A session actively being written can still be read; a partial final record is ignored.
+
 ### Exports
 
-`/export` and `session.export` write Markdown to `<session-dir>/exports/<session-id>.md` (directory `0700`, file `0600`, atomic write). The export includes session metadata, token totals, model metadata, and each entry with reasoning sections, tool calls, and tool results.
+`/export` and `session.export` write Markdown to `<session-dir>/exports/<session-id>.md` (directory `0700`, file `0600`, atomic write). The export includes format version, revision, session metadata, token totals, model metadata, and each entry with reasoning sections, tool calls, tool results, and interrupted status.
 
 ### Client and RPC session behavior
 
-- `print`, `jsonl`, and `rpc` create a new session at startup unless an initial session is supplied by an embedding.
-- Sessions are saved after each run attempt. An attempt that adds no conversation messages does not create a file.
+- `print`, `jsonl`, and `rpc` create a session at startup unless an initial session is supplied by an embedding. The client acquires its writer lease and records user messages before execution.
 - Delivered steering instructions and follow-ups are saved as user entries; queued instructions that were never delivered are not.
-- `session.new` and `session.resume` persist the current session before switching.
-- `session.fork` creates a child session containing entries through the selected user message and records `parent_session_id` and `forked_from_entry_id`.
-- Mutating session methods return busy errors during a run; see [RPC](#rpc).
+- `session.new` and `session.resume` persist the current session before switching and acquire the new session's lease. `session.resume` also repairs a session left behind by a crash.
+- `session.fork` creates a child session containing entries through the selected user message, records `parent_session_id` and `forked_from_entry_id`, and acquires the child's lease.
+- Mutating session methods return busy errors during a run; see [RPC](#rpc). Operations on a session locked by another process return `session.ErrSessionLocked`.
 
 ### `session.Manager`
 
@@ -782,10 +838,16 @@ type Manager interface {
     List() ([]Summary, error)
     Fork(sessionID, fromEntryID string) (*Session, error)
     ExportMarkdown(session *Session) (string, error)
+    Acquire(session *Session) (Lease, error)
+    Append(session *Session, entry Entry) (Entry, error)
+}
+
+type Lease interface {
+    Release() error
 }
 ```
 
-`session.NewJSONL(dir)` returns the default JSONL implementation. `Create` builds an unsaved session; `Save` publishes it. Forking validates that the target entry exists and is a user message.
+`session.NewJSONL(dir)` returns the default JSONL implementation. `Create` builds an unsaved session; `Acquire` takes the writer lease and repairs recoverable damage; `Append` durably journals one entry and requires the lease returned by `Acquire`; `Save` publishes a complete rewrite. A `Lease` is any value with `Release() error`; `Lease.Release` relinquishes the writer lease. Forking validates that the target entry exists and is a user message. Custom `Manager` implementations must provide `Acquire` and `Append`; the JSONL manager is the reference implementation.
 
 ## Resources
 
@@ -850,7 +912,7 @@ Skill and prompt lookups first try an exact name, then a case-insensitive match.
 
 ## Context Management
 
-Iris builds a prompt view for each model call instead of mutating the canonical conversation. The full, uncompressed conversation remains in the agent history and therefore in the persistent session. Compaction only affects what is sent to the model for that request.
+Iris builds a prompt view for each model call instead of mutating the canonical conversation. The full, uncompressed conversation remains in the agent history and in the durable session transcript. Compaction only affects what is sent to the model for that request; it never deletes or rewrites session entries.
 
 The effective context window is selected in this order:
 
@@ -931,6 +993,7 @@ c, err := client.New(client.Options{
 if err != nil {
     log.Fatal(err)
 }
+defer c.Close()
 
 ctx := context.Background()
 result, err := c.RunStream(ctx, "Implement the feature", func(event agent.Event) {
@@ -970,7 +1033,7 @@ The lower-level [`agent`](agent) package can be used directly when session manag
 
 ### `client` API
 
-`client.Options` fields: `Agent` (required), `Sessions` (nil disables persistence), `SessionDefaults`, and `InitialSession` (resume an existing `*session.Session`).
+`client.Options` fields: `Agent` (required), `Sessions` (nil disables persistence), `SessionDefaults`, and `InitialSession` (resume an existing `*session.Session`). With persistence enabled, the client acquires the session writer lease at construction and releases it on `Close`.
 
 `client.Client` provides:
 
@@ -993,6 +1056,7 @@ The lower-level [`agent`](agent) package can be used directly when session manag
 | `ForkSessionAt(index)` | Fork from a 1-based user-message index. |
 | `ListSessions()` | Session summaries, newest first. |
 | `ExportSession()` | Persist and export the current session as Markdown. |
+| `Close()` | Persist pending metadata and release the writer lease. Returns `ErrBusy` during a run. |
 
 `client.Result`:
 
@@ -1006,7 +1070,7 @@ The lower-level [`agent`](agent) package can be used directly when session manag
 | `Canceled` | Whether the run ended because it was cancelled. |
 | `Truncated` | Whether the last model turn hit the output token limit. |
 
-`client.ErrBusy` is returned when a run is requested while another is active. Mutating session operations are also busy-checked. `RunStream` handlers run synchronously in the agent run goroutine and must return quickly. `client.EventRecord{Type, Event}` and `client.Record(event)` provide the stable JSON envelope used by JSONL and RPC. When a turn is retried, the client discards partial output from the failed attempt; consumers that maintain their own buffers should reset them on `agent.turn.retried`.
+`client.ErrBusy` is returned when a run is requested while another is active. Mutating session operations are also busy-checked. With a real agent that implements `agent.RecorderAgent`, the client installs a recorder so user messages, assistant tool calls, and tool results are persisted at their durability points; agents without recorder support use the end-of-run history fallback. `RunStream` handlers run synchronously in the agent run goroutine and must return quickly. `client.EventRecord{Type, Event}` and `client.Record(event)` provide the stable JSON envelope used by JSONL and RPC. When a turn is retried, the client discards partial output from the failed attempt; consumers that maintain their own buffers should reset them on `agent.turn.retried`.
 
 ### Providers
 
@@ -1083,9 +1147,26 @@ type Agent interface {
 
 `History` returns a snapshot including the system message. `LoadHistory` replaces the conversation while the agent is idle and prepends the system prompt when the messages do not start with one. `Subscribe` has no unsubscribe; the subscription lives for the agent's lifetime. `ApprovalTimeout` reports the policy deadline and `Approver` returns the installed approver, including one configured through an approval hook. `Close` cancels the active run, waits for cleanup, and releases captured temp files. A single run is active at a time; starting another run returns `agent.ErrAgentBusy`, and using an agent after `Close` returns `agent.ErrAgentClosed`.
 
+Agents that can durably record a transcript also implement the optional `RecorderAgent` interface:
+
+```go
+type Recorder interface {
+    RecordUser(text string) error
+    RecordAssistant(record AssistantRecord) error
+    RecordToolResult(record ToolResultRecord) error
+}
+
+type RecorderAgent interface {
+    Agent
+    SetRecorder(Recorder)
+}
+```
+
+The built-in agent implements `RecorderAgent`. The client and TUI install a recorder backed by the leased session so `RecordUser` runs before the model call, `RecordAssistant` runs before its tool calls execute, and `RecordToolResult` runs immediately after each tool. Recorder methods are called synchronously on the run goroutine; an error aborts the run with `agent.ErrPersistence`. Custom agents that do not implement `RecorderAgent` still work with the client/TUI using the end-of-run history fallback, but that fallback is less durable across a crash.
+
 While a run is active, `Steer` and `FollowUp` queue instructions for the next turn and for the stop point respectively. `Pending` snapshots the queues and `ClearQueue` removes and returns them. `Cancel` aborts the run; `Abort` also closes the queue atomically and returns the instructions that had not been delivered, so a UI can restore their text. Queue methods are safe to call from event handlers and from other goroutines, and they never interrupt an in-flight provider request or tool execution. See [Execution Control](#execution-control) for the exact delivery points.
 
-`agent.turn.finished` is request completion; `agent.finished` is settled execution. Consumers that persist results or move to an "idle" state should wait for the settled event. Consumers that display per-request progress can use `agent.turn.finished`, and should clear partial output on `agent.turn.retried`.
+`agent.turn.finished` is request completion; `agent.finished` is settled execution. Consumers that persist agent history themselves or move to an "idle" state should wait for the settled event. The built-in recorder persists user messages, assistant tool calls, and tool results earlier, at the durability points described in [Sessions](#sessions). Consumers that display per-request progress can use `agent.turn.finished`, and should clear partial output on `agent.turn.retried`.
 
 | Event | Meaning |
 | --- | --- |
@@ -1176,12 +1257,16 @@ Implementation details stay under `internal/`.
 | `agent.ErrTurnBudgetExceeded` | `max_turns` was exhausted. |
 | `agent.ErrToolBudgetExceeded` | `max_tool_calls` was exhausted. |
 | `agent.ErrToolTimeout` | Wraps a tool execution that exceeded its timeout (reported as a failed tool). |
+| `agent.ErrPersistence` | A transcript recorder could not durably persist a message or tool result; the run aborted. |
 | `client.ErrBusy` | A client run or mutating session operation was attempted while busy. |
 | `runtime.ErrRuntimeClosed` | `NewAgent` was called after `Runtime.Close`. |
 | `session.ErrSessionNotFound` | The session ID does not exist. |
 | `session.ErrNoSessions` | No persisted sessions exist. |
 | `session.ErrInvalidSessionID` | The session ID is unsafe or malformed. |
 | `session.ErrInvalidForkPoint` | The fork target is missing or not a user message. |
+| `session.ErrSessionLocked` | Another writer holds the session lease, or an append was attempted without one. |
+| `session.ErrSessionConflict` | A full save was attempted with a stale revision. |
+| `session.ErrUnsupportedSessionVersion` | The session uses a newer schema version than this Iris build supports. |
 | `provider.ErrContextWindow` | The provider rejected a prompt for exceeding the context window. |
 | `provider.ErrStreamInterrupted` | The provider stream disconnected or ended before a complete response. Partial output is not committed. |
 | `provider.ErrInvalidStream` | The provider sent malformed or contradictory stream data. |

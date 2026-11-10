@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -355,6 +356,10 @@ func TestContextCompactionNotice(t *testing.T) {
 	if !found {
 		t.Fatalf("compaction notice not found in %+v", m.messages)
 	}
+	if m.summaryUsagePending.TotalTokens != 130 {
+		t.Fatalf("pending summary usage = %+v, want 130", m.summaryUsagePending)
+	}
+	m.persistSession()
 	if m.currentSession.Usage.TotalTokens != 130 {
 		t.Fatalf("session summary usage = %+v, want 130", m.currentSession.Usage)
 	}
@@ -410,4 +415,22 @@ func containsNotice(m *model, text string) bool {
 		}
 	}
 	return false
+}
+
+func TestModelHoldsSessionWriterLease(t *testing.T) {
+	m, _, manager := newSessionModel(t)
+
+	if _, err := manager.Acquire(m.currentSession); !errors.Is(err, session.ErrSessionLocked) {
+		t.Fatalf("Acquire() while model is active error = %v, want ErrSessionLocked", err)
+	}
+
+	m.releaseSession()
+
+	lease, err := manager.Acquire(m.currentSession)
+	if err != nil {
+		t.Fatalf("Acquire() after release error = %v", err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
 }

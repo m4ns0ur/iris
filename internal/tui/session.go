@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/m4ns0ur/iris/internal/persist"
 	"github.com/m4ns0ur/iris/provider"
 	"github.com/m4ns0ur/iris/session"
 )
@@ -83,14 +84,10 @@ func (m *model) commandNew() {
 		return
 	}
 
-	if m.agent != nil {
-		if err := m.agent.LoadHistory(nil); err != nil {
-			m.notice("Could not reset agent history: " + err.Error())
-			return
-		}
+	if err := m.switchSession(created); err != nil {
+		m.notice("Could not open session: " + err.Error())
+		return
 	}
-
-	m.setSession(created)
 	m.loadTranscript(created)
 	m.notice("New session " + created.ID)
 }
@@ -117,16 +114,21 @@ func (m *model) commandResume(id string) {
 		return
 	}
 
-	if m.agent != nil {
-		if err := m.agent.LoadHistory(loaded.History()); err != nil {
-			m.notice("Could not load session history: " + err.Error())
-			return
-		}
+	if m.currentSession != nil && m.currentSession.ID == loaded.ID {
+		m.loadTranscript(m.currentSession)
+		m.notice("Session " + loaded.ID + " is already active.")
+		return
 	}
 
-	m.setSession(loaded)
+	if err := m.switchSession(loaded); err != nil {
+		m.notice("Could not resume session: " + err.Error())
+		return
+	}
 	m.loadTranscript(loaded)
 	m.notice(fmt.Sprintf("Resumed session %s (%d entries)", loaded.ID, len(loaded.Entries)))
+	if loaded.Recovered {
+		m.notice("Recovered session data; the transcript was repaired before loading.")
+	}
 }
 
 func (m *model) commandFork(index int) {
@@ -156,16 +158,15 @@ func (m *model) commandFork(index int) {
 		return
 	}
 
-	if m.agent != nil {
-		if err := m.agent.LoadHistory(child.History()); err != nil {
-			m.notice("Could not load fork history: " + err.Error())
-			return
-		}
+	if err := m.switchSession(child); err != nil {
+		m.notice("Could not open fork: " + err.Error())
+		return
 	}
-
-	m.setSession(child)
 	m.loadTranscript(child)
 	m.notice(fmt.Sprintf("Forked session %s from user message %d", child.ID, index))
+	if child.Recovered {
+		m.notice("Recovered session data; the transcript was repaired before loading.")
+	}
 }
 
 func (m *model) commandExport() {
@@ -232,16 +233,67 @@ func (m *model) findSession(prefix string) (*session.Session, error) {
 	}
 }
 
-func (m *model) setSession(loaded *session.Session) {
-	m.currentSession = loaded
+// switchSession acquires the new session lease, loads its model context, and
+// installs its recorder. The previous lease is released only after the switch
+// succeeds.
+func (m *model) switchSession(next *session.Session) error {
+	if m.sessions == nil || next == nil {
+		return nil
+	}
+	if m.currentSession != nil && m.currentSession.ID == next.ID {
+		return nil
+	}
+
+	lease, err := m.sessions.Acquire(next)
+	if err != nil {
+		return err
+	}
+	if m.agent != nil {
+		if err := m.agent.LoadHistory(next.History()); err != nil {
+			_ = lease.Release()
+			return err
+		}
+	}
+
+	recorder := persist.New(m.sessions, next, lease)
+	recording := persist.Attach(m.agent, recorder)
+	if !recording {
+		persist.Attach(m.agent, nil)
+	}
+
+	previousRecorder := m.recorder
+	previousLease := m.lease
+	m.currentSession = next
+	m.lease = lease
+	m.recorder = recorder
+	m.recording = recording
 	m.sessionPersisted = 0
 	if m.agent != nil {
 		m.sessionPersisted = len(m.agent.History())
 	}
 	m.sessionDirty = false
 	m.usagePending = nil
-	m.totalTokens = loaded.Usage.TotalTokens
+	m.summaryUsagePending = provider.Usage{}
+	m.totalTokens = next.Usage.TotalTokens
 	m.resetStreamingUI()
+
+	if previousRecorder != nil {
+		_ = previousRecorder.Release()
+	} else if previousLease != nil {
+		_ = previousLease.Release()
+	}
+	return nil
+}
+
+func (m *model) releaseSession() {
+	if m.recorder != nil {
+		_ = m.recorder.Release()
+		m.recorder = nil
+	} else if m.lease != nil {
+		_ = m.lease.Release()
+	}
+	m.lease = nil
+	persist.Attach(m.agent, nil)
 }
 
 func (m *model) loadTranscript(loaded *session.Session) {
@@ -253,6 +305,19 @@ func (m *model) loadTranscript(loaded *session.Session) {
 		case session.EntryAssistant:
 			if entry.Content != "" {
 				m.messages = append(m.messages, message{role: "assistant", content: entry.Content})
+			}
+		case session.EntryTool:
+			if entry.Status == session.EntryStatusInterrupted || entry.Recovered {
+				name := entry.ToolName
+				if name == "" {
+					name = "A tool"
+				} else {
+					name = "Tool " + name
+				}
+				m.messages = append(m.messages, message{
+					role:    "notice",
+					content: name + " was interrupted before its result was recorded.",
+				})
 			}
 		}
 	}
@@ -282,12 +347,43 @@ func (m *model) notice(text string) {
 // persistSession appends agent history messages that are not yet represented
 // in the session and saves the session atomically.
 func (m *model) persistSession() {
-	if m.sessions == nil || m.currentSession == nil || m.agent == nil {
+	if m.sessions == nil || m.currentSession == nil {
 		return
 	}
 
-	// History is the canonical, uncompressed conversation. Context compaction
-	// only changes the provider view, so sessions retain the original messages.
+	if summary := m.summaryUsagePending; summary.PromptTokens > 0 || summary.CompletionTokens > 0 {
+		m.summaryUsagePending = provider.Usage{}
+		m.currentSession.Usage.PromptTokens += summary.PromptTokens
+		m.currentSession.Usage.CompletionTokens += summary.CompletionTokens
+		m.currentSession.Usage.TotalTokens += summary.PromptTokens + summary.CompletionTokens
+		m.sessionDirty = true
+	}
+
+	if m.recording {
+		// Transcript entries are already durable via the recorder. Only
+		// metadata such as compaction-summary usage still needs a save.
+		m.usagePending = nil
+		if m.agent != nil {
+			m.sessionPersisted = len(m.agent.History())
+		}
+		if !m.sessionDirty {
+			return
+		}
+		if err := m.sessions.Save(m.currentSession); err != nil {
+			m.notice("Session save failed: " + err.Error())
+			return
+		}
+		m.sessionDirty = false
+		return
+	}
+
+	if m.agent == nil {
+		return
+	}
+
+	// Fallback for agents that do not support live recording. History is the
+	// canonical, uncompressed conversation; context compaction only changes the
+	// provider view, so sessions retain the original messages.
 	history := m.agent.History()
 	if m.sessionPersisted > len(history) {
 		m.sessionPersisted = 0

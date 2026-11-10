@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/m4ns0ur/iris/agent"
+	"github.com/m4ns0ur/iris/internal/persist"
 	"github.com/m4ns0ur/iris/provider"
 	"github.com/m4ns0ur/iris/session"
 )
@@ -71,6 +72,9 @@ type Client struct {
 
 	mu            sync.Mutex
 	session       *session.Session
+	lease         session.Lease
+	recorder      *persist.Recorder
+	recording     bool
 	persisted     int
 	dirty         bool
 	running       bool
@@ -109,11 +113,9 @@ func New(options Options) (*Client, error) {
 	}
 
 	if options.InitialSession != nil {
-		if err := c.agent.LoadHistory(options.InitialSession.History()); err != nil {
+		if err := c.attachSessionLocked(options.InitialSession); err != nil {
 			return nil, err
 		}
-		c.session = options.InitialSession
-		c.persisted = len(c.agent.History())
 		return c, nil
 	}
 
@@ -121,12 +123,51 @@ func New(options Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := c.agent.LoadHistory(nil); err != nil {
+	if err := c.attachSessionLocked(created); err != nil {
 		return nil, err
 	}
-	c.session = created
-	c.persisted = len(c.agent.History())
 	return c, nil
+}
+
+// attachSessionLocked acquires the writer lease, recovers the session, installs
+// the recorder, and loads the model context. The caller must hold c.mu.
+func (c *Client) attachSessionLocked(next *session.Session) error {
+	if c.sessions == nil {
+		return fmt.Errorf("session persistence is not configured")
+	}
+	if next == nil {
+		return fmt.Errorf("session is nil")
+	}
+
+	lease, err := c.sessions.Acquire(next)
+	if err != nil {
+		return err
+	}
+	if err := c.agent.LoadHistory(next.History()); err != nil {
+		_ = lease.Release()
+		return err
+	}
+
+	recorder := persist.New(c.sessions, next, lease)
+	recording := persist.Attach(c.agent, recorder)
+	if !recording {
+		// The agent does not support live recording; keep the lease and use
+		// the end-of-run fallback, but ensure no previous recorder remains
+		// attached if this is a switch.
+		persist.Attach(c.agent, nil)
+	}
+
+	previousLease := c.lease
+	c.session = next
+	c.lease = lease
+	c.recorder = recorder
+	c.recording = recording
+	c.persisted = len(c.agent.History())
+	c.dirty = false
+	if previousLease != nil {
+		_ = previousLease.Release()
+	}
+	return nil
 }
 
 func (c *Client) handleEvent(event agent.Event) {
@@ -316,12 +357,9 @@ func (c *Client) NewSession() (*session.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := c.agent.LoadHistory(nil); err != nil {
+	if err := c.attachSessionLocked(created); err != nil {
 		return nil, err
 	}
-	c.session = created
-	c.persisted = len(c.agent.History())
-	c.dirty = false
 	return created, nil
 }
 
@@ -344,12 +382,12 @@ func (c *Client) ResumeSession(id string) (*session.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := c.agent.LoadHistory(loaded.History()); err != nil {
+	if c.session != nil && c.session.ID == loaded.ID {
+		return c.session, nil
+	}
+	if err := c.attachSessionLocked(loaded); err != nil {
 		return nil, err
 	}
-	c.session = loaded
-	c.persisted = len(c.agent.History())
-	c.dirty = false
 	return loaded, nil
 }
 
@@ -372,12 +410,12 @@ func (c *Client) ResumeLatest() (*session.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := c.agent.LoadHistory(loaded.History()); err != nil {
+	if c.session != nil && c.session.ID == loaded.ID {
+		return c.session, nil
+	}
+	if err := c.attachSessionLocked(loaded); err != nil {
 		return nil, err
 	}
-	c.session = loaded
-	c.persisted = len(c.agent.History())
-	c.dirty = false
 	return loaded, nil
 }
 
@@ -401,12 +439,9 @@ func (c *Client) ForkSession(entryID string) (*session.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := c.agent.LoadHistory(child.History()); err != nil {
+	if err := c.attachSessionLocked(child); err != nil {
 		return nil, err
 	}
-	c.session = child
-	c.persisted = len(c.agent.History())
-	c.dirty = false
 	return child, nil
 }
 
@@ -435,12 +470,9 @@ func (c *Client) ForkSessionAt(index int) (*session.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := c.agent.LoadHistory(child.History()); err != nil {
+	if err := c.attachSessionLocked(child); err != nil {
 		return nil, err
 	}
-	c.session = child
-	c.persisted = len(c.agent.History())
-	c.dirty = false
 	return child, nil
 }
 
@@ -482,6 +514,28 @@ func (c *Client) persistLocked(
 	summaryUsage provider.Usage,
 ) error {
 	if c.sessions == nil || c.session == nil {
+		return nil
+	}
+
+	if c.recording {
+		changed := false
+		if summaryUsage.PromptTokens > 0 || summaryUsage.CompletionTokens > 0 {
+			c.session.Usage.PromptTokens += summaryUsage.PromptTokens
+			c.session.Usage.CompletionTokens += summaryUsage.CompletionTokens
+			c.session.Usage.TotalTokens += summaryUsage.TotalTokens
+			changed = true
+		}
+		if changed {
+			c.dirty = true
+		}
+		c.persisted = len(history)
+		if !c.dirty {
+			return nil
+		}
+		if err := c.sessions.Save(c.session); err != nil {
+			return err
+		}
+		c.dirty = false
 		return nil
 	}
 
@@ -565,6 +619,29 @@ func (c *Client) persistLocked(
 	}
 	c.dirty = false
 	return nil
+}
+
+// Close persists pending metadata and releases the session writer lease. It
+// returns ErrBusy while a run is active.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.running {
+		return ErrBusy
+	}
+
+	err := c.persistCurrentLocked()
+	if c.recorder != nil {
+		err = errors.Join(err, c.recorder.Release())
+	} else if c.lease != nil {
+		err = errors.Join(err, c.lease.Release())
+	}
+	persist.Attach(c.agent, nil)
+	c.recorder = nil
+	c.lease = nil
+	c.recording = false
+	return err
 }
 
 func lastAssistant(history []provider.Message) (string, string) {

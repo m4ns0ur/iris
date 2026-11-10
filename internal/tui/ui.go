@@ -18,6 +18,7 @@ import (
 	"charm.land/lipgloss/v2/tree"
 	"github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/internal/logger"
+	"github.com/m4ns0ur/iris/internal/persist"
 	"github.com/m4ns0ur/iris/provider"
 	"github.com/m4ns0ur/iris/resource"
 	"github.com/m4ns0ur/iris/session"
@@ -86,41 +87,45 @@ type Options struct {
 }
 
 type model struct {
-	agent            agent.Agent
-	fullReason       *strings.Builder
-	fullResponse     *strings.Builder
-	toolName         string
-	toolArgs         *strings.Builder
-	previewPath      string
-	previewContent   string
-	previewCommand   string
-	width            int
-	height           int
-	state            state
-	inputText        textarea.Model
-	stream           chan tea.Msg
-	spinner          spinner.Model
-	messages         []message
-	viewport         viewport.Model
-	ready            bool
-	approvals        chan approvalRequestMsg
-	pendingApproval  *approvalRequestMsg
-	approvalTimeout  time.Duration
-	canceling        bool
-	agentErrored     bool
-	lastTurnEmpty    bool
-	compacting       bool
-	totalTokens      int
-	lifecycle        *lifecycle
-	sessions         session.Manager
-	sessionDefaults  session.CreateOptions
-	currentSession   *session.Session
-	sessionPersisted int
-	sessionDirty     bool
-	usagePending     []provider.Usage
-	resources        *resource.Resources
-	pendingSteering  []string
-	pendingFollowUps []string
+	agent               agent.Agent
+	fullReason          *strings.Builder
+	fullResponse        *strings.Builder
+	toolName            string
+	toolArgs            *strings.Builder
+	previewPath         string
+	previewContent      string
+	previewCommand      string
+	width               int
+	height              int
+	state               state
+	inputText           textarea.Model
+	stream              chan tea.Msg
+	spinner             spinner.Model
+	messages            []message
+	viewport            viewport.Model
+	ready               bool
+	approvals           chan approvalRequestMsg
+	pendingApproval     *approvalRequestMsg
+	approvalTimeout     time.Duration
+	canceling           bool
+	agentErrored        bool
+	lastTurnEmpty       bool
+	compacting          bool
+	totalTokens         int
+	lifecycle           *lifecycle
+	sessions            session.Manager
+	sessionDefaults     session.CreateOptions
+	currentSession      *session.Session
+	sessionPersisted    int
+	sessionDirty        bool
+	usagePending        []provider.Usage
+	summaryUsagePending provider.Usage
+	lease               session.Lease
+	recorder            *persist.Recorder
+	recording           bool
+	resources           *resource.Resources
+	pendingSteering     []string
+	pendingFollowUps    []string
 }
 
 type message struct {
@@ -626,6 +631,7 @@ func Run(ctx context.Context, options Options) error {
 	// Unblock the event subscription after the program stops. cmd calls
 	// Agent.Close next, which cancels the run and waits for cleanup.
 	m.closeDone()
+	m.releaseSession()
 
 	if errors.Is(err, tea.ErrProgramKilled) {
 		return nil
@@ -676,27 +682,7 @@ func initialModel(options Options) (model, error) {
 		})
 	}
 
-	var currentSession *session.Session
 	var initialMessages []message
-
-	if options.Sessions != nil {
-		created, err := options.Sessions.Create(options.SessionDefaults)
-		if err != nil {
-			return model{}, err
-		}
-		currentSession = created
-
-		if instance != nil {
-			if err := instance.LoadHistory(nil); err != nil {
-				return model{}, err
-			}
-		}
-
-		initialMessages = append(initialMessages, message{
-			role:    "notice",
-			content: "Session " + created.ID,
-		})
-	}
 
 	if options.Resources != nil {
 		for _, warning := range options.Resources.Warnings {
@@ -707,7 +693,7 @@ func initialModel(options Options) (model, error) {
 		}
 	}
 
-	return model{
+	m := model{
 		agent:           instance,
 		fullReason:      &strings.Builder{},
 		fullResponse:    &strings.Builder{},
@@ -721,10 +707,22 @@ func initialModel(options Options) (model, error) {
 		lifecycle:       lifecycle,
 		sessions:        options.Sessions,
 		sessionDefaults: options.SessionDefaults,
-		currentSession:  currentSession,
 		resources:       options.Resources,
 		messages:        initialMessages,
-	}, nil
+	}
+
+	if options.Sessions != nil {
+		created, err := options.Sessions.Create(options.SessionDefaults)
+		if err != nil {
+			return model{}, err
+		}
+		if err := m.switchSession(created); err != nil {
+			return model{}, err
+		}
+		m.notice("Session " + created.ID)
+	}
+
+	return m, nil
 }
 
 func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
@@ -784,11 +782,13 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 
 	case agent.Usage:
 		m.totalTokens = e.TotalTokens
-		m.usagePending = append(m.usagePending, provider.Usage{
-			PromptTokens:     e.PromptTokens,
-			CompletionTokens: e.CompletionTokens,
-			TotalTokens:      e.TotalTokens,
-		})
+		if !m.recording {
+			m.usagePending = append(m.usagePending, provider.Usage{
+				PromptTokens:     e.PromptTokens,
+				CompletionTokens: e.CompletionTokens,
+				TotalTokens:      e.TotalTokens,
+			})
+		}
 
 	case agent.ContextCompactionStarted:
 		m.compacting = true
@@ -818,17 +818,13 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 		}
 		m.notice(text)
 
-		// Compaction summaries are real provider calls; include their usage in
-		// the session aggregate even though they do not map to an assistant
-		// entry in the conversation.
-		if m.currentSession != nil {
-			m.currentSession.Usage.PromptTokens += e.SummaryPromptTokens
-			m.currentSession.Usage.CompletionTokens += e.SummaryCompletionTokens
-			m.currentSession.Usage.TotalTokens += e.SummaryPromptTokens + e.SummaryCompletionTokens
-			if e.SummaryPromptTokens > 0 || e.SummaryCompletionTokens > 0 {
-				m.sessionDirty = true
-			}
-		}
+		// Compaction summaries are real provider calls, but they do not map to
+		// an assistant entry. Defer updating the session aggregate until the
+		// model goroutine is idle so it cannot race the recorder appending from
+		// the run goroutine.
+		m.summaryUsagePending.PromptTokens += e.SummaryPromptTokens
+		m.summaryUsagePending.CompletionTokens += e.SummaryCompletionTokens
+		m.summaryUsagePending.TotalTokens += e.SummaryPromptTokens + e.SummaryCompletionTokens
 
 	case agent.QueueUpdated:
 		m.pendingSteering = append([]string(nil), e.Steering...)
