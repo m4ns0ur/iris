@@ -45,8 +45,9 @@ func TestCollectReturnsStreamError(t *testing.T) {
 
 func TestCollectRejectsStreamWithoutTerminalEvent(t *testing.T) {
 	p := eventsProvider(DeltaEvent{Delta: Delta{Content: "partial"}})
-	if _, err := Collect(context.Background(), p, Request{}); err == nil {
-		t.Fatal("Collect() error = nil, want terminal event error")
+	_, err := Collect(context.Background(), p, Request{})
+	if !errors.Is(err, ErrStreamInterrupted) {
+		t.Fatalf("Collect() error = %v, want ErrStreamInterrupted", err)
 	}
 }
 

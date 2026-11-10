@@ -5,11 +5,11 @@ package contextmgr
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
 
+	publicagent "github.com/m4ns0ur/iris/agent"
 	"github.com/m4ns0ur/iris/provider"
 )
 
@@ -35,8 +35,9 @@ const (
 )
 
 // ErrContextOverflow is returned when even the compacted prompt cannot fit in
-// the model window.
-var ErrContextOverflow = errors.New("context cannot fit within the model window")
+// the model window. It is the public agent sentinel so embedders can classify
+// the error without importing internal packages.
+var ErrContextOverflow = publicagent.ErrContextOverflow
 
 // Config configures context-window management.
 type Config struct {

@@ -17,6 +17,15 @@ var (
 	// ErrEmptyInput is returned when an instruction contains only whitespace.
 	ErrEmptyInput = errors.New("instruction is empty")
 
+	// ErrEmptyResponse is returned when a model response is empty in a way
+	// that cannot be treated as a normal stop (for example, an empty response
+	// cut off by the output token limit).
+	ErrEmptyResponse = errors.New("empty model response")
+
+	// ErrContextOverflow is returned when even a compacted prompt cannot fit
+	// within the configured context window.
+	ErrContextOverflow = errors.New("context cannot fit within the model window")
+
 	// ErrTurnBudgetExceeded is returned when a run reaches its LLM turn
 	// budget.
 	ErrTurnBudgetExceeded = errors.New("agent turn budget exceeded")

@@ -184,6 +184,7 @@ func TestStreamRetriesThenSucceeds(t *testing.T) {
 	client := &LLMClient{
 		URL:            server.URL,
 		MaxRetries:     2,
+		RetryBaseDelay: 10 * time.Millisecond,
 		RequestTimeout: 5 * time.Second,
 		HTTP:           server.Client(),
 	}
@@ -257,5 +258,249 @@ func TestStreamWrapsContextWindowClientError(t *testing.T) {
 	}
 	if !provider.IsContextWindowError(err) {
 		t.Fatalf("IsContextWindowError(%v) = false", err)
+	}
+}
+
+func TestStreamAccumulatesSplitToolArguments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write","arguments":"{\"path\":\"a"}}]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":".txt\",\"content\":\"x\"}"}}]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	response, err := provider.Collect(context.Background(), newTestClient(server), provider.Request{})
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if len(response.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %d, want 1", len(response.ToolCalls))
+	}
+	call := response.ToolCalls[0]
+	if call.ID != "call_1" || call.Function.Name != "write" {
+		t.Fatalf("tool call = %+v", call)
+	}
+	if call.Function.Arguments != `{"path":"a.txt","content":"x"}` {
+		t.Fatalf("arguments = %q", call.Function.Arguments)
+	}
+	if response.FinishReason != "tool_calls" {
+		t.Fatalf("finish reason = %q", response.FinishReason)
+	}
+}
+
+func TestStreamSeparatesInterleavedToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_0","type":"function","function":{"name":"read","arguments":"{\"path\":\"a"}},{"index":1,"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"b"}}]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"}"}},{"index":0,"function":{"arguments":"\"}"}}]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	response, err := provider.Collect(context.Background(), newTestClient(server), provider.Request{})
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if len(response.ToolCalls) != 2 {
+		t.Fatalf("tool calls = %d, want 2", len(response.ToolCalls))
+	}
+	if response.ToolCalls[0].ID != "call_0" || response.ToolCalls[0].Function.Arguments != `{"path":"a"}` {
+		t.Fatalf("call 0 = %+v", response.ToolCalls[0])
+	}
+	if response.ToolCalls[1].ID != "call_1" || response.ToolCalls[1].Function.Arguments != `{"path":"b"}` {
+		t.Fatalf("call 1 = %+v", response.ToolCalls[1])
+	}
+}
+
+func TestStreamSeparatesIDOnlyToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","type":"function","function":{"name":"read","arguments":"{\"path\":\"a\"}"}},{"id":"call_b","type":"function","function":{"name":"read","arguments":"{\"path\":\"b\"}"}}]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	response, err := provider.Collect(context.Background(), newTestClient(server), provider.Request{})
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if len(response.ToolCalls) != 2 {
+		t.Fatalf("tool calls = %d, want 2", len(response.ToolCalls))
+	}
+	if response.ToolCalls[0].ID != "call_a" || response.ToolCalls[1].ID != "call_b" {
+		t.Fatalf("tool calls = %+v", response.ToolCalls)
+	}
+}
+
+func TestStreamAccumulatesRepeatedToolNameDeltas(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_1","function":{"name":"read","arguments":"{\"path\":\"a"}}]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"name":"read","arguments":"\"}"}}]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	response, err := provider.Collect(context.Background(), newTestClient(server), provider.Request{})
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if len(response.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %d, want 1", len(response.ToolCalls))
+	}
+	if got := response.ToolCalls[0].Function.Arguments; got != `{"path":"a"}` {
+		t.Fatalf("arguments = %q", got)
+	}
+}
+
+func TestStreamInterruptedBeforeCompletion(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}`+"\n\n")
+		w.(http.Flusher).Flush()
+		// Close without finish_reason or [DONE].
+	}))
+	defer server.Close()
+
+	client := newTestClient(server)
+	client.MaxRetries = 3
+	_, err := provider.Collect(context.Background(), client, provider.Request{})
+	if !errors.Is(err, provider.ErrStreamInterrupted) {
+		t.Fatalf("Collect() error = %v, want ErrStreamInterrupted", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1 (no retry after the stream starts)", attempts.Load())
+	}
+}
+
+func TestStreamAcceptsFinishReasonWithoutDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`+"\n\n")
+		// Some compatible servers close without [DONE].
+	}))
+	defer server.Close()
+
+	response, err := provider.Collect(context.Background(), newTestClient(server), provider.Request{})
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if response.Content != "ok" || response.FinishReason != "stop" {
+		t.Fatalf("response = %+v", response)
+	}
+}
+
+func TestStreamRejectsMalformedChunk(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {not json}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	_, err := provider.Collect(context.Background(), newTestClient(server), provider.Request{})
+	if !errors.Is(err, provider.ErrInvalidStream) {
+		t.Fatalf("Collect() error = %v, want ErrInvalidStream", err)
+	}
+}
+
+func TestStreamReturnsEmbeddedErrorChunk(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"error":{"message":"model crashed"}}`+"\n\n")
+	}))
+	defer server.Close()
+
+	_, err := provider.Collect(context.Background(), newTestClient(server), provider.Request{})
+	if err == nil || !strings.Contains(err.Error(), "model crashed") {
+		t.Fatalf("Collect() error = %v, want embedded error", err)
+	}
+}
+
+func TestStreamRetriesTooManyRequests(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	client := newTestClient(server)
+	client.MaxRetries = 2
+	client.RetryBaseDelay = 10 * time.Millisecond
+
+	response, err := provider.Collect(context.Background(), client, provider.Request{})
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if response.Content != "ok" || attempts.Load() != 2 {
+		t.Fatalf("response = %+v, attempts = %d", response, attempts.Load())
+	}
+}
+
+func TestRetryableStatusClassification(t *testing.T) {
+	for status, want := range map[int]bool{
+		http.StatusBadRequest:          false,
+		http.StatusUnauthorized:        false,
+		http.StatusRequestTimeout:      true,
+		http.StatusTooEarly:            true,
+		http.StatusTooManyRequests:     true,
+		http.StatusInternalServerError: true,
+		http.StatusBadGateway:          true,
+		http.StatusServiceUnavailable:  true,
+	} {
+		if got := retryableStatus(status); got != want {
+			t.Fatalf("retryableStatus(%d) = %v, want %v", status, got, want)
+		}
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Now()
+	if got := parseRetryAfter("3", now); got != 3*time.Second {
+		t.Fatalf("seconds = %s, want 3s", got)
+	}
+	if got := parseRetryAfter(now.Add(5*time.Second).UTC().Format(http.TimeFormat), now); got < 4*time.Second || got > 5*time.Second {
+		t.Fatalf("date = %s, want about 5s", got)
+	}
+	if got := parseRetryAfter("not-a-date", now); got != 0 {
+		t.Fatalf("invalid = %s, want 0", got)
+	}
+	if got := parseRetryAfter("-1", now); got != 0 {
+		t.Fatalf("negative = %s, want 0", got)
+	}
+}
+
+func TestStreamWrapsContextWindowServerErrorWithoutRetry(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		http.Error(w, "maximum context length exceeded", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := newTestClient(server)
+	client.MaxRetries = 3
+	client.RetryBaseDelay = 10 * time.Millisecond
+
+	_, err := client.Stream(context.Background(), provider.Request{})
+	if !errors.Is(err, provider.ErrContextWindow) {
+		t.Fatalf("Stream() error = %v, want ErrContextWindow", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1 (context errors must not be retried)", attempts.Load())
 	}
 }

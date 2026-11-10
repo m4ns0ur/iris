@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/m4ns0ur/iris/agent"
@@ -191,5 +192,68 @@ func TestSessionCommandsAreRejectedWhileStreaming(t *testing.T) {
 	}
 	if len(m.pendingSteering) != 0 {
 		t.Fatalf("command was queued as steering: %+v", m.pendingSteering)
+	}
+}
+
+func TestTurnRetriedClearsPartialOutput(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	m.state = StateStreaming
+	m.fullResponse.WriteString("partial answer")
+	m.fullReason.WriteString("partial reasoning")
+	m.toolName = "write"
+	m.toolArgs.WriteString(`{"path":"a"}`)
+
+	updated, _ := m.Update(agentEventMsg{event: agent.TurnRetried{
+		Turn:        0,
+		Reason:      "context_overflow",
+		NextAttempt: 2,
+	}})
+	m = updated.(*model)
+
+	if m.fullResponse.Len() != 0 || m.fullReason.Len() != 0 || m.toolName != "" || m.toolArgs.Len() != 0 {
+		t.Fatalf("partial output was not cleared: response=%q reasoning=%q tool=%q args=%q",
+			m.fullResponse.String(), m.fullReason.String(), m.toolName, m.toolArgs.String())
+	}
+	if !containsNotice(m, "compacted the conversation and retrying") {
+		t.Fatalf("retry notice missing: %+v", m.messages)
+	}
+}
+
+func TestEmptyTurnNotice(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	m.state = StateStreaming
+
+	updated, _ := m.Update(agentEventMsg{event: agent.TurnFinished{
+		Turn:           0,
+		Attempts:       1,
+		FinishReason:   "stop",
+		ContentBytes:   0,
+		ReasoningBytes: 0,
+		ToolCalls:      0,
+	}})
+	m = updated.(*model)
+
+	updated, _ = m.Update(agentEventMsg{event: agent.AgentFinished{At: time.Now()}})
+	m = updated.(*model)
+
+	if !containsNotice(m, "Iris returned an empty response") {
+		t.Fatalf("empty response notice missing: %+v", m.messages)
+	}
+}
+
+func TestTruncatedTurnNotice(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	m.state = StateStreaming
+
+	updated, _ := m.Update(agentEventMsg{event: agent.TurnFinished{
+		Turn:         0,
+		Attempts:     1,
+		FinishReason: "length",
+		ContentBytes: 12,
+	}})
+	m = updated.(*model)
+
+	if !containsNotice(m, "output token limit") {
+		t.Fatalf("truncation notice missing: %+v", m.messages)
 	}
 }

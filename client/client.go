@@ -43,6 +43,8 @@ type Result struct {
 	Usage               provider.Usage  `json:"usage"`
 	ContextSummaryUsage *provider.Usage `json:"context_summary_usage,omitempty"`
 	Canceled            bool            `json:"canceled,omitempty"`
+	// Truncated reports that the last model turn hit the output token limit.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // EventRecord is the stable JSON-friendly envelope used by the JSONL and RPC
@@ -67,17 +69,19 @@ type Client struct {
 	sessions session.Manager
 	defaults session.CreateOptions
 
-	mu           sync.Mutex
-	session      *session.Session
-	persisted    int
-	dirty        bool
-	running      bool
-	handler      func(agent.Event)
-	runUsage     []provider.Usage
-	summaryUse   provider.Usage
-	runContent   strings.Builder
-	runReasoning strings.Builder
-	canceled     bool
+	mu            sync.Mutex
+	session       *session.Session
+	persisted     int
+	dirty         bool
+	running       bool
+	handler       func(agent.Event)
+	runUsage      []provider.Usage
+	summaryUse    provider.Usage
+	runContent    strings.Builder
+	runReasoning  strings.Builder
+	canceled      bool
+	truncated     bool
+	lastTurnBytes int
 }
 
 // New creates a headless client.
@@ -131,6 +135,7 @@ func (c *Client) handleEvent(event agent.Event) {
 	case agent.TurnStarted:
 		c.runContent.Reset()
 		c.runReasoning.Reset()
+		c.lastTurnBytes = 0
 	case agent.AssistantDelta:
 		c.runContent.WriteString(e.Text)
 	case agent.ReasoningDelta:
@@ -145,6 +150,14 @@ func (c *Client) handleEvent(event agent.Event) {
 		c.summaryUse.PromptTokens += e.SummaryPromptTokens
 		c.summaryUse.CompletionTokens += e.SummaryCompletionTokens
 		c.summaryUse.TotalTokens += e.SummaryPromptTokens + e.SummaryCompletionTokens
+	case agent.TurnRetried:
+		// The failed attempt's partial output is not part of the result.
+		c.runContent.Reset()
+		c.runReasoning.Reset()
+		c.lastTurnBytes = 0
+	case agent.TurnFinished:
+		c.truncated = e.Err == "" && !e.Canceled && provider.IsTruncatedFinish(e.FinishReason)
+		c.lastTurnBytes = e.ContentBytes + e.ReasoningBytes
 	case agent.AgentFinished:
 		c.canceled = e.Canceled
 	}
@@ -187,6 +200,8 @@ func (c *Client) RunStream(
 	c.runContent.Reset()
 	c.runReasoning.Reset()
 	c.canceled = false
+	c.truncated = false
+	c.lastTurnBytes = 0
 	c.mu.Unlock()
 
 	runErr := c.agent.Run(ctx, prompt)
@@ -200,7 +215,7 @@ func (c *Client) RunStream(
 	history := c.agent.History()
 	content := c.runContent.String()
 	reasoning := c.runReasoning.String()
-	if content == "" && reasoning == "" {
+	if content == "" && reasoning == "" && c.lastTurnBytes > 0 {
 		content, reasoning = lastAssistant(history)
 	}
 	var summaryUsage *provider.Usage
@@ -214,6 +229,7 @@ func (c *Client) RunStream(
 		Usage:               sumUsage(c.runUsage),
 		ContextSummaryUsage: summaryUsage,
 		Canceled:            c.canceled || errors.Is(runErr, context.Canceled),
+		Truncated:           c.truncated,
 	}
 	if c.session != nil {
 		result.SessionID = c.session.ID
@@ -225,6 +241,8 @@ func (c *Client) RunStream(
 	c.runContent.Reset()
 	c.runReasoning.Reset()
 	c.canceled = false
+	c.truncated = false
+	c.lastTurnBytes = 0
 
 	return result, errors.Join(runErr, saveErr)
 }

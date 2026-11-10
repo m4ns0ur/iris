@@ -268,6 +268,7 @@ func (m *model) resetStreamingUI() {
 	m.previewCommand = ""
 	m.canceling = false
 	m.agentErrored = false
+	m.lastTurnEmpty = false
 	m.compacting = false
 	m.pendingSteering = nil
 	m.pendingFollowUps = nil

@@ -78,6 +78,27 @@ type Timings struct {
 type Chunk struct {
 	Choices []ChunkChoice `json:"choices"`
 	Usage   *Usage        `json:"usage,omitempty"`
+	Error   *ChunkError   `json:"error,omitempty"`
+}
+
+// ChunkError is an error reported inside a streamed response body. Some
+// OpenAI-compatible servers return HTTP 200 and then send an error object as a
+// data chunk.
+type ChunkError struct {
+	Message string `json:"message"`
+	Type    string `json:"type,omitempty"`
+	Param   string `json:"param,omitempty"`
+	Code    any    `json:"code,omitempty"`
+}
+
+func (e *ChunkError) Error() string {
+	if e == nil {
+		return "provider stream error"
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	return "provider stream error"
 }
 
 type ChunkChoice struct {
@@ -95,6 +116,10 @@ type LLMClient struct {
 	RequestTimeout time.Duration
 	Model          string
 	HTTP           *http.Client
+
+	// RetryBaseDelay is the first retry backoff. Zero uses one second. Tests
+	// may override it to avoid waiting.
+	RetryBaseDelay time.Duration
 }
 
 // DefaultRequestTimeout bounds one complete LLM request, including retry
@@ -130,6 +155,9 @@ func NewClient() *LLMClient {
 type HTTPStatusError struct {
 	Status int
 	Body   string
+
+	// RetryAfter is the server-provided retry delay, if any.
+	RetryAfter time.Duration
 }
 
 func (e *HTTPStatusError) Error() string {
@@ -202,7 +230,11 @@ func (c *LLMClient) Stream(
 			if readErr != nil {
 				return nil, fmt.Errorf("HTTP %d (failed to read error body: %w)", res.StatusCode, readErr)
 			}
-			return nil, &HTTPStatusError{Status: res.StatusCode, Body: string(body)}
+			return nil, &HTTPStatusError{
+				Status:     res.StatusCode,
+				Body:       string(body),
+				RetryAfter: parseRetryAfter(res.Header.Get("Retry-After"), time.Now()),
+			}
 		}
 
 		return res, nil
@@ -213,10 +245,16 @@ func (c *LLMClient) Stream(
 		attempts = 1
 	}
 
+	baseDelay := c.RetryBaseDelay
+	if baseDelay <= 0 {
+		baseDelay = defaultRetryBaseDelay
+	}
+
 	var (
 		res        *http.Response
 		err        error
-		retryDelay = time.Second
+		retryDelay = baseDelay
+		retryAfter time.Duration
 	)
 
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -226,13 +264,22 @@ func (c *LLMClient) Stream(
 		}
 
 		if attempt > 1 {
+			wait := retryDelay
+			if retryAfter > wait {
+				wait = retryAfter
+			}
+			if wait > maxRetryDelay {
+				wait = maxRetryDelay
+			}
+
 			Logger.Warn(
 				"LLM streaming request failed, retrying...",
 				"attempt", attempt,
 				"maxAttempts", attempts,
+				"delay", wait,
 			)
 
-			timer := time.NewTimer(retryDelay)
+			timer := time.NewTimer(wait)
 			select {
 			case <-callCtx.Done():
 				timer.Stop()
@@ -241,10 +288,17 @@ func (c *LLMClient) Stream(
 			case <-timer.C:
 			}
 			retryDelay *= 2
+			if retryDelay > maxRetryDelay {
+				retryDelay = maxRetryDelay
+			}
 		}
 
+		retryAfter = 0
 		res, err = doRequest()
 		if err == nil && res != nil {
+			// Retries stop at the response boundary. Once a stream has started,
+			// a disconnect terminates the request cleanly instead of silently
+			// repeating it: tools are only executed after a complete response.
 			break
 		}
 
@@ -254,18 +308,23 @@ func (c *LLMClient) Stream(
 		}
 
 		var statusErr *HTTPStatusError
-		if errors.As(err, &statusErr) &&
-			statusErr.Status >= 400 &&
-			statusErr.Status < 500 &&
-			statusErr.Status != http.StatusTooManyRequests {
-			// Client errors are not transient; retrying cannot help.
-			Logger.Error("LLM request rejected", "status", statusErr.Status)
-			cleanup()
+		if errors.As(err, &statusErr) {
+			retryAfter = statusErr.RetryAfter
+			// Context overflow is not a transient transport failure. Some
+			// servers report it with a 5xx status, so classify it before the
+			// retryable status check to let the runtime compact instead.
 			if statusErr.Status == http.StatusRequestEntityTooLarge ||
 				provider.IsContextWindowError(statusErr) {
+				Logger.Error("LLM request rejected", "status", statusErr.Status)
+				cleanup()
 				return nil, fmt.Errorf("%w: %w", provider.ErrContextWindow, err)
 			}
-			return nil, err
+			if !retryableStatus(statusErr.Status) {
+				// Client errors are deterministic; retrying cannot help.
+				Logger.Error("LLM request rejected", "status", statusErr.Status)
+				cleanup()
+				return nil, err
+			}
 		}
 
 		if attempt < attempts {
@@ -288,7 +347,7 @@ func (c *LLMClient) Stream(
 			return nil, c.requestContextError(ctx, callCtx)
 		}
 		cleanup()
-		return nil, fmt.Errorf("failed to connect to LLM server after %d attempts: %w", attempts, err)
+		return nil, fmt.Errorf("LLM request failed after %d attempts: %w", attempts, err)
 	}
 
 	events := make(chan provider.StreamEvent)
@@ -310,30 +369,24 @@ func (c *LLMClient) readStream(
 	body io.Reader,
 	events chan<- provider.StreamEvent,
 ) {
-	reader := bufio.NewReader(body)
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 
 	var (
 		fullResponse  strings.Builder
 		fullReasoning strings.Builder
-
-		// toolCallAccum maps streaming index → accumulated ToolCall.
-		toolCallAccum = make(map[int]*provider.ToolCall)
-		toolCallOrder []int
+		toolCalls     = newToolCallAccumulator()
 		usage         provider.Usage
 		finishReason  string
+		sawDone       bool
 	)
 
 	assembledResponse := func() provider.Response {
-		assembled := make([]provider.ToolCall, 0, len(toolCallOrder))
-		for _, idx := range toolCallOrder {
-			assembled = append(assembled, *toolCallAccum[idx])
-		}
-
 		return provider.Response{
 			Content:          fullResponse.String(),
 			ReasoningContent: fullReasoning.String(),
 			FinishReason:     finishReason,
-			ToolCalls:        assembled,
+			ToolCalls:        toolCalls.callsResult(),
 			Usage:            usage,
 		}
 	}
@@ -359,34 +412,28 @@ func (c *LLMClient) readStream(
 		_ = send(provider.ErrorEvent{Err: err})
 	}
 
-	for {
+	for scanner.Scan() {
 		if callCtx.Err() != nil {
 			fail(c.requestContextError(parent, callCtx))
 			return
 		}
 
-		line, readErr := reader.ReadBytes('\n')
-		if readErr != nil {
-			if callCtx.Err() != nil {
-				fail(c.requestContextError(parent, callCtx))
-				return
-			}
-			if errors.Is(readErr, io.EOF) {
-				break
-			}
-			fail(fmt.Errorf("error reading stream: %w", readErr))
-			return
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || line[0] == ':' {
+			continue
 		}
-
-		line = bytes.TrimSpace(line)
-		if !bytes.HasPrefix(line, []byte("data: ")) {
+		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
 
-		data := bytes.TrimPrefix(line, []byte("data: "))
+		data := bytes.TrimSpace(line[len("data:"):])
+		if len(data) == 0 {
+			continue
+		}
 		Logger.Debug("Received stream chunk", "chunk", string(data))
 
-		if string(data) == "[DONE]" {
+		if bytes.Equal(data, []byte("[DONE]")) {
+			sawDone = true
 			break
 		}
 
@@ -397,7 +444,13 @@ func (c *LLMClient) readStream(
 				"error", err,
 				"chunk", string(data),
 			)
-			continue
+			fail(fmt.Errorf("%w: decode chunk: %v", provider.ErrInvalidStream, err))
+			return
+		}
+
+		if chunk.Error != nil {
+			fail(fmt.Errorf("provider stream error: %w", chunk.Error))
+			return
 		}
 
 		if chunk.Usage != nil {
@@ -414,7 +467,9 @@ func (c *LLMClient) readStream(
 		}
 
 		choice := chunk.Choices[0]
-		finishReason = choice.FinishReason
+		if choice.FinishReason != "" {
+			finishReason = choice.FinishReason
+		}
 		delta := choice.Delta
 
 		if rc := delta.ReasoningContent; rc != "" {
@@ -422,27 +477,7 @@ func (c *LLMClient) readStream(
 		}
 
 		for _, tc := range delta.ToolCalls {
-			idx := 0
-			if tc.Index != nil {
-				idx = *tc.Index
-			}
-
-			acc, exists := toolCallAccum[idx]
-			if !exists {
-				acc = &provider.ToolCall{}
-				toolCallAccum[idx] = acc
-				toolCallOrder = append(toolCallOrder, idx)
-			}
-			if tc.ID != "" {
-				acc.ID = tc.ID
-			}
-			if tc.Type != "" {
-				acc.Type = tc.Type
-			}
-			if tc.Function.Name != "" {
-				acc.Function.Name = tc.Function.Name
-			}
-			acc.Function.Arguments += tc.Function.Arguments
+			toolCalls.add(tc)
 		}
 
 		if content := delta.Content; content != "" {
@@ -456,8 +491,25 @@ func (c *LLMClient) readStream(
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		if callCtx.Err() != nil {
+			fail(c.requestContextError(parent, callCtx))
+			return
+		}
+		fail(fmt.Errorf("%w: %v", provider.ErrStreamInterrupted, err))
+		return
+	}
+
 	if callCtx.Err() != nil {
 		fail(c.requestContextError(parent, callCtx))
+		return
+	}
+
+	// [DONE] is the canonical terminator. Some compatible servers close the
+	// body after a chunk with finish_reason but omit [DONE]; accept that.
+	// Anything else is an interrupted stream and must not look successful.
+	if !sawDone && finishReason == "" {
+		fail(fmt.Errorf("%w: stream ended before the response completed", provider.ErrStreamInterrupted))
 		return
 	}
 

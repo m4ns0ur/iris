@@ -9,6 +9,8 @@ var (
 	ErrAgentClosed        = publicagent.ErrAgentClosed
 	ErrAgentIdle          = publicagent.ErrAgentIdle
 	ErrEmptyInput         = publicagent.ErrEmptyInput
+	ErrEmptyResponse      = publicagent.ErrEmptyResponse
+	ErrContextOverflow    = publicagent.ErrContextOverflow
 	ErrTurnBudgetExceeded = publicagent.ErrTurnBudgetExceeded
 	ErrToolBudgetExceeded = publicagent.ErrToolBudgetExceeded
 	ErrToolTimeout        = publicagent.ErrToolTimeout

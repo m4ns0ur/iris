@@ -121,12 +121,6 @@ type Agent struct {
 	resources        *resource.Resources
 }
 
-type PendingToolCall struct {
-	ID   string
-	Name string
-	Args map[string]any
-}
-
 // NewAgent creates a runtime agent. The provider is the only LLM dependency;
 // the agent has no knowledge of terminals, HTTP servers, or other consumers.
 func NewAgent(prov provider.Provider, pol *policy.Policy, options ...Options) (*Agent, error) {
@@ -666,7 +660,24 @@ func (a *Agent) loop(ctx context.Context) error {
 		a.emit(publicagent.TurnStarted{At: time.Now(), Turn: a.step})
 		a.deliverInstructions(deliveredKind, delivered)
 
-		if err := a.next(ctx); err != nil {
+		result, err := a.next(ctx)
+		finished := publicagent.TurnFinished{
+			At:             time.Now(),
+			Turn:           a.step,
+			Attempts:       result.Attempts,
+			FinishReason:   result.FinishReason,
+			ToolCalls:      result.ToolCalls,
+			ContentBytes:   result.ContentBytes,
+			ReasoningBytes: result.ReasoningBytes,
+		}
+		if err != nil {
+			finished.Err = err.Error()
+			finished.Canceled = errors.Is(err, context.Canceled)
+		}
+		// TurnFinished is request completion. The run may still execute tools,
+		// compact, retry, or deliver queued work; AgentFinished is settled.
+		a.emit(finished)
+		if err != nil {
 			return err
 		}
 
@@ -697,16 +708,25 @@ func (a *Agent) executeTools(ctx context.Context) error {
 
 	pending := a.pendingToolCalls
 
+	// Tools are never retried automatically. A failed tool is reported to the
+	// model once, because repeating a tool that already modified a file or ran
+	// a shell command can duplicate side effects.
 	for i, call := range pending {
 		if err := ctx.Err(); err != nil {
-			a.recordSkippedTools(pending[i:], "run canceled before execution")
+			a.recordSkippedTools(pending[i:], toolCodeCanceled, "run canceled before execution")
 			a.pendingToolCalls = nil
 			return err
+		}
+
+		if call.SkipCode != "" {
+			a.reportToolFailure(call, call.SkipCode, call.SkipMessage, false, retryableSkip(call.SkipCode), 0)
+			continue
 		}
 
 		if a.toolCalls >= a.maxToolCalls {
 			a.recordSkippedTools(
 				pending[i:],
+				toolCodeBudgetExhausted,
 				fmt.Sprintf("tool execution budget exhausted (max_tool_calls=%d)", a.maxToolCalls),
 			)
 			a.pendingToolCalls = nil
@@ -744,32 +764,39 @@ func (a *Agent) executeTools(ctx context.Context) error {
 		}
 
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			a.emit(publicagent.ToolFailed{
-				At:         time.Now(),
-				ToolCallID: call.ID,
-				ToolName:   call.Name,
-				Message:    "run canceled: " + ctxErr.Error(),
-				Duration:   elapsed,
-			})
-			a.appendToolResult(call, fmt.Sprintf("failed: run canceled: %v", ctxErr))
-			a.recordSkippedTools(pending[i+1:], "run canceled before execution")
+			a.reportToolFailure(call, toolCodeCanceled, "run canceled: "+ctxErr.Error(), true, false, elapsed)
+			a.recordSkippedTools(pending[i+1:], toolCodeCanceled, "run canceled before execution")
 			a.pendingToolCalls = nil
 			return ctxErr
 		}
 
 		if timedOut {
-			err = fmt.Errorf("%w after %s: %w", ErrToolTimeout, a.toolTimeout, context.DeadlineExceeded)
+			a.reportToolFailure(
+				call,
+				toolCodeTimeout,
+				fmt.Sprintf("%v after %s", ErrToolTimeout, a.toolTimeout),
+				true,
+				false,
+				elapsed,
+			)
+			continue
 		}
 
 		if err != nil {
-			a.emit(publicagent.ToolFailed{
-				At:         time.Now(),
-				ToolCallID: call.ID,
-				ToolName:   call.Name,
-				Message:    err.Error(),
-				Duration:   elapsed,
-			})
-			a.appendToolResult(call, fmt.Sprintf("failed: %v", err))
+			a.reportToolFailure(call, toolCodeExecutionFailed, err.Error(), true, false, elapsed)
+			continue
+		}
+
+		jsonBytes, jsonErr := json.Marshal(result)
+		if jsonErr != nil {
+			a.reportToolFailure(
+				call,
+				toolCodeEncodeFailed,
+				fmt.Sprintf("encode tool result: %v", jsonErr),
+				true,
+				false,
+				elapsed,
+			)
 			continue
 		}
 
@@ -781,11 +808,6 @@ func (a *Agent) executeTools(ctx context.Context) error {
 			Duration:   elapsed,
 		})
 
-		jsonBytes, jsonErr := json.Marshal(result)
-		if jsonErr != nil {
-			a.appendToolResult(call, fmt.Sprintf("failed: encode tool result: %v", jsonErr))
-			continue
-		}
 		a.appendToolResult(call, string(jsonBytes))
 	}
 
@@ -795,15 +817,30 @@ func (a *Agent) executeTools(ctx context.Context) error {
 	return nil
 }
 
-func (a *Agent) recordSkippedTools(calls []PendingToolCall, reason string) {
+func (a *Agent) reportToolFailure(
+	call PendingToolCall,
+	code string,
+	message string,
+	executed bool,
+	retryable bool,
+	duration time.Duration,
+) {
+	a.emit(publicagent.ToolFailed{
+		At:         time.Now(),
+		ToolCallID: call.ID,
+		ToolName:   call.Name,
+		Message:    message,
+		Duration:   duration,
+		Code:       code,
+		Executed:   executed,
+		Retryable:  retryable,
+	})
+	a.appendToolResult(call, toolErrorContent(call, code, message, executed, retryable))
+}
+
+func (a *Agent) recordSkippedTools(calls []PendingToolCall, code, reason string) {
 	for _, call := range calls {
-		a.emit(publicagent.ToolFailed{
-			At:         time.Now(),
-			ToolCallID: call.ID,
-			ToolName:   call.Name,
-			Message:    reason,
-		})
-		a.appendToolResult(call, "failed: "+reason)
+		a.reportToolFailure(call, code, reason, false, false, 0)
 	}
 }
 
@@ -851,7 +888,7 @@ func (a *Agent) streamResponse(
 		return provider.Response{}, err
 	}
 	if events == nil {
-		return provider.Response{}, errors.New("provider returned a nil stream")
+		return provider.Response{}, fmt.Errorf("%w: provider returned a nil stream", provider.ErrInvalidStream)
 	}
 
 	for {
@@ -863,7 +900,7 @@ func (a *Agent) streamResponse(
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return provider.Response{}, ctxErr
 				}
-				return provider.Response{}, errors.New("provider stream closed without a terminal event")
+				return provider.Response{}, fmt.Errorf("%w: stream closed without a terminal event", provider.ErrStreamInterrupted)
 			}
 			switch value := event.(type) {
 			case provider.DeltaEvent:
@@ -874,9 +911,11 @@ func (a *Agent) streamResponse(
 				return value.Response, nil
 			case provider.ErrorEvent:
 				if value.Err == nil {
-					return provider.Response{}, errors.New("provider stream failed")
+					return provider.Response{}, fmt.Errorf("%w: provider stream failed", provider.ErrInvalidStream)
 				}
 				return provider.Response{}, value.Err
+			default:
+				return provider.Response{}, fmt.Errorf("%w: unknown stream event %T", provider.ErrInvalidStream, event)
 			}
 		}
 	}
@@ -926,8 +965,20 @@ func (a *Agent) appendToolResult(call PendingToolCall, content string) {
 	})
 }
 
-func (a *Agent) next(ctx context.Context) error {
+// turnResult describes one completed model request. It is independent of tool
+// execution and of the overall run lifecycle.
+type turnResult struct {
+	Attempts       int
+	FinishReason   string
+	ToolCalls      int
+	ContentBytes   int
+	ReasoningBytes int
+}
+
+func (a *Agent) next(ctx context.Context) (turnResult, error) {
 	Logger.Info("Generating next response from LLM")
+
+	result := turnResult{}
 
 	history := a.History()
 	tools := a.toolContext.Registry.Specs()
@@ -935,16 +986,24 @@ func (a *Agent) next(ctx context.Context) error {
 
 	view, _, err := a.contextManager.Build(ctx, history, tools, a.summarize)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
+		if errors.Is(err, contextmgr.ErrContextOverflow) {
+			Logger.Warn("Prompt exceeds the context window; forcing compaction")
+			view, err = a.forceCompaction(ctx, history, tools)
 		}
-		return fmt.Errorf("prepare context: %w", err)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
+			}
+			return result, fmt.Errorf("prepare context: %w", err)
+		}
 	}
 
 	progress := make(map[int]struct {
 		id   string
 		name string
 	})
+	var streamedContent strings.Builder
+	var streamedReasoning strings.Builder
 
 	request := provider.Request{
 		Model:     a.model,
@@ -954,9 +1013,11 @@ func (a *Agent) next(ctx context.Context) error {
 	}
 	onDelta := func(delta provider.Delta) {
 		if delta.ReasoningContent != "" {
+			streamedReasoning.WriteString(delta.ReasoningContent)
 			a.emit(publicagent.ReasoningDelta{At: time.Now(), Text: delta.ReasoningContent})
 		}
 		if delta.Content != "" {
+			streamedContent.WriteString(delta.Content)
 			a.emit(publicagent.AssistantDelta{At: time.Now(), Text: delta.Content})
 		}
 
@@ -986,29 +1047,80 @@ func (a *Agent) next(ctx context.Context) error {
 		}
 	}
 
+	result.Attempts = 1
 	response, err := a.streamResponse(ctx, request, onDelta)
 	if err != nil && provider.IsContextWindowError(err) {
 		Logger.Warn("LLM rejected the prompt for exceeding its context window; forcing compaction")
 
-		forcedView, _, forceErr := a.contextManager.Force(ctx, history, tools, a.summarize)
-		if forceErr == nil {
-			request.Messages = forcedView
-			progress = make(map[int]struct {
-				id   string
-				name string
-			})
-			response, err = a.streamResponse(ctx, request, onDelta)
-		} else {
+		forcedView, forceErr := a.forceCompaction(ctx, history, tools)
+		if forceErr != nil {
 			Logger.Warn("Context recovery failed", "error", forceErr)
-			err = fmt.Errorf("%w (forced compaction failed: %v)", err, forceErr)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
+			}
+			return result, fmt.Errorf("LLM generation failed: %w (context recovery failed: %w)", err, forceErr)
 		}
+
+		// The failed attempt may have streamed partial content. Tell consumers
+		// to discard it before the retry's deltas arrive.
+		a.emit(publicagent.TurnRetried{
+			At:          time.Now(),
+			Turn:        a.step,
+			Reason:      "context_overflow",
+			Error:       err.Error(),
+			NextAttempt: 2,
+		})
+
+		result.Attempts = 2
+		request.Messages = forcedView
+		progress = make(map[int]struct {
+			id   string
+			name string
+		})
+		streamedContent.Reset()
+		streamedReasoning.Reset()
+		response, err = a.streamResponse(ctx, request, onDelta)
 	}
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
+			return result, ctxErr
 		}
-		return fmt.Errorf("LLM generation failed: %w", err)
+		return result, fmt.Errorf("LLM generation failed: %w", err)
 	}
+
+	// Providers normally assemble the final response, but a streaming
+	// provider that only emits deltas must not lose the content from history.
+	if streamedContent.Len() > len(response.Content) {
+		response.Content = streamedContent.String()
+	}
+	if streamedReasoning.Len() > len(response.ReasoningContent) {
+		response.ReasoningContent = streamedReasoning.String()
+	}
+
+	result.FinishReason = response.FinishReason
+	result.ToolCalls = len(response.ToolCalls)
+	result.ContentBytes = len(response.Content)
+	result.ReasoningBytes = len(response.ReasoningContent)
+
+	// Non-streaming providers return content only in the terminal response.
+	// A provider that streamed only a prefix gets the missing suffix. Emit
+	// either form as a delta so every consumer sees the full content.
+	emitMissingDelta := func(streamed, final string, emit func(string)) {
+		switch {
+		case final == "":
+			return
+		case streamed == "":
+			emit(final)
+		case len(final) > len(streamed) && strings.HasPrefix(final, streamed):
+			emit(final[len(streamed):])
+		}
+	}
+	emitMissingDelta(streamedReasoning.String(), response.ReasoningContent, func(text string) {
+		a.emit(publicagent.ReasoningDelta{At: time.Now(), Text: text})
+	})
+	emitMissingDelta(streamedContent.String(), response.Content, func(text string) {
+		a.emit(publicagent.AssistantDelta{At: time.Now(), Text: text})
+	})
 
 	a.contextManager.ObserveUsage(response.Usage)
 	a.emit(publicagent.Usage{
@@ -1025,46 +1137,50 @@ func (a *Agent) next(ctx context.Context) error {
 	}
 
 	if len(response.ToolCalls) > 0 {
-		a.pendingToolCalls = nil
-		msg.ToolCalls = make([]provider.ToolCall, 0, len(response.ToolCalls))
-
-		for _, tc := range response.ToolCalls {
-			msg.ToolCalls = append(msg.ToolCalls, tc)
-
-			call := PendingToolCall{
-				ID:   tc.ID,
-				Name: tc.Function.Name,
-			}
-
-			if tc.Function.Arguments != "" {
-				var args map[string]any
-				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-					Logger.Error(
-						"Failed to parse tool arguments",
-						"tool", tc.Function.Name,
-						"error", err,
-					)
-					args = map[string]any{}
-				}
-				call.Args = args
-			}
-
-			a.pendingToolCalls = append(a.pendingToolCalls, call)
-		}
+		assistantCalls, pending := prepareToolCalls(response, a.registry, a.step)
+		msg.ToolCalls = assistantCalls
+		a.pendingToolCalls = pending
 
 		Logger.Debug("Message added to history", "message", msg)
 		a.appendHistory(msg)
 		a.state = "tool"
-		return nil
+		return result, nil
 	}
 
-	if response.Content != "" {
-		Logger.Debug("Message added to history", "message", msg)
-		a.appendHistory(msg)
+	if response.Content == "" && response.ReasoningContent == "" {
+		a.state = "done"
+		switch {
+		case provider.IsTruncatedFinish(response.FinishReason):
+			return result, fmt.Errorf("%w: response was truncated before any content", ErrEmptyResponse)
+		case strings.EqualFold(strings.TrimSpace(response.FinishReason), "content_filter"):
+			return result, fmt.Errorf("%w: response was blocked by the provider content filter", ErrEmptyResponse)
+		default:
+			// An empty stop is a valid (if unhelpful) completion. The run
+			// settles instead of looping; TurnFinished reports the empty turn.
+			return result, nil
+		}
 	}
+
+	Logger.Debug("Message added to history", "message", msg)
+	a.appendHistory(msg)
 
 	a.state = "done"
-	return nil
+	return result, nil
+}
+
+func (a *Agent) forceCompaction(
+	ctx context.Context,
+	history []provider.Message,
+	tools []provider.Tool,
+) ([]provider.Message, error) {
+	view, _, err := a.contextManager.Force(ctx, history, tools, a.summarize)
+	if err == nil {
+		return view, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	return nil, fmt.Errorf("context recovery failed: %w", err)
 }
 
 // publicApproverAdapter adapts a public approver to the internal policy

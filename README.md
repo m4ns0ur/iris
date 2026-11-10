@@ -6,6 +6,7 @@
 
 - [How It Works](#how-it-works)
 - [Execution Control](#execution-control)
+- [Model Response and Tool Handling](#model-response-and-tool-handling)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
 - [CLI](#cli)
@@ -28,17 +29,19 @@
 Iris runs a **deterministic agentic loop**. Each run repeats the same steps:
 
 1. **Build a prompt view.** The context manager estimates the prompt size and compacts older turns when the conversation approaches the model window. The canonical conversation is never mutated by compaction.
-2. **Call the LLM.** The request contains the prompt view, the built-in and custom tool definitions, and a `max_tokens` reservation for the next response.
-3. **Execute tools.** If the model returned tool calls, Iris runs them (sequentially, in order), appends each tool result to the conversation, and begins another turn.
+2. **Call the LLM.** The request contains the prompt view, the built-in and custom tool definitions, and a `max_tokens` reservation for the next response. Retryable transport errors are retried with bounded exponential backoff; a stream that disconnects after it starts terminates the request cleanly.
+3. **Validate and execute tools.** If the model returned tool calls, Iris validates and normalizes them, then runs them sequentially in order. Each call receives exactly one result (success or structured error), and invalid or truncated calls are never executed.
 4. **Finish.** A turn with no tool calls ends the run, unless a steering instruction or follow-up is queued. Queued steering is delivered before each turn; queued follow-ups are delivered only when the run would otherwise stop.
 
 At the loop level this appears as three states: `idle` (generate the next response), `tool` (execute requested tools), and `done` (stop).
 
 Every run has its own `context.Context`. Cancellation propagates to the provider request and stream, retry backoff, approval requests, and tool execution. Interrupting a run records synthetic tool results for tool calls that never executed so the conversation history remains valid for the next run. A run can also be steered or given follow-up work without being canceled; see [Execution Control](#execution-control).
 
+A model request and the overall execution are distinct. `agent.turn.finished` reports that one request completed; the run may still execute tools, be retried after context compaction, or deliver queued work. `agent.finished` is the **settled** event: no automatic work remains. See [Request and execution lifecycle](#request-and-execution-lifecycle).
+
 Runs are bounded by `max_turns` and `max_tool_calls`; each tool execution is additionally bounded by `tool_timeout_seconds`. Exhausting a turn or tool budget returns a clear error instead of looping indefinitely.
 
-Progress is exposed as a typed event stream (`agent.started`, `assistant.delta`, `tool.completed`, `context.compaction.finished`, `agent.queue.updated`, …). The TUI, JSONL mode, and RPC server are all consumers of the same stream. See [Embedding Iris in Go](#embedding-iris-in-go).
+Progress is exposed as a typed event stream (`agent.started`, `agent.turn.finished`, `assistant.delta`, `tool.completed`, `context.compaction.finished`, `agent.queue.updated`, …). The TUI, JSONL mode, and RPC server are all consumers of the same stream. See [Embedding Iris in Go](#embedding-iris-in-go).
 
 ## Execution Control
 
@@ -67,6 +70,66 @@ You> Stop. Do not modify the database schema. Use the existing structure instead
 ```
 
 In the TUI, `Enter` while streaming queues a steering instruction and `Alt+Enter` queues a follow-up. `Ctrl+C` aborts and restores queued text to the input. From RPC or Go, use the methods in the table above.
+
+## Model Response and Tool Handling
+
+Iris targets small local models behind OpenAI-compatible servers. The transport is deliberately tolerant of server variation but conservative about side effects: it accepts a response that closes after a `finish_reason` without `[DONE]`, but a stream that ends with neither is treated as interrupted. It never executes a tool from a partial, truncated, or malformed call.
+
+| Scenario | Behavior |
+| --- | --- |
+| Incomplete streamed tool arguments | Deltas are accumulated by index, ID, or continuation. If the response ends before the call is complete, or `finish_reason` is `length`/`max_tokens`, no tool runs. |
+| Invalid tool arguments | Assistant history is kept provider-valid by replacing malformed JSON arguments with `{}`. The model receives a structured `invalid_tool_arguments` result and the tool is not executed. |
+| Unknown tool name | No execution. The model receives `unknown_tool`, the run continues, and the model can correct the call. |
+| Multiple tool calls | Calls are assembled in order, IDs are normalized to be unique, and each is executed sequentially with one correlated result. |
+| Tool execution failure | The failure is committed to conversation history as a structured tool result. The tool is not automatically retried. |
+| Empty assistant response | A normal empty stop settles instead of looping; the TUI shows a notice and the turn event reports zero content. An empty response truncated at the output limit or blocked by a content filter returns `agent.ErrEmptyResponse`. |
+| Context overflow | Iris proactively compacts, forces compaction when a provider rejects the prompt, and retries the request once. If the prompt still cannot fit, the run fails with a context-overflow error. |
+| Stream disconnect | Partial output is not committed. A disconnect after the response starts fails with `provider.ErrStreamInterrupted`; the run terminates cleanly. |
+| Malformed stream data | The request fails with `provider.ErrInvalidStream`; no partial response is committed. |
+| Retryable HTTP error | The request is retried with bounded exponential backoff (1s, 2s, 4s, … capped at 30s), honoring `Retry-After`. |
+| Error after the stream starts | No transport retry. A started stream is never silently replayed; it either completes or fails cleanly. |
+
+### Provider retries vs tool retries
+
+Only model requests are retried automatically. A retry happens before a response is consumed, or after an application-level compaction; no tool has executed at those points. Tool execution is never retried: repeating a tool that already modified a file or ran a shell command can duplicate side effects. Every failed or rejected call is reported once, and both `tool.failed` and the JSON tool result carry `executed` and `retryable` flags so the model knows whether another attempt is safe.
+
+### Structured tool errors
+
+A failed or rejected tool call is appended to conversation history as a JSON `tool` message, for example:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "invalid_tool_arguments",
+    "message": "missing required argument \"path\"",
+    "tool": "read",
+    "tool_call_id": "call_1",
+    "executed": false,
+    "retryable": true
+  }
+}
+```
+
+| Code | Meaning |
+| --- | --- |
+| `invalid_tool_call` | The call had no usable function name, or the provider content-filtered the response. |
+| `invalid_tool_arguments` | Arguments were not a valid JSON object, violated the tool's top-level schema, or were rejected by the tool before execution. |
+| `truncated_tool_arguments` | The response hit the output token limit, so the arguments may be incomplete. |
+| `unknown_tool` | The model named a tool that is not registered. |
+| `tool_execution_failed` | The tool ran and returned an error or panicked. |
+| `tool_timeout` | The tool ran and exceeded `tool_timeout_seconds`. |
+| `tool_result_encode_failed` | The tool ran but its result could not be encoded. |
+| `run_canceled` | The run was canceled before or during execution. |
+| `tool_budget_exhausted` | The per-run tool execution budget was exhausted. |
+
+`executed: true` means the tool was invoked and may have had side effects. `retryable: true` is used only for validation failures that happened before execution.
+
+### Request and execution lifecycle
+
+`agent.turn.started` and `agent.turn.finished` describe one model request. `agent.turn.retried` reports a recoverable failed attempt (currently a context overflow) and tells consumers to discard partial output before the retry's deltas. `agent.finished` is the **settled** terminal event: it is emitted only after tool execution, retries, compaction, steering, and follow-ups are exhausted. In Go, `agent.AgentSettled` is an alias for `agent.AgentFinished` that names this semantic.
+
+This distinction matters to every interface: a request can complete while the execution still has more work. The TUI, JSONL, and RPC consumers receive the same `agent.turn.finished` and `agent.turn.retried` events.
 
 ## Requirements
 
@@ -262,14 +325,16 @@ JSONL mode writes one JSON object per line. Each record has a `type` (the agent 
 {"type":"tool.started","event":{"at":"...","tool_call_id":"...","tool_name":"read","args":{"path":"main.go"}}}
 {"type":"tool.completed","event":{"at":"...","tool_call_id":"...","tool_name":"read","result":{"content":"...","truncated":false},"duration":123456}}
 {"type":"usage","event":{"at":"...","prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}
+{"type":"agent.turn.finished","event":{"at":"...","turn":0,"attempts":1,"finish_reason":"tool_calls","tool_calls":1,"content_bytes":12}}
 {"type":"context.compaction.finished","event":{"at":"...","window":75000,"before_tokens":65000,"after_tokens":18000,"summarized_messages":12}}
 {"type":"agent.finished","event":{"at":"..."}}
 {"type":"result","event":{"content":"...","session_id":"s-...","usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}}
 ```
 
-- `type` matches the typed agent event names (`agent.started`, `assistant.delta`, `tool.started`, `context.compaction.started`, …).
+- `type` matches the typed agent event names (`agent.started`, `agent.turn.finished`, `assistant.delta`, `tool.completed`, `context.compaction.started`, …).
+- `agent.turn.finished` marks one completed model request. `agent.turn.retried` precedes an in-run retry and means partial output from the failed attempt must be discarded. `agent.finished` is the settled terminal event.
 - `duration` in tool events is a Go duration in nanoseconds.
-- After the run starts, a final `result` record is written, including on failure. It carries `content`, optional `reasoning`, `session_id`, aggregated `usage`, optional `context_summary_usage`, and optional `canceled`. Setup errors that occur before the run (missing prompt, invalid configuration) are reported on stderr with no event records.
+- After the run starts, a final `result` record is written, including on failure. It carries `content`, optional `reasoning`, `session_id`, aggregated `usage`, optional `context_summary_usage`, optional `canceled`, and optional `truncated`. Setup errors that occur before the run (missing prompt, invalid configuration) are reported on stderr with no event records.
 - On failure an `error` record (`{"type":"error","error":"..."}`) follows the `result` record, the error is also written to stderr, and the process exits non-zero.
 
 ### RPC
@@ -300,6 +365,8 @@ RPC mode speaks JSON-RPC 2.0 over stdin/stdout. Agent events are sent as `agent.
 `agent.run` is asynchronous so `agent.steer`, `agent.follow_up`, `agent.clear_queue`, `agent.cancel`, `agent.status`, and `shutdown` can be processed while it runs. The server starts reading the next request only after the run has started, so a `agent.steer` sent immediately after `agent.run` is deterministic. A second concurrent run is rejected with the busy error. Mutating session methods (`session.new`, `session.resume`, `session.export`, `session.fork`) are rejected as busy during a run; reads (`agent.status`, `session.list`, `session.current`) remain available.
 
 Steering and follow-up return the idle error when no run is active. `agent.clear_queue` works while idle and while running. `agent.cancel` is an abort: it closes the queue, returns instructions that had not been delivered, and cancels the run. See [Execution Control](#execution-control) for delivery points.
+
+The RPC event stream carries `agent.turn.finished`, `agent.turn.retried`, and the settled `agent.finished` event. A `agent.turn.finished` event is not the end of `agent.run`; the run may continue with tools, compaction, retries, or queued work. The final `client.Result` includes `truncated` when the last model turn hit the output token limit.
 
 Errors use standard JSON-RPC codes:
 
@@ -353,7 +420,7 @@ Precedence (highest first):
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `base_url` | `http://127.0.0.1:8080/v1` | OpenAI-compatible API root. `--base-url` overrides. |
-| `max_retries` | `3` | HTTP attempts for one LLM request (minimum 1). |
+| `max_retries` | `3` | HTTP attempts for one LLM request (minimum 1). Retries use bounded exponential backoff and apply only before a response stream starts. |
 | `default_model` | `""` | Model sent with requests and matched against `[[models]]`. `--model` overrides. |
 | `[[models]]` | — | One or more model settings blocks. |
 
@@ -512,6 +579,7 @@ Each agent run has its own `context.Context`. Cancellation propagates to the LLM
 - `[agent] tool_timeout_seconds` bounds a single tool execution (default 5 minutes).
 - Exhausting a turn or tool budget returns a clear error instead of looping indefinitely. A tool timeout is reported as a failed tool result and the run continues.
 - Tool panics are recovered and converted into tool errors so a buggy tool cannot crash the agent.
+- Tool calls are never retried automatically. Only model requests use transport retries, and only before a response stream is consumed. Repeating a file write or shell command could duplicate side effects; a failed tool result is returned to the model instead.
 
 Press `Ctrl+C` while Iris is streaming to abort the current run; queued instructions are restored to the input, and pressing `Ctrl+C` again quits. `SIGTERM` exits the TUI, cancels the active run, and waits for tool and temp-file cleanup before the process exits. `Agent.Close` cancels, waits for cleanup, and removes captured temp files. Steering and follow-up are separate from cancellation and are described in [Execution Control](#execution-control).
 
@@ -544,6 +612,8 @@ Iris writes `iris_debug.log` in the process working directory (not `--workdir`),
 | `edit` | `path`, `edits` | — | `success`, `edits`, `changed` |
 | `write` | `path`, `content` | — | `success`, `bytes` |
 | `shell` | `command` | — | `output`, `exit_code`, `success`, `truncated`, `duration_ms`, plus `timed_out`, `canceled`, `error`, `full_output_file`, `full_output_truncated`, `full_output_bytes` when relevant |
+
+Before a tool runs, Iris checks the call against the tool's top-level `Parameters` schema (required keys and basic types). Invalid JSON, truncated arguments, missing required values, and unknown tool names are reported to the model as `{"ok":false,"error":{...}}` tool results and are never executed. A tool that runs but fails or times out keeps its failure in conversation history; it is not retried automatically. See [Structured tool errors](#structured-tool-errors).
 
 ### `read`
 
@@ -637,7 +707,7 @@ The TUI is one consumer of the agent event stream. On launch it creates a new se
 
 The input box stays editable while Iris is streaming. `Enter` queues a steering instruction (delivered after the current assistant turn finishes its tool calls, before the next LLM request) and `Alt+Enter` queues a follow-up (delivered only when the run would otherwise stop). Queued instructions are shown in the status bar and as `You (steer)>` / `You (follow-up)>` messages when delivered. Command completion and delivery semantics are described in [Execution Control](#execution-control).
 
-The status line shows the current hints, the scroll percentage, and the total tokens reported by the latest LLM call. While streaming it shows the active phase (`thinking`, `reasoning`, `tooling`, `compacting`, `canceling`) and any queued instruction counts; when the history is scrolled up it shows a scroll hint.
+The status line shows the current hints, the scroll percentage, and the total tokens reported by the latest LLM call. While streaming it shows the active phase (`thinking`, `reasoning`, `tooling`, `compacting`, `canceling`) and any queued instruction counts; when the history is scrolled up it shows a scroll hint. The TUI discards partial output when a turn is retried after context compaction, and shows notices for truncated responses and empty model responses.
 
 ### Commands
 
@@ -681,6 +751,8 @@ Session metadata includes the ID, timestamps, model, model metadata (provider, b
 Entries have IDs and `parent_id` links. Message history is reconstructed from these entries when a session is resumed. System prompts are not persisted; the agent adds its current system prompt when history is loaded. Resuming and forking restore conversation history and metadata; new turns use the provider and model configured for the current Iris launch.
 
 Steering instructions and follow-ups that were delivered during a run are ordinary user messages, so they are persisted as `user` entries. Instructions that were still queued when the run ended are not part of the conversation and are not persisted.
+
+Only successful, complete model responses are committed to history. A failed, disconnected, or retried attempt contributes no assistant message, so an interrupted response can never be mistaken for completed work in a resumed session.
 
 Session IDs use letters, digits, `-`, and `_`, up to 128 characters.
 
@@ -800,7 +872,7 @@ Before each call, the context manager:
 - uses a deterministic fallback summary if summarization fails;
 - trims the largest recent tool results if the current turn alone is still too large.
 
-If the provider rejects a prompt as exceeding its context window, Iris forces an aggressive compaction and retries once. Provider implementations should wrap `provider.ErrContextWindow` when they can classify this error; Iris also recognizes common provider error text. If the compacted prompt still cannot fit the budget, the run fails with a context-overflow error.
+If the estimated prompt still cannot fit after proactive compaction, or the provider rejects the prompt as exceeding its context window, Iris forces an aggressive compaction and retries the request once. Provider implementations should wrap `provider.ErrContextWindow` when they can classify this error; Iris also recognizes common provider error text. The failed attempt contributes no assistant message; `agent.turn.retried` tells consumers to discard any partial output before the retry. If the compacted prompt still cannot fit the budget, the run fails with a context-overflow error.
 
 Context settings are normalized before use:
 
@@ -932,8 +1004,9 @@ The lower-level [`agent`](agent) package can be used directly when session manag
 | `Usage` | Token usage summed across turns in the run. |
 | `ContextSummaryUsage` | Token usage spent on compaction summaries, when any. |
 | `Canceled` | Whether the run ended because it was cancelled. |
+| `Truncated` | Whether the last model turn hit the output token limit. |
 
-`client.ErrBusy` is returned when a run is requested while another is active. Mutating session operations are also busy-checked. `RunStream` handlers run synchronously in the agent run goroutine and must return quickly. `client.EventRecord{Type, Event}` and `client.Record(event)` provide the stable JSON envelope used by JSONL and RPC.
+`client.ErrBusy` is returned when a run is requested while another is active. Mutating session operations are also busy-checked. `RunStream` handlers run synchronously in the agent run goroutine and must return quickly. `client.EventRecord{Type, Event}` and `client.Record(event)` provide the stable JSON envelope used by JSONL and RPC. When a turn is retried, the client discards partial output from the failed attempt; consumers that maintain their own buffers should reset them on `agent.turn.retried`.
 
 ### Providers
 
@@ -966,7 +1039,9 @@ OpenAI-compatible Chat Completions is the first implementation, available throug
 | `RequestTimeout` | 30 minutes | Deadline for one complete request. |
 | `HTTPClient` | no timeout | Optional custom HTTP client. |
 
-The transport sets `stream=true` and requests usage in the stream. Non-transient 4xx responses are not retried (429 is retried). A 413 response or an error that looks like a context-window overflow is wrapped in `provider.ErrContextWindow`.
+Providers may stream deltas or return the complete assistant text only in the terminal `DoneEvent`; the runtime emits synthetic `assistant.delta`/`reasoning.delta` events in the latter case so every consumer sees the same stream shape.
+
+The transport sets `stream=true` and requests usage in the stream. Non-transient 4xx responses are not retried; 408, 425, 429, and 5xx responses are retried with bounded exponential backoff (1s, 2s, 4s, … capped at 30s), honoring `Retry-After`. Retries stop once an HTTP 200 stream has started: a disconnect after that point produces `provider.ErrStreamInterrupted` rather than replaying the request. Malformed or contradictory stream data produces `provider.ErrInvalidStream`. A 413 response or an error that looks like a context-window overflow is wrapped in `provider.ErrContextWindow` and handled by forced compaction in the runtime.
 
 Model capabilities are descriptive for now:
 
@@ -1010,17 +1085,21 @@ type Agent interface {
 
 While a run is active, `Steer` and `FollowUp` queue instructions for the next turn and for the stop point respectively. `Pending` snapshots the queues and `ClearQueue` removes and returns them. `Cancel` aborts the run; `Abort` also closes the queue atomically and returns the instructions that had not been delivered, so a UI can restore their text. Queue methods are safe to call from event handlers and from other goroutines, and they never interrupt an in-flight provider request or tool execution. See [Execution Control](#execution-control) for the exact delivery points.
 
+`agent.turn.finished` is request completion; `agent.finished` is settled execution. Consumers that persist results or move to an "idle" state should wait for the settled event. Consumers that display per-request progress can use `agent.turn.finished`, and should clear partial output on `agent.turn.retried`.
+
 | Event | Meaning |
 | --- | --- |
 | `agent.started` | A run began; carries the input. |
-| `agent.finished` | A run ended, including cancellation or error status. |
-| `agent.turn.started` | A new LLM turn began; flush buffered deltas. |
+| `agent.finished` | The settled terminal event: no more automatic work remains. Also exposed as `agent.AgentSettled`. |
+| `agent.turn.started` | A new model request began; flush buffered deltas from the previous turn. |
+| `agent.turn.finished` | One model request completed. The run may still execute tools, retry, compact, or deliver queued work. |
+| `agent.turn.retried` | A recoverable request failure; discard partial output for this turn before the retry's deltas. |
 | `assistant.delta` | Assistant text increment. |
 | `reasoning.delta` | Reasoning text increment. |
 | `tool.started` | A tool is about to execute. |
 | `tool.progress` | Streaming tool arguments or execution progress. |
 | `tool.completed` | A tool finished successfully. |
-| `tool.failed` | A tool failed, timed out, or was skipped. |
+| `tool.failed` | A tool failed, timed out, was rejected before execution, or was skipped. Carries `code`, `executed`, and `retryable`. |
 | `usage` | Token accounting for an LLM call. |
 | `context.compaction.started` | Iris began summarizing or trimming older context. |
 | `context.compaction.finished` | The compaction pass ended, with before/after estimates and counts. |
@@ -1039,10 +1118,14 @@ ag.Subscribe(func(event agent.Event) {
         fmt.Printf("%s delivered: %s\n", e.Kind, e.Text)
     case agent.QueueUpdated:
         fmt.Println("pending:", e.Steering, e.FollowUps)
+    case agent.TurnRetried:
+        fmt.Println("retrying turn:", e.Reason)
+    case agent.TurnFinished:
+        fmt.Println("request complete:", e.FinishReason, "tool calls:", e.ToolCalls)
     case agent.AgentError:
         fmt.Fprintln(os.Stderr, e.Message)
     case agent.AgentFinished:
-        fmt.Println("done, canceled:", e.Canceled)
+        fmt.Println("settled, canceled:", e.Canceled)
     }
 })
 
@@ -1089,6 +1172,7 @@ Implementation details stay under `internal/`.
 | `agent.ErrAgentClosed` | The agent was closed. |
 | `agent.ErrAgentIdle` | A steering instruction or follow-up was submitted while no run was active. |
 | `agent.ErrEmptyInput` | A steering instruction or follow-up contained only whitespace. |
+| `agent.ErrEmptyResponse` | The model returned an empty response that cannot be treated as a normal stop (for example, truncated before any content). |
 | `agent.ErrTurnBudgetExceeded` | `max_turns` was exhausted. |
 | `agent.ErrToolBudgetExceeded` | `max_tool_calls` was exhausted. |
 | `agent.ErrToolTimeout` | Wraps a tool execution that exceeded its timeout (reported as a failed tool). |
@@ -1099,8 +1183,11 @@ Implementation details stay under `internal/`.
 | `session.ErrInvalidSessionID` | The session ID is unsafe or malformed. |
 | `session.ErrInvalidForkPoint` | The fork target is missing or not a user message. |
 | `provider.ErrContextWindow` | The provider rejected a prompt for exceeding the context window. |
+| `provider.ErrStreamInterrupted` | The provider stream disconnected or ended before a complete response. Partial output is not committed. |
+| `provider.ErrInvalidStream` | The provider sent malformed or contradictory stream data. |
+| `agent.ErrContextOverflow` | Even a compacted prompt cannot fit the configured context window. |
 
-Use `errors.Is` with these sentinels. `provider.IsContextWindowError` also recognizes common provider error text.
+Use `errors.Is` with these sentinels. `provider.IsContextWindowError` also recognizes common provider error text. `provider.IsTruncatedFinish` recognizes `length`/`max_tokens` finish reasons.
 
 ## Development
 

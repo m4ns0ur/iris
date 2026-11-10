@@ -108,6 +108,7 @@ type model struct {
 	approvalTimeout  time.Duration
 	canceling        bool
 	agentErrored     bool
+	lastTurnEmpty    bool
 	compacting       bool
 	totalTokens      int
 	lifecycle        *lifecycle
@@ -335,6 +336,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.previewCommand = ""
 				m.canceling = false
 				m.agentErrored = false
+				m.lastTurnEmpty = false
 				m.compacting = false
 				m.totalTokens = 0
 				m.pendingSteering = nil
@@ -735,6 +737,24 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 	case agent.TurnStarted:
 		m.flushPartialStream()
 
+	case agent.TurnRetried:
+		// The failed attempt's partial output is not part of the retried turn.
+		m.fullReason.Reset()
+		m.fullResponse.Reset()
+		m.toolName = ""
+		m.toolArgs.Reset()
+		m.previewPath = ""
+		m.previewContent = ""
+		m.previewCommand = ""
+		m.notice("Context limit reached; compacted the conversation and retrying the request.")
+
+	case agent.TurnFinished:
+		m.lastTurnEmpty = e.Err == "" && !e.Canceled &&
+			e.ContentBytes == 0 && e.ReasoningBytes == 0 && e.ToolCalls == 0
+		if e.Err == "" && !e.Canceled && provider.IsTruncatedFinish(e.FinishReason) {
+			m.notice("The response hit the output token limit.")
+		}
+
 	case agent.AssistantDelta:
 		m.fullResponse.WriteString(e.Text)
 
@@ -845,7 +865,10 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, message{role: "notice", content: "Canceled."})
 		} else if e.Err != "" && !m.agentErrored {
 			m.messages = append(m.messages, message{role: "error", content: e.Err})
+		} else if m.lastTurnEmpty {
+			m.messages = append(m.messages, message{role: "notice", content: "Iris returned an empty response."})
 		}
+		m.lastTurnEmpty = false
 
 		m.canceling = false
 		m.compacting = false

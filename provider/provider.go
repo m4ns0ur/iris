@@ -13,6 +13,27 @@ import (
 // context window. Providers should wrap it when they can classify the error.
 var ErrContextWindow = errors.New("context window exceeded")
 
+// ErrStreamInterrupted marks a provider stream that ended before a complete
+// response (disconnect, premature EOF, or a terminal read error). Partial
+// content from such a stream must not be treated as a completed response.
+var ErrStreamInterrupted = errors.New("provider stream interrupted")
+
+// ErrInvalidStream marks a provider stream with malformed or contradictory
+// protocol data. The stream cannot be recovered by continuing to read it.
+var ErrInvalidStream = errors.New("invalid provider stream")
+
+// IsTruncatedFinish reports whether a finish reason means the model hit its
+// output token limit. Tool calls from such a response may have truncated
+// arguments and must not be executed.
+func IsTruncatedFinish(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_output_tokens":
+		return true
+	default:
+		return false
+	}
+}
+
 // IsContextWindowError reports whether err looks like a context-window
 // overflow. It checks the sentinel first, then common provider error text.
 func IsContextWindowError(err error) bool {
@@ -230,7 +251,7 @@ func Collect(ctx context.Context, p Provider, request Request) (Response, error)
 		return Response{}, err
 	}
 	if events == nil {
-		return Response{}, fmt.Errorf("provider returned a nil stream")
+		return Response{}, fmt.Errorf("%w: provider returned a nil stream", ErrInvalidStream)
 	}
 
 	for {
@@ -242,7 +263,7 @@ func Collect(ctx context.Context, p Provider, request Request) (Response, error)
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return Response{}, ctxErr
 				}
-				return Response{}, fmt.Errorf("provider stream closed without a terminal event")
+				return Response{}, fmt.Errorf("%w: stream closed without a terminal event", ErrStreamInterrupted)
 			}
 			switch value := event.(type) {
 			case DeltaEvent:
@@ -251,11 +272,11 @@ func Collect(ctx context.Context, p Provider, request Request) (Response, error)
 				return value.Response, nil
 			case ErrorEvent:
 				if value.Err == nil {
-					return Response{}, fmt.Errorf("provider stream failed")
+					return Response{}, fmt.Errorf("%w: provider stream failed", ErrInvalidStream)
 				}
 				return Response{}, value.Err
 			default:
-				return Response{}, fmt.Errorf("unknown provider stream event %T", event)
+				return Response{}, fmt.Errorf("%w: unknown stream event %T", ErrInvalidStream, event)
 			}
 		}
 	}

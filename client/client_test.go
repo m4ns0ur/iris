@@ -20,6 +20,7 @@ type fakeAgent struct {
 	handlers  []func(agent.Event)
 	approver  agent.Approver
 	block     chan struct{}
+	runEvents []agent.Event
 	steering  []string
 	followUps []string
 }
@@ -33,6 +34,13 @@ func (f *fakeAgent) Run(ctx context.Context, input string) error {
 	f.mu.Unlock()
 
 	f.emit(agent.AgentStarted{At: time.Now(), Input: input})
+	if f.runEvents != nil {
+		for _, event := range f.runEvents {
+			f.emit(event)
+		}
+		f.emit(agent.AgentFinished{At: time.Now()})
+		return nil
+	}
 	if f.block != nil {
 		select {
 		case <-ctx.Done():
@@ -326,5 +334,81 @@ func TestClientExecutionControlDelegatesToAgent(t *testing.T) {
 	}
 	if pending := fake.Pending(); len(pending.Steering) != 0 || len(pending.FollowUps) != 0 {
 		t.Fatalf("agent queue after clear = %+v", pending)
+	}
+}
+
+func TestClientResetsPartialOutputOnTurnRetry(t *testing.T) {
+	c, fake, _ := newTestClient(t)
+	fake.runEvents = []agent.Event{
+		agent.TurnStarted{At: time.Now(), Turn: 0},
+		agent.AssistantDelta{At: time.Now(), Text: "partial"},
+		agent.TurnRetried{At: time.Now(), Turn: 0, Reason: "context_overflow", NextAttempt: 2},
+		agent.AssistantDelta{At: time.Now(), Text: "final"},
+		agent.TurnFinished{At: time.Now(), Turn: 0, Attempts: 2, FinishReason: "stop", ContentBytes: 5},
+	}
+
+	result, err := c.Run(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Content != "final" {
+		t.Fatalf("content = %q, want only the retried attempt", result.Content)
+	}
+}
+
+func TestClientReportsTruncatedTurn(t *testing.T) {
+	c, fake, _ := newTestClient(t)
+	fake.runEvents = []agent.Event{
+		agent.TurnStarted{At: time.Now(), Turn: 0},
+		agent.AssistantDelta{At: time.Now(), Text: "cut"},
+		agent.TurnFinished{At: time.Now(), Turn: 0, Attempts: 1, FinishReason: "length", ContentBytes: 3},
+	}
+
+	result, err := c.Run(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !result.Truncated {
+		t.Fatalf("result = %+v, want truncated", result)
+	}
+}
+
+func TestClientEmptyFinalTurnDoesNotReuseEarlierAssistantText(t *testing.T) {
+	c, fake, _ := newTestClient(t)
+	fake.history = []provider.Message{
+		{Role: "user", Content: []provider.Content{{Type: "text", Text: "earlier"}}},
+		{Role: "assistant", Content: "stale answer"},
+	}
+	fake.runEvents = []agent.Event{
+		agent.TurnStarted{At: time.Now(), Turn: 0},
+		agent.TurnFinished{At: time.Now(), Turn: 0, Attempts: 1, FinishReason: "stop"},
+	}
+
+	result, err := c.Run(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Content != "" {
+		t.Fatalf("content = %q, want empty (stale assistant text must not be reused)", result.Content)
+	}
+}
+
+func TestClientFallsBackToHistoryForNonStreamingResult(t *testing.T) {
+	c, fake, _ := newTestClient(t)
+	fake.history = []provider.Message{
+		{Role: "user", Content: []provider.Content{{Type: "text", Text: "hello"}}},
+		{Role: "assistant", Content: "answer from history"},
+	}
+	fake.runEvents = []agent.Event{
+		agent.TurnStarted{At: time.Now(), Turn: 0},
+		agent.TurnFinished{At: time.Now(), Turn: 0, Attempts: 1, FinishReason: "stop", ContentBytes: len("answer from history")},
+	}
+
+	result, err := c.Run(context.Background(), "next")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Content != "answer from history" {
+		t.Fatalf("content = %q", result.Content)
 	}
 }

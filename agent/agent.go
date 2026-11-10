@@ -30,10 +30,11 @@ const (
 // and FollowUp queues requests for when the run would otherwise stop. Queue
 // methods may be called from event handlers.
 type Agent interface {
-	// Run executes one turn of the agentic loop. It returns when the run
-	// finishes, is cancelled, or fails. Cancellation is propagated to the
-	// provider, approvals, and tools. Implementations must emit AgentFinished
-	// for every run attempt.
+	// Run executes one agent run. It returns when the run is settled: all
+	// requested tools, retries, compaction, steering, and follow-ups are
+	// finished, or the run was cancelled or failed. Cancellation is propagated
+	// to the provider, approvals, and tools. Implementations must emit
+	// AgentFinished for every run attempt.
 	Run(ctx context.Context, input string) error
 
 	// Subscribe registers an event handler. Subscribe before calling Run;
@@ -158,6 +159,8 @@ const (
 	EventAgentStarted  EventType = "agent.started"
 	EventAgentFinished EventType = "agent.finished"
 	EventTurnStarted   EventType = "agent.turn.started"
+	EventTurnFinished  EventType = "agent.turn.finished"
+	EventTurnRetried   EventType = "agent.turn.retried"
 
 	EventAssistantDelta EventType = "assistant.delta"
 	EventReasoningDelta EventType = "reasoning.delta"
@@ -182,6 +185,10 @@ const (
 
 	// Deprecated: use EventContextCompactionFinished.
 	EventContextCompacted = EventContextCompactionFinished
+
+	// EventAgentSettled is the settled-event name for EventAgentFinished. The
+	// wire value remains "agent.finished".
+	EventAgentSettled = EventAgentFinished
 )
 
 // Event is implemented by every typed agent event.
@@ -193,6 +200,8 @@ var (
 	_ Event = AgentStarted{}
 	_ Event = AgentFinished{}
 	_ Event = TurnStarted{}
+	_ Event = TurnFinished{}
+	_ Event = TurnRetried{}
 	_ Event = AssistantDelta{}
 	_ Event = ReasoningDelta{}
 	_ Event = ToolStarted{}
@@ -215,7 +224,13 @@ type AgentStarted struct {
 
 func (AgentStarted) Type() EventType { return EventAgentStarted }
 
-// AgentFinished is emitted once when a run ends.
+// AgentFinished is the settled terminal event: it is emitted once when no more
+// automatic work remains for the run. It may be preceded by retries,
+// compaction, tool execution, steering, and follow-ups. The completion of an
+// individual model request is reported by TurnFinished instead.
+//
+// AgentSettled is an alias that names this semantic explicitly. The wire event
+// remains "agent.finished".
 type AgentFinished struct {
 	At time.Time `json:"at"`
 	// Err is empty for a successful run.
@@ -226,14 +241,71 @@ type AgentFinished struct {
 
 func (AgentFinished) Type() EventType { return EventAgentFinished }
 
-// TurnStarted marks the beginning of one LLM turn. Consumers can use it to
-// flush buffered deltas from the previous turn.
+// AgentSettled names AgentFinished's settled semantics. The wire event remains
+// "agent.finished".
+type AgentSettled = AgentFinished
+
+// TurnStarted marks the beginning of one model request. Consumers can use it
+// to flush buffered deltas from the previous turn.
 type TurnStarted struct {
 	At   time.Time `json:"at"`
 	Turn int       `json:"turn"`
 }
 
 func (TurnStarted) Type() EventType { return EventTurnStarted }
+
+// TurnFinished marks the completion of one model request. The run may still
+// execute tools, deliver steering or follow-ups, compact context, or retry;
+// AgentFinished is the settled terminal event. Consumers must not treat
+// TurnFinished as the end of the execution.
+type TurnFinished struct {
+	At   time.Time `json:"at"`
+	Turn int       `json:"turn"`
+
+	// Attempts is the number of model requests made for this turn, including
+	// context-overflow recovery attempts.
+	Attempts int `json:"attempts"`
+
+	// FinishReason is the provider finish reason ("stop", "tool_calls",
+	// "length", ...). It is empty when the request failed before a response.
+	FinishReason string `json:"finish_reason,omitempty"`
+
+	// ToolCalls is the number of tool calls returned by the model.
+	ToolCalls int `json:"tool_calls,omitempty"`
+
+	// ContentBytes and ReasoningBytes are the sizes of the final assistant
+	// content for the turn.
+	ContentBytes   int `json:"content_bytes,omitempty"`
+	ReasoningBytes int `json:"reasoning_bytes,omitempty"`
+
+	// Err is empty when the request completed successfully.
+	Err string `json:"error,omitempty"`
+
+	// Canceled reports that the request ended because the run was cancelled.
+	Canceled bool `json:"canceled,omitempty"`
+}
+
+func (TurnFinished) Type() EventType { return EventTurnFinished }
+
+// TurnRetried reports that a model request failed in a recoverable way and the
+// runtime is retrying it. Consumers must discard partial assistant/reasoning
+// output and tool previews accumulated for this turn before processing the
+// retry's deltas.
+type TurnRetried struct {
+	At   time.Time `json:"at"`
+	Turn int       `json:"turn"`
+
+	// Reason is a stable code such as "context_overflow".
+	Reason string `json:"reason"`
+
+	// Error describes the failed attempt.
+	Error string `json:"error,omitempty"`
+
+	// NextAttempt is the attempt number of the retry.
+	NextAttempt int `json:"next_attempt"`
+}
+
+func (TurnRetried) Type() EventType { return EventTurnRetried }
 
 // AssistantDelta carries an assistant text increment.
 type AssistantDelta struct {
@@ -284,13 +356,24 @@ type ToolCompleted struct {
 
 func (ToolCompleted) Type() EventType { return EventToolCompleted }
 
-// ToolFailed is emitted when a tool execution fails, times out, or is skipped.
+// ToolFailed is emitted when a tool execution fails, times out, is rejected
+// before execution, or is skipped.
 type ToolFailed struct {
 	At         time.Time     `json:"at"`
 	ToolCallID string        `json:"tool_call_id"`
 	ToolName   string        `json:"tool_name"`
 	Message    string        `json:"message"`
 	Duration   time.Duration `json:"duration"`
+	// Code is a stable machine-readable error code. See the execution-control
+	// documentation for the values emitted by the built-in runtime.
+	Code string `json:"code,omitempty"`
+	// Executed reports whether the tool was actually invoked. It is false for
+	// invalid or truncated arguments, unknown tools, and skipped calls.
+	Executed bool `json:"executed,omitempty"`
+	// Retryable reports whether repeating the call is safe. It is true for
+	// validation failures that happened before execution and false once a tool
+	// ran, because repeating a tool can repeat side effects.
+	Retryable bool `json:"retryable,omitempty"`
 }
 
 func (ToolFailed) Type() EventType { return EventToolFailed }
