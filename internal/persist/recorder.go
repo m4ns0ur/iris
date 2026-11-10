@@ -36,6 +36,25 @@ func Attach(instance agent.Agent, recorder agent.Recorder) bool {
 	return true
 }
 
+// AttachToolOutput points an agent's full tool output at the manager's
+// session-scoped directory. Agents or managers that do not support this keep
+// their ephemeral tool-output store.
+func AttachToolOutput(instance agent.Agent, manager session.Manager, sessionID string) error {
+	target, ok := instance.(agent.ToolOutputAgent)
+	if !ok {
+		return nil
+	}
+	provider, ok := manager.(session.ToolOutputProvider)
+	if !ok {
+		return nil
+	}
+	dir, err := provider.ToolOutputDir(sessionID)
+	if err != nil {
+		return err
+	}
+	return target.SetToolOutputDir(dir)
+}
+
 // Session returns the session being recorded.
 func (r *Recorder) Session() *session.Session {
 	r.mu.Lock()

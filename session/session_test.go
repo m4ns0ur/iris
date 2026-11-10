@@ -919,3 +919,47 @@ func TestHistoryPlacesSyntheticResultBeforeNextMessage(t *testing.T) {
 		t.Fatalf("transcript was mutated: %+v", created.Entries)
 	}
 }
+
+func TestToolOutputDirectory(t *testing.T) {
+	manager := newTestManager(t)
+	session, _ := manager.Create(CreateOptions{Model: "m"})
+
+	dir, err := manager.ToolOutputDir(session.ID)
+	if err != nil {
+		t.Fatalf("ToolOutputDir() error = %v", err)
+	}
+	if filepath.Dir(dir) != manager.Dir() || filepath.Base(dir) != "tool-output" {
+		t.Fatalf("tool output dir = %q", dir)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("tool output dir mode = %v, want 0700", info.Mode().Perm())
+	}
+
+	other, err := manager.ToolOutputDir("s-another")
+	if err != nil {
+		t.Fatalf("ToolOutputDir(other) error = %v", err)
+	}
+	if other != dir {
+		t.Fatalf("tool output dirs differ: %q vs %q", dir, other)
+	}
+
+	if _, err := manager.ToolOutputDir("../escape"); !errors.Is(err, ErrInvalidSessionID) {
+		t.Fatalf("invalid tool output session error = %v, want ErrInvalidSessionID", err)
+	}
+
+	session.AddUser("hello")
+	if err := manager.Save(session); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	summaries, err := manager.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("tool-output directory was listed as a session: %+v", summaries)
+	}
+}

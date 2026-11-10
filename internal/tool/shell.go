@@ -39,7 +39,7 @@ func (t *ShellTool) FullDescription() string {
 
 	options := t.policy.ShellOptions()
 	return fmt.Sprintf(
-		"Run a shell command in the workspace. Commands are subject to the security policy: deny rules, allow rules, and user approval. A %s timeout terminates the whole process group. Output is bounded (last %d lines or %d bytes); truncated output is saved to a temp file.",
+		"Run a shell command in the workspace. Commands are subject to the security policy: deny rules, allow rules, and user approval. A %s timeout terminates the whole process group. Output is bounded by the common tool-output policy (last %d lines or %d bytes); truncated results include a notice and a full_output_file path.",
 		options.Timeout,
 		options.MaxOutputLines,
 		options.MaxOutputBytes,
@@ -146,6 +146,29 @@ func (t *ShellTool) Execute(ctx context.Context, args map[string]any) (map[strin
 		"success":     runErr == nil && !timedOut && !canceled,
 		"truncated":   truncated,
 		"duration_ms": elapsed.Milliseconds(),
+	}
+	if truncated {
+		shownLines := countLines(output)
+		totalLines := snapshot.TotalLines
+		startLine := totalLines - shownLines + 1
+		if startLine < 1 {
+			startLine = 1
+		}
+		omittedLines := totalLines - shownLines
+		if omittedLines < 0 {
+			omittedLines = 0
+		}
+		omittedBytes := snapshot.Total - int64(len(output))
+		if omittedBytes < 0 {
+			omittedBytes = 0
+		}
+		result["total_output_lines"] = totalLines
+		result["total_output_bytes"] = snapshot.Total
+		result["output_start_line"] = startLine
+		result["output_end_line"] = totalLines
+		result["output_shown_lines"] = shownLines
+		result["output_omitted_lines"] = omittedLines
+		result["output_omitted_bytes"] = omittedBytes
 	}
 
 	if timedOut {

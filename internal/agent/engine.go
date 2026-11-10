@@ -23,8 +23,9 @@ import (
 var Logger = logger.Logger
 
 var (
-	_ publicagent.Agent         = (*Agent)(nil)
-	_ publicagent.RecorderAgent = (*Agent)(nil)
+	_ publicagent.Agent           = (*Agent)(nil)
+	_ publicagent.RecorderAgent   = (*Agent)(nil)
+	_ publicagent.ToolOutputAgent = (*Agent)(nil)
 )
 
 const (
@@ -216,6 +217,20 @@ func (a *Agent) emit(event publicagent.Event) {
 			handler(event)
 		}()
 	}
+}
+
+// SetToolOutputDir redirects full tool output to the session store's
+// tool-output directory. It must be called while the agent is idle.
+func (a *Agent) SetToolOutputDir(dir string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return ErrAgentClosed
+	}
+	if a.running {
+		return ErrAgentBusy
+	}
+	return a.registry.SetOutputDir(dir)
 }
 
 // SetRecorder installs a durable transcript recorder. It applies to the next

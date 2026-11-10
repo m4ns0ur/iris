@@ -219,6 +219,7 @@ deny = ['curl*', 'wget*']
 # disable_default_deny = true
 timeout_seconds = 120
 approval_timeout_seconds = 300
+# Shared model-visible tool-output limits (apply to every tool).
 max_output_bytes = 25600
 max_output_lines = 1000
 max_capture_bytes = 10485760
@@ -472,13 +473,13 @@ The capability flags and `sampling_parameters` are descriptive only: providers m
 | `approval_hook` | `[]` | argv of an external approval program (no shell). |
 | `timeout_seconds` | `120` | Timeout for one shell command. |
 | `approval_timeout_seconds` | `300` | How long Iris waits for an approval decision. |
-| `max_output_bytes` | `25600` (25 KiB) | Model-visible output cap. Maximum 4 MiB. |
-| `max_output_lines` | `1000` | Model-visible line cap. Maximum 200,000. |
-| `max_capture_bytes` | `10485760` (10 MiB) | Full output written to a temp file. Maximum 100 MiB. |
-| `temp_file_ttl_minutes` | `1440` (24 h) | Reaping age for temp directories left by crashed processes. |
+| `max_output_bytes` | `25600` (25 KiB) | Shared model-visible tool output cap. Maximum 4 MiB. |
+| `max_output_lines` | `1000` | Shared model-visible tool output line cap. Maximum 200,000. |
+| `max_capture_bytes` | `10485760` (10 MiB) | Full output stored separately for retrieval. Maximum 100 MiB. |
+| `temp_file_ttl_minutes` | `1440` (24 h) | Reaping age for ephemeral tool-output directories left by crashed processes. |
 | `binary` | `""` | Shell used for commands. Empty uses `bash` when available, otherwise `sh`. |
 
-`max_capture_bytes` is raised to at least `max_output_bytes` if configured lower. Output limits above the maxima are rejected at startup.
+These limits are the common tool-output policy and apply to every tool result, not only shell. `max_capture_bytes` is raised to at least `max_output_bytes` if configured lower. Output limits above the maxima are rejected at startup.
 
 ### LLM, agent, context, and sessions
 
@@ -531,7 +532,7 @@ Extra roots can be granted with `security.read_paths` and `security.write_paths`
 
 In `danger-full-access` mode relative paths are still resolved against the workspace, but paths are not canonicalized or confined. Use it only when the process is already isolated.
 
-The read tool is also granted read-only access to Iris' own temp directory so it can inspect full shell output. Nothing else in that directory is writable by the file tools.
+The read tool is also granted read-only access to Iris' own tool-output directory so it can inspect full tool output (session-scoped when a session is attached, ephemeral otherwise). Nothing else in that directory is writable by the file tools.
 
 Path checks are resolved before use (including symlinks), but they are not a defence against a hostile process racing Iris between the check and the write. Treat repository files, project instructions, shell output, and tool results as untrusted input; policy still denies or asks for risky operations, and an external sandbox remains the right boundary for hostile repositories.
 
@@ -571,9 +572,9 @@ If no approval mechanism is available (for example in a non-interactive embeddin
 
 - Shell commands run in their own process group on Unix and are killed (including children) when `timeout_seconds` expires or the context is cancelled. On other platforms only the direct child is killed.
 - A non-zero exit code is not a tool error: the result always contains `output`, `exit_code`, `success`, `truncated`, and `duration_ms`; `timed_out`, `canceled`, and `error` appear when relevant.
-- Output returned to the model is bounded to the last `max_output_bytes` / `max_output_lines` (default 25 KiB / 1000 lines).
-- Up to `max_capture_bytes` (default 10 MiB) of full output is written to a `0600` file in a private session directory. The path is returned only when the model-visible output was truncated, and the read tool can read it. When output was not truncated, the temp file is removed.
-- Session directories are created under the user cache directory (`.../iris/tmp/session-*`, falling back to the system temp directory) with `0700` permissions, and are removed on exit. Directories left by crashed processes are reaped after `temp_file_ttl_minutes` (default 24 hours).
+- Shell output returned to the model is bounded by the common tool-output policy: the last `max_output_bytes` / `max_output_lines` (default 25 KiB / 1000 lines), so failures at the end of `go test` output survive. A truncation notice includes the shown line range, omitted bytes/lines, and the full-output path.
+- Up to `max_capture_bytes` (default 10 MiB) of full raw output is stored in a `0600` file. Session-backed agents use `<session-dir>/tool-output/`; standalone agents use a private ephemeral directory. The read tool can read the path.
+- Ephemeral tool-output directories are created under the user cache directory (`.../iris/tmp/session-*`, falling back to the system temp directory) with `0700` permissions and are removed on exit. Directories left by crashed processes are reaped after `temp_file_ttl_minutes` (default 24 hours). Session tool-output directories persist with their sessions. See [Tool output management](#tool-output-management).
 
 ### Cancellation and execution budgets
 
@@ -587,7 +588,7 @@ Each agent run has its own `context.Context`. Cancellation propagates to the LLM
 - Tool panics are recovered and converted into tool errors so a buggy tool cannot crash the agent.
 - Tool calls are never retried automatically. Only model requests use transport retries, and only before a response stream is consumed. Repeating a file write or shell command could duplicate side effects; a failed tool result is returned to the model instead.
 
-Press `Ctrl+C` while Iris is streaming to abort the current run; queued instructions are restored to the input, and pressing `Ctrl+C` again quits. `SIGTERM` exits the TUI, cancels the active run, and waits for tool and temp-file cleanup before the process exits. `Agent.Close` cancels, waits for cleanup, and removes captured temp files. Steering and follow-up are separate from cancellation and are described in [Execution Control](#execution-control).
+Press `Ctrl+C` while Iris is streaming to abort the current run; queued instructions are restored to the input, and pressing `Ctrl+C` again quits. `SIGTERM` exits the TUI, cancels the active run, and waits for tool cleanup before the process exits. `Agent.Close` cancels, waits for cleanup, and removes ephemeral tool-output files; session tool-output files persist. Steering and follow-up are separate from cancellation and are described in [Execution Control](#execution-control).
 
 ### Edits are validated before they are applied
 
@@ -614,16 +615,18 @@ Iris writes `iris_debug.log` in the process working directory (not `--workdir`),
 
 | Tool | Required args | Optional args | Result keys |
 | --- | --- | --- | --- |
-| `read` | `path` | `start`, `max` | `content`, `truncated`, `start_line`, `lines`, `end_line` |
+| `read` | `path` | `start`, `max` | `content`, `truncated`, `start_line`, `lines`, `end_line`, `path`, plus `next_start` and `truncation_notice` when truncated |
 | `edit` | `path`, `edits` | — | `success`, `edits`, `changed` |
 | `write` | `path`, `content` | — | `success`, `bytes` |
-| `shell` | `command` | — | `output`, `exit_code`, `success`, `truncated`, `duration_ms`, plus `timed_out`, `canceled`, `error`, `full_output_file`, `full_output_truncated`, `full_output_bytes` when relevant |
+| `shell` | `command` | — | `output`, `exit_code`, `success`, `truncated`, `duration_ms`, plus `timed_out`, `canceled`, `error`, `full_output_file`, `full_output_truncated`, `full_output_bytes`, `truncation_notice`, and line/byte metadata when relevant |
+
+Tools other than the paging `read` tool can additionally receive the common output fields described in [Tool output management](#tool-output-management).
 
 Before a tool runs, Iris checks the call against the tool's top-level `Parameters` schema (required keys and basic types). Invalid JSON, truncated arguments, missing required values, and unknown tool names are reported to the model as `{"ok":false,"error":{...}}` tool results and are never executed. A tool that runs but fails or times out keeps its failure in conversation history; it is not retried automatically. See [Structured tool errors](#structured-tool-errors).
 
 ### `read`
 
-Reads a file inside the workspace. `start` is 1-based; `max` defaults to 1000 lines and is capped at 10,000. The result is also capped at 25 KiB. Use `start`/`max` to page through larger files. Directories, special files, and paths outside the allowed roots are rejected.
+Reads a file inside the workspace. `start` is 1-based; `max` defaults to 1000 lines and is capped at 10,000. The result is also capped at 25 KiB. Use `start`/`max` to page through larger files. When truncated, the result includes `path`, `next_start`, and a `truncation_notice` so the model can continue; the source file remains the full output. Directories, special files, and paths outside the allowed roots are rejected.
 
 ### `edit`
 
@@ -648,6 +651,44 @@ Writes or creates a file inside the workspace, creating parent directories as ne
 ### `shell`
 
 Runs `<security.shell.binary> -c <command>` in the workspace, subject to the shell policy. The default shell is `bash` when available, otherwise `sh`; override it with `security.shell.binary`. Shell commands are not confined by the file sandbox.
+
+### Tool output management
+
+Tool results are post-processed by the same output policy before they are sent to the model; the paging `read` tool is the one deliberate exception because it is the retrieval path for omitted output. The policy is tuned with the existing `[security.shell]` limits, which are shared by all tools: `max_output_bytes` (default 25 KiB), `max_output_lines` (default 1000), and `max_capture_bytes` (default 10 MiB).
+
+The model-visible result is bounded:
+
+- A large text value is replaced by a head-and-tail preview. Shell keeps the last lines so late failures and compiler errors survive; other tools keep the beginning and the end.
+- The truncated result contains `truncated: true`, a human-readable `truncation_notice`, and an omission marker at the cut point.
+- Metadata includes total/shown/omitted lines and bytes, plus `full_output_file`, `full_output_bytes`, and `full_output_truncated` when a full file exists.
+- If a structured result is too large even without one oversized text value (for example, a huge array), Iris stores the pretty-printed result separately and returns a bounded preview with the same notice fields.
+
+Example notice:
+
+```text
+Output truncated.
+Showing lines 1-200 and 4383-4582 of 4582.
+4182 lines omitted (123,456 bytes).
+Full output:
+/Users/me/.iris/sessions/tool-output/large-abc123.log
+```
+
+The full output is stored separately from the model-visible transcript:
+
+- Session-backed agents (client, print, JSONL, RPC, TUI) store it under `<session-dir>/tool-output/<tool>-<random>.log`, with directory `0700` and files `0600`. The directory is shared by sessions in that store so a forked or resumed transcript's paths remain readable; it is not listed as a session.
+- Standalone agents, or custom session managers that do not implement `session.ToolOutputProvider`, use the agent's private ephemeral tool-output directory, which is removed on `Close`.
+- Shell writes the full raw stdout/stderr (up to `max_capture_bytes`) and returns a tail preview plus line metadata. Other tools store the full primary text; oversized structured results store the pretty-printed JSON up to the capture limit.
+- When the stored full output itself exceeds `max_capture_bytes`, `full_output_truncated` is true and the notice says so.
+
+The model can retrieve omitted output with the `read` tool:
+
+```json
+{"path": "/Users/me/.iris/sessions/tool-output/large-abc123.log", "start": 4383, "max": 800}
+```
+
+The `read` result itself is paged: when it is truncated, it includes `next_start` and a `truncation_notice` so the model can continue. It has its own 25 KiB/1000-line page cap (up to 10,000 lines when requested) and is not further reduced by the common tool-output cap, because it is the retrieval path for omitted output. Full output is never inserted into the model context automatically; only the bounded preview and the path are.
+
+Tool output files can contain sensitive material from commands and files. They are private (`0700`/`0600`) but persist with session output; remove old session stores if the data should not remain on disk.
 
 ### Custom tools
 
@@ -817,6 +858,12 @@ A session has one writer at a time:
 - `Save` also takes a transient lease when the caller does not already hold one, and compares the session `revision` with the file. A stale writer receives `session.ErrSessionConflict` instead of overwriting newer entries.
 - Read-only `Open`, `List`, `Latest`, and exports do not require the writer lease. A session actively being written can still be read; a partial final record is ignored.
 
+### Tool-output files
+
+Full tool output is stored under `<session-dir>/tool-output/` with directory `0700` and files `0600`. The directory is shared by sessions in the same store so a forked or resumed transcript can still read the paths recorded in its tool results. It is not listed as a session and is never loaded as instruction data. Tool-output files can contain sensitive command output and are not deleted when an agent closes; remove them with the session store when no longer needed.
+
+The client and TUI call `session.ToolOutputProvider.ToolOutputDir` and `agent.ToolOutputAgent.SetToolOutputDir` when attaching a session. Standalone agents, or managers that do not implement the optional provider, keep full output in an ephemeral private directory that is removed on `Close`.
+
 ### Exports
 
 `/export` and `session.export` write Markdown to `<session-dir>/exports/<session-id>.md` (directory `0700`, file `0600`, atomic write). The export includes format version, revision, session metadata, token totals, model metadata, and each entry with reasoning sections, tool calls, tool results, and interrupted status.
@@ -827,6 +874,7 @@ A session has one writer at a time:
 - Delivered steering instructions and follow-ups are saved as user entries; queued instructions that were never delivered are not.
 - `session.new` and `session.resume` persist the current session before switching and acquire the new session's lease. `session.resume` also repairs a session left behind by a crash.
 - `session.fork` creates a child session containing entries through the selected user message, records `parent_session_id` and `forked_from_entry_id`, and acquires the child's lease.
+- The client and TUI attach the session tool-output directory to the agent when switching sessions, so full tool output recorded in the transcript remains readable after resume or fork.
 - Mutating session methods return busy errors during a run; see [RPC](#rpc). Operations on a session locked by another process return `session.ErrSessionLocked`.
 
 ### `session.Manager`
@@ -849,9 +897,15 @@ type Manager interface {
 type Lease interface {
     Release() error
 }
+
+// Optional: provides a persistent tool-output directory. The client/TUI use
+// it when available; otherwise the agent uses ephemeral output storage.
+type ToolOutputProvider interface {
+    ToolOutputDir(sessionID string) (string, error)
+}
 ```
 
-`session.NewJSONL(dir)` returns the default JSONL implementation. `Create` builds an unsaved session; `Acquire` takes the writer lease and repairs recoverable damage; `Append` durably journals one entry and requires the lease returned by `Acquire`; `Save` publishes a complete rewrite. A `Lease` is any value with `Release() error`; `Lease.Release` relinquishes the writer lease. Forking validates that the target entry exists and is a user message. Custom `Manager` implementations must provide `Acquire` and `Append`; the JSONL manager is the reference implementation.
+`session.NewJSONL(dir)` returns the default JSONL implementation. `Create` builds an unsaved session; `Acquire` takes the writer lease and repairs recoverable damage; `Append` durably journals one entry and requires the lease returned by `Acquire`; `Save` publishes a complete rewrite. A `Lease` is any value with `Release() error`; `Lease.Release` relinquishes the writer lease. Forking validates that the target entry exists and is a user message. Custom `Manager` implementations must provide `Acquire` and `Append`; the JSONL manager is the reference implementation. `JSONLManager` also implements `ToolOutputProvider`.
 
 ## Resources
 
@@ -1064,7 +1118,7 @@ The lower-level [`agent`](agent) package can be used directly when session manag
 
 ### `client` API
 
-`client.Options` fields: `Agent` (required), `Sessions` (nil disables persistence), `SessionDefaults`, and `InitialSession` (resume an existing `*session.Session`). With persistence enabled, the client acquires the session writer lease at construction and releases it on `Close`.
+`client.Options` fields: `Agent` (required), `Sessions` (nil disables persistence), `SessionDefaults`, and `InitialSession` (resume an existing `*session.Session`). With persistence enabled, the client acquires the session writer lease at construction and releases it on `Close`. When the manager implements `session.ToolOutputProvider` and the agent implements `agent.ToolOutputAgent`, the client also points full tool output at the session tool-output directory.
 
 `client.Client` provides:
 
@@ -1176,7 +1230,7 @@ type Agent interface {
 }
 ```
 
-`History` returns a snapshot including the system message. `LoadHistory` replaces the conversation while the agent is idle and prepends the system prompt when the messages do not start with one. `Subscribe` has no unsubscribe; the subscription lives for the agent's lifetime. `ApprovalTimeout` reports the policy deadline and `Approver` returns the installed approver, including one configured through an approval hook. `Close` cancels the active run, waits for cleanup, and releases captured temp files. A single run is active at a time; starting another run returns `agent.ErrAgentBusy`, and using an agent after `Close` returns `agent.ErrAgentClosed`.
+`History` returns a snapshot including the system message. `LoadHistory` replaces the conversation while the agent is idle and prepends the system prompt when the messages do not start with one. `Subscribe` has no unsubscribe; the subscription lives for the agent's lifetime. `ApprovalTimeout` reports the policy deadline and `Approver` returns the installed approver, including one configured through an approval hook. `Close` cancels the active run, waits for cleanup, and releases ephemeral tool-output files; session tool-output files persist. A single run is active at a time; starting another run returns `agent.ErrAgentBusy`, and using an agent after `Close` returns `agent.ErrAgentClosed`.
 
 Agents that can durably record a transcript also implement the optional `RecorderAgent` interface:
 
@@ -1194,6 +1248,17 @@ type RecorderAgent interface {
 ```
 
 The built-in agent implements `RecorderAgent`. The client and TUI install a recorder backed by the leased session so `RecordUser` runs before the model call, `RecordAssistant` runs before its tool calls execute, and `RecordToolResult` runs immediately after each tool. Recorder methods are called synchronously on the run goroutine; an error aborts the run with `agent.ErrPersistence`. Custom agents that do not implement `RecorderAgent` still work with the client/TUI using the end-of-run history fallback, but that fallback is less durable across a crash.
+
+Agents may also implement the optional `ToolOutputAgent` interface:
+
+```go
+type ToolOutputAgent interface {
+    Agent
+    SetToolOutputDir(dir string) error
+}
+```
+
+The built-in agent implements it. `SetToolOutputDir` redirects full tool output to the session directory supplied by `session.ToolOutputProvider` and grants the read tool access to that directory. It must be called while idle; a running agent returns `agent.ErrAgentBusy`. The client and TUI call it automatically when attaching a session. Custom agents that do not implement it keep using the ephemeral tool-output store.
 
 While a run is active, `Steer` and `FollowUp` queue instructions for the next turn and for the stop point respectively. `Pending` snapshots the queues and `ClearQueue` removes and returns them. `Cancel` aborts the run; `Abort` also closes the queue atomically and returns the instructions that had not been delivered, so a UI can restore their text. Queue methods are safe to call from event handlers and from other goroutines, and they never interrupt an in-flight provider request or tool execution. See [Execution Control](#execution-control) for the exact delivery points.
 

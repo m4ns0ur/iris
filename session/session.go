@@ -168,6 +168,13 @@ type Manager interface {
 // SessionManager is an alias for Manager.
 type SessionManager = Manager
 
+// ToolOutputProvider optionally supplies the persistent directory used for
+// full tool output. Managers that do not implement it use the agent's
+// ephemeral tool-output store.
+type ToolOutputProvider interface {
+	ToolOutputDir(sessionID string) (string, error)
+}
+
 // NewSession creates an unsaved session.
 func NewSession(options CreateOptions) *Session {
 	now := time.Now().UTC()

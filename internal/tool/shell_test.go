@@ -41,11 +41,10 @@ func newShellTestRegistry(t *testing.T, shell policy.ShellOptions, approver poli
 func executeShell(t *testing.T, registry *ToolRegistry, ctx context.Context, command string) (map[string]any, error) {
 	t.Helper()
 
-	shell := registry.Get("shell")
-	if shell == nil {
+	if registry.Get("shell") == nil {
 		t.Fatal("shell tool not registered")
 	}
-	return shell.Execute(ctx, map[string]any{"command": command})
+	return ExecuteWithTools(ctx, registry, "shell", map[string]any{"command": command})
 }
 
 func TestShellToolTimeoutKillsProcess(t *testing.T) {

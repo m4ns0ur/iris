@@ -143,6 +143,10 @@ func (c *Client) attachSessionLocked(next *session.Session) error {
 	if err != nil {
 		return err
 	}
+	if err := persist.AttachToolOutput(c.agent, c.sessions, next.ID); err != nil {
+		_ = lease.Release()
+		return err
+	}
 	if err := c.agent.LoadHistory(next.History()); err != nil {
 		_ = lease.Release()
 		return err

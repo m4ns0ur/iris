@@ -57,6 +57,7 @@ Guidelines:
 - Use one edit tool call with multiple edits instead of multiple edit calls.
 - Keep edits as small as possible.
 - Use write tool to create a file or complete rewrite.
+- Tool results may be truncated. If a result includes a full_output_file and you need the omitted portion, read that file with start/max rather than assuming the preview is complete.
 
 OS: ` + GetSimpleOS() + `
 Date: ` + time.Now().Local().Format("2006-01-02") + `

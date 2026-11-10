@@ -17,8 +17,10 @@ var _ apitype.Registry = (*ToolRegistry)(nil)
 
 // ToolRegistry manages and provides access to available tools.
 type ToolRegistry struct {
-	tools map[string]Tool
-	temp  *TempStore
+	tools  map[string]Tool
+	temp   *TempStore
+	policy *policy.Policy
+	output outputPolicy
 }
 
 // NewToolRegistry creates a new empty tool registry.
@@ -51,6 +53,8 @@ func NewDefaultRegistry(pol *policy.Policy, extra ...Tool) (*ToolRegistry, error
 	}
 
 	registry.temp = temp
+	registry.policy = pol
+	registry.output = newOutputPolicy(pol.ShellOptions())
 
 	registry.Register("read", NewFileReadTool(pol))
 	registry.Register("edit", NewFileEditTool(pol))
@@ -113,7 +117,26 @@ func (r *ToolRegistry) Specs() []provider.Tool {
 	return tools
 }
 
-// TempDir returns the directory used for captured shell output.
+// SetOutputDir redirects full tool output to a persistent directory and grants
+// the read tool access to it. The client/TUI use the session tool-output
+// directory after loading a session.
+func (r *ToolRegistry) SetOutputDir(dir string) error {
+	if r == nil || r.temp == nil {
+		return fmt.Errorf("tool registry has no output store")
+	}
+	if r.policy == nil {
+		return fmt.Errorf("tool registry has no security policy")
+	}
+	if err := r.temp.SetDir(dir); err != nil {
+		return err
+	}
+	if err := r.policy.AddReadRoot(dir); err != nil {
+		return err
+	}
+	return nil
+}
+
+// TempDir returns the directory used for full tool output.
 func (r *ToolRegistry) TempDir() string {
 	if r == nil || r.temp == nil {
 		return ""
@@ -121,8 +144,8 @@ func (r *ToolRegistry) TempDir() string {
 	return r.temp.Dir()
 }
 
-// Close releases resources owned by the registry, including captured output
-// files created by the shell tool.
+// Close releases resources owned by the registry. Ephemeral tool output is
+// removed; a persistent session tool-output directory is kept.
 func (r *ToolRegistry) Close() error {
 	if r == nil || r.temp == nil {
 		return nil
@@ -153,5 +176,9 @@ func ExecuteWithTools(
 		}
 	}()
 
-	return t.Execute(ctx, args)
+	result, err = t.Execute(ctx, args)
+	if err != nil || result == nil {
+		return result, err
+	}
+	return registry.applyOutput(name, result), nil
 }

@@ -172,6 +172,15 @@ type RecorderAgent interface {
 	SetRecorder(recorder Recorder)
 }
 
+// ToolOutputAgent is implemented by agents that can persist full tool output
+// in the session store's tool-output directory. Embedders and the client/TUI
+// use it to keep the complete output readable after the model sees a truncated
+// result.
+type ToolOutputAgent interface {
+	Agent
+	SetToolOutputDir(dir string) error
+}
+
 // Queue is a snapshot of instructions waiting for delivery.
 type Queue struct {
 	// Steering holds instructions delivered at the next turn boundary.

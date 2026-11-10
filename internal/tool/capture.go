@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"sync"
@@ -10,14 +11,15 @@ import (
 //
 // It always retains the last tailMax bytes in memory, which bounds agent
 // context growth even if a command produces gigabytes of output. Optionally it
-// streams the first fileLimit bytes to a temp file so the full output (up to
+// streams the first fileLimit bytes to a full-output file so the full output (up to
 // the capture limit) can be inspected later.
 type captureWriter struct {
 	mu sync.Mutex
 
-	tail    []byte
-	tailMax int
-	total   int64
+	tail     []byte
+	tailMax  int
+	total    int64
+	newlines int64
 
 	file        *os.File
 	fileLimit   int64
@@ -28,6 +30,7 @@ type captureWriter struct {
 type captureSnapshot struct {
 	Tail          []byte
 	Total         int64
+	TotalLines    int
 	FileWritten   int64
 	FileErr       error
 	FileTruncated bool
@@ -52,7 +55,7 @@ func newCaptureWriter(tailMax int, file *os.File, fileLimit int) *captureWriter 
 }
 
 // Write implements io.Writer. It never returns an error for file write
-// failures: a broken temp file must not kill the child process.
+// failures: a broken output file must not kill the child process.
 func (w *captureWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -63,6 +66,7 @@ func (w *captureWriter) Write(p []byte) (int, error) {
 	}
 
 	w.total += int64(n)
+	w.newlines += int64(bytes.Count(p, []byte{'\n'}))
 
 	if n >= w.tailMax {
 		w.tail = append(w.tail[:0], p[n-w.tailMax:]...)
@@ -96,9 +100,15 @@ func (w *captureWriter) Snapshot() captureSnapshot {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	totalLines := int(w.newlines)
+	if w.total > 0 && (len(w.tail) == 0 || w.tail[len(w.tail)-1] != '\n') {
+		totalLines++
+	}
+
 	return captureSnapshot{
 		Tail:          append([]byte(nil), w.tail...),
 		Total:         w.total,
+		TotalLines:    totalLines,
 		FileWritten:   w.fileWritten,
 		FileErr:       w.fileErr,
 		FileTruncated: w.file != nil && w.total > w.fileWritten,

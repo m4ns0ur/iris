@@ -251,6 +251,10 @@ func (m *model) switchSession(next *session.Session) error {
 		return err
 	}
 	if m.agent != nil {
+		if err := persist.AttachToolOutput(m.agent, m.sessions, next.ID); err != nil {
+			_ = lease.Release()
+			return err
+		}
 		if err := m.agent.LoadHistory(next.History()); err != nil {
 			_ = lease.Release()
 			return err

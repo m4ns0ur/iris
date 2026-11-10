@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -666,5 +667,112 @@ func TestCompactionDoesNotRewriteSessionTranscript(t *testing.T) {
 	}
 	if !strings.HasPrefix(final.Entries[0].Content, "request 0 ") {
 		t.Fatalf("original transcript lost: %+v", final.Entries[0])
+	}
+}
+
+type largeOutputTool struct{}
+
+func (largeOutputTool) Name() string            { return "large" }
+func (largeOutputTool) Description() string     { return "Return large output" }
+func (largeOutputTool) FullDescription() string { return "Return large output." }
+func (largeOutputTool) Parameters() provider.Parameters {
+	return provider.Parameters{Type: "object"}
+}
+func (largeOutputTool) Execute(context.Context, map[string]any) (map[string]any, error) {
+	return map[string]any{"output": strings.Repeat("large output line\n", 10_000)}, nil
+}
+
+func TestClientStoresFullToolOutputInSession(t *testing.T) {
+	manager, err := session.NewJSONL(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewJSONL() error = %v", err)
+	}
+	pol, err := policy.New(t.TempDir(), policy.Options{
+		Mode:            policy.ModeWorkspaceWrite,
+		ExternalSandbox: true,
+	})
+	if err != nil {
+		t.Fatalf("policy.New() error = %v", err)
+	}
+	var calls atomic.Int32
+	prov := provider.ResponseFunc(func(context.Context, provider.Request) (provider.Response, error) {
+		if calls.Add(1) == 1 {
+			return provider.Response{
+				FinishReason: "tool_calls",
+				ToolCalls: []provider.ToolCall{{
+					ID:   "call_large",
+					Type: "function",
+					Function: provider.FunctionCall{
+						Name:      "large",
+						Arguments: `{}`,
+					},
+				}},
+			}, nil
+		}
+		return provider.Response{Content: "done", FinishReason: "stop"}, nil
+	})
+
+	runtimeAgent, err := internalagent.NewAgent(prov, pol, internalagent.Options{
+		Tools: []apitype.Tool{largeOutputTool{}},
+	})
+	if err != nil {
+		t.Fatalf("NewAgent() error = %v", err)
+	}
+	defer runtimeAgent.Close()
+
+	c, err := New(Options{
+		Agent:    runtimeAgent,
+		Sessions: manager,
+		SessionDefaults: session.CreateOptions{
+			Model:     "test-model",
+			Workspace: "/workspace",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	sessionID := c.SessionID()
+	if _, err := c.Run(context.Background(), "run large"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	loaded, err := manager.Open(sessionID)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	var toolEntry *session.Entry
+	for index := range loaded.Entries {
+		if loaded.Entries[index].Kind == session.EntryTool {
+			toolEntry = &loaded.Entries[index]
+			break
+		}
+	}
+	if toolEntry == nil {
+		t.Fatalf("tool entry missing: %+v", loaded.Entries)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(toolEntry.Content), &result); err != nil {
+		t.Fatalf("decode tool result: %v\n%s", err, toolEntry.Content)
+	}
+	if truncated, _ := result["truncated"].(bool); !truncated {
+		t.Fatalf("large tool result was not truncated: %+v", result)
+	}
+	path, _ := result["full_output_file"].(string)
+	if path == "" || !strings.HasPrefix(path, manager.Dir()+string(os.PathSeparator)+"tool-output"+string(os.PathSeparator)) {
+		t.Fatalf("full output path = %q, want under session tool-output", path)
+	}
+	notice, _ := result["truncation_notice"].(string)
+	if !strings.Contains(notice, "Output truncated.") || !strings.Contains(notice, path) {
+		t.Fatalf("truncation notice = %q", notice)
+	}
+	full, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+	if string(full) != strings.Repeat("large output line\n", 10_000) {
+		t.Fatalf("stored full output differs from tool output")
 	}
 }

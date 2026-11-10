@@ -43,11 +43,13 @@ type ShellSecurity struct {
 	ApprovalHook       []string
 	Timeout            time.Duration
 	ApprovalTimeout    time.Duration
-	MaxOutputBytes     int
-	MaxOutputLines     int
-	MaxCaptureBytes    int
-	TempDirTTL         time.Duration
-	Binary             string
+	// MaxOutputBytes and MaxOutputLines are shared model-visible limits for
+	// every tool result. MaxCaptureBytes bounds separately stored full output.
+	MaxOutputBytes  int
+	MaxOutputLines  int
+	MaxCaptureBytes int
+	TempDirTTL      time.Duration
+	Binary          string
 }
 
 // Options configures a Runtime.

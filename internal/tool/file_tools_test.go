@@ -87,6 +87,16 @@ func TestReadToolStartAndMaxLines(t *testing.T) {
 	if truncated, _ := result["truncated"].(bool); !truncated {
 		t.Fatal("truncated = false, want true")
 	}
+	if next, _ := result["next_start"].(int); next != 5 {
+		t.Fatalf("next_start = %v, want 5", result["next_start"])
+	}
+	notice, _ := result["truncation_notice"].(string)
+	if !strings.Contains(notice, "Output truncated") || !strings.Contains(notice, "start=5") {
+		t.Fatalf("truncation notice = %q", notice)
+	}
+	if path, _ := result["path"].(string); path == "" {
+		t.Fatal("read result has no source path")
+	}
 }
 
 func TestReadToolRejectsOutsidePath(t *testing.T) {

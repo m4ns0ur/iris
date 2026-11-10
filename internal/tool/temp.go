@@ -12,17 +12,21 @@ import (
 
 const tempSessionPrefix = "session-"
 
-// TempStore owns the per-process directory used for captured shell output.
-// The directory is removed when the store is closed, and stale directories
-// from crashed processes are removed on startup.
+// TempStore owns the directory used for full tool output. It starts as a
+// per-process temporary directory and can be redirected to a persistent
+// session-scoped directory. Ephemeral stores are removed on Close; persistent
+// stores keep their files for later retrieval. Stale ephemeral directories from
+// crashed processes are removed on startup.
 type TempStore struct {
-	dir string
+	dir        string
+	base       string
+	persistent bool
 
 	mu     sync.Mutex
 	closed bool
 }
 
-// NewTempStore creates a private session directory. ttl controls how long
+// NewTempStore creates a private ephemeral tool-output directory. ttl controls how long
 // session directories from previous runs are kept before being reaped.
 func NewTempStore(ttl time.Duration) (*TempStore, error) {
 	if ttl <= 0 {
@@ -46,14 +50,14 @@ func NewTempStore(ttl time.Duration) (*TempStore, error) {
 			continue
 		}
 
-		return &TempStore{dir: dir}, nil
+		return &TempStore{dir: dir, base: base}, nil
 	}
 
 	return nil, fmt.Errorf("create temp session: %w", lastErr)
 }
 
-// Dir is the session directory. The read tool is granted read access to it so
-// that the model can inspect full shell output.
+// Dir is the tool-output directory. The read tool is granted read access to it
+// so that the model can inspect full tool output.
 func (s *TempStore) Dir() string {
 	if s == nil {
 		return ""
@@ -63,7 +67,59 @@ func (s *TempStore) Dir() string {
 	return s.dir
 }
 
-// NewFile creates a 0600 temp file in the session directory.
+// SetDir redirects the store to a persistent directory. Files already in an
+// ephemeral store directory are not migrated; callers should set the directory
+// before running tools. The old ephemeral directory is removed.
+func (s *TempStore) SetDir(dir string) error {
+	if s == nil {
+		return errors.New("nil temp store")
+	}
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return errors.New("tool output directory is empty")
+	}
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve tool output directory: %w", err)
+	}
+	if err := os.MkdirAll(absolute, 0o700); err != nil {
+		return fmt.Errorf("create tool output directory: %w", err)
+	}
+	_ = os.Chmod(absolute, 0o700)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("temp store is closed")
+	}
+
+	old := s.dir
+	wasPersistent := s.persistent
+	s.dir = absolute
+	s.persistent = true
+
+	if !wasPersistent && old != "" && old != absolute && s.base != "" &&
+		strings.HasPrefix(old, s.base+string(os.PathSeparator)) {
+		// Only remove an empty ephemeral directory. If tools already produced
+		// output, keep the files so paths in the transcript remain readable.
+		if entries, err := os.ReadDir(old); err == nil && len(entries) == 0 {
+			_ = os.Remove(old)
+		}
+	}
+	return nil
+}
+
+// Persistent reports whether the store keeps its files after Close.
+func (s *TempStore) Persistent() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistent
+}
+
+// NewFile creates a 0600 output file in the tool-output directory.
 func (s *TempStore) NewFile(pattern string) (*os.File, error) {
 	if s == nil {
 		return nil, errors.New("nil temp store")
@@ -91,7 +147,9 @@ func (s *TempStore) Remove(path string) {
 	_ = os.Remove(path)
 }
 
-// Close removes the session directory and every file in it.
+// Close removes an ephemeral store's directory and every file in it. A
+// persistent session store is left intact so the full output remains available
+// after the run and after the process exits.
 func (s *TempStore) Close() error {
 	if s == nil {
 		return nil
@@ -105,7 +163,70 @@ func (s *TempStore) Close() error {
 	}
 	s.closed = true
 
+	if s.persistent {
+		return nil
+	}
 	return os.RemoveAll(s.dir)
+}
+
+// SaveText stores full tool output and reports how much was retained. The
+// returned path is 0600 and readable by the read tool through the store's read
+// root. maxBytes bounds the stored file; zero stores all data.
+func (s *TempStore) SaveText(prefix string, data []byte, maxBytes int) (string, int64, bool, error) {
+	if s == nil {
+		return "", 0, false, errors.New("nil temp store")
+	}
+	prefix = outputFilePrefix(prefix)
+	file, err := s.NewFile(prefix + "-*.log")
+	if err != nil {
+		return "", 0, false, err
+	}
+	path := file.Name()
+
+	limit := len(data)
+	truncated := false
+	if maxBytes > 0 && limit > maxBytes {
+		limit = maxBytes
+		truncated = true
+	}
+
+	written, writeErr := file.Write(data[:limit])
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		s.Remove(path)
+		return "", 0, false, fmt.Errorf("write tool output: %w", writeErr)
+	}
+	return path, int64(written), truncated, nil
+}
+
+func outputFilePrefix(value string) string {
+	value = strings.TrimSpace(value)
+	var builder strings.Builder
+	for _, char := range value {
+		switch {
+		case char >= 'a' && char <= 'z':
+			builder.WriteRune(char)
+		case char >= 'A' && char <= 'Z':
+			builder.WriteRune(char)
+		case char >= '0' && char <= '9':
+			builder.WriteRune(char)
+		case char == '-', char == '_':
+			builder.WriteRune(char)
+		}
+		if builder.Len() >= 32 {
+			break
+		}
+	}
+	if builder.Len() == 0 {
+		return "tool-output"
+	}
+	return builder.String()
 }
 
 // tempBaseDirs lists candidate parent directories for shell output. The user

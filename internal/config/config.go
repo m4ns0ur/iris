@@ -139,11 +139,13 @@ type ShellSettings struct {
 	ApprovalHook           []string `mapstructure:"approval_hook"`
 	TimeoutSeconds         int      `mapstructure:"timeout_seconds"`
 	ApprovalTimeoutSeconds int      `mapstructure:"approval_timeout_seconds"`
-	MaxOutputBytes         int      `mapstructure:"max_output_bytes"`
-	MaxOutputLines         int      `mapstructure:"max_output_lines"`
-	MaxCaptureBytes        int      `mapstructure:"max_capture_bytes"`
-	TempFileTTLMinutes     int      `mapstructure:"temp_file_ttl_minutes"`
-	ShellBinary            string   `mapstructure:"binary"`
+	// MaxOutputBytes and MaxOutputLines are the shared model-visible limits
+	// for every tool result. MaxCaptureBytes bounds stored full output.
+	MaxOutputBytes     int    `mapstructure:"max_output_bytes"`
+	MaxOutputLines     int    `mapstructure:"max_output_lines"`
+	MaxCaptureBytes    int    `mapstructure:"max_capture_bytes"`
+	TempFileTTLMinutes int    `mapstructure:"temp_file_ttl_minutes"`
+	ShellBinary        string `mapstructure:"binary"`
 }
 
 var (

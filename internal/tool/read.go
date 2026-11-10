@@ -35,7 +35,7 @@ func (t *FileReadTool) Description() string {
 }
 
 func (t *FileReadTool) FullDescription() string {
-	return "Read a file inside the workspace. Output is limited to 1000 lines or 25KB; use start/max to read parts. Paths outside the workspace are rejected."
+	return "Read a file inside the workspace. Output is limited to 1000 lines or 25KB; when truncated, the result includes a notice and next_start. Use start/max to read parts. Paths outside the workspace are rejected."
 }
 
 func (t *FileReadTool) Parameters() llm.Parameters {
@@ -153,9 +153,28 @@ func (t *FileReadTool) Execute(ctx context.Context, args map[string]any) (map[st
 		"truncated":  truncated,
 		"start_line": start,
 		"lines":      linesRead,
+		"path":       resolvedPath,
 	}
 	if linesRead > 0 {
-		result["end_line"] = start + linesRead - 1
+		endLine := start + linesRead - 1
+		result["end_line"] = endLine
+		if truncated {
+			nextStart := endLine + 1
+			result["next_start"] = nextStart
+			result["truncation_notice"] = fmt.Sprintf(
+				"Output truncated. Showing lines %d-%d of %s. Use start=%d to continue reading.",
+				start,
+				endLine,
+				resolvedPath,
+				nextStart,
+			)
+		}
+	} else if truncated {
+		result["truncation_notice"] = fmt.Sprintf(
+			"Output truncated. The line at %d exceeds the %d-byte read limit; use a byte-oriented tool or a smaller range.",
+			start,
+			defaultReadBytes,
+		)
 	}
 
 	return result, nil

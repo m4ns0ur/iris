@@ -64,17 +64,18 @@ type ShellOptions struct {
 	// ApprovalTimeout bounds how long Iris waits for an approval decision.
 	ApprovalTimeout time.Duration
 
-	// MaxOutputBytes bounds the output returned to the model.
+	// MaxOutputBytes bounds the model-visible text returned by any tool.
 	MaxOutputBytes int
 
-	// MaxOutputLines bounds the number of output lines returned to the model.
+	// MaxOutputLines bounds the number of model-visible lines returned by any
+	// tool.
 	MaxOutputLines int
 
-	// MaxCaptureBytes bounds the full output written to a temp file.
+	// MaxCaptureBytes bounds the full output stored separately for retrieval.
 	MaxCaptureBytes int
 
-	// TempDirTTL controls removal of temp directories left behind by Iris
-	// processes that exited abnormally.
+	// TempDirTTL controls removal of ephemeral tool-output directories left
+	// behind by Iris processes that exited abnormally.
 	TempDirTTL time.Duration
 
 	// ShellBinary overrides the shell used to execute commands. Empty means
