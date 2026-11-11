@@ -30,7 +30,7 @@ Flags:
 Use "iris [command] --help" for more information about a command.
 ```
 
-The flags are persistent and accepted by every subcommand. `--model` overrides `default_model`, and `--base-url` overrides `base_url`.
+The flags are persistent and accepted by every subcommand. `--model` overrides `default_model`, and `--base-url` overrides `base_url`. `--debug` enables debug-level logging; each session writes its own log under `~/.iris/logs/`.
 
 The headless modes share the same agent, tools, security policy, resources, context manager, and durable sessions as the TUI. Each active session holds an exclusive writer lease while the process uses it.
 

@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/internal/persist"
 	"github.com/m4ns0ur/iris/provider"
 	"github.com/m4ns0ur/iris/resource"
@@ -288,6 +289,7 @@ func (m *model) switchSession(next *session.Session) error {
 	} else if previousLease != nil {
 		_ = previousLease.Release()
 	}
+	logger.SetSession(next.ID)
 	return nil
 }
 
@@ -300,6 +302,9 @@ func (m *model) releaseSession() {
 	}
 	m.lease = nil
 	persist.Attach(m.agent, nil)
+	if m.currentSession != nil {
+		logger.ClearSession(m.currentSession.ID)
+	}
 }
 
 func (m *model) loadTranscript(loaded *session.Session) {

@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
 	"github.com/m4ns0ur/iris/agent"
+	"github.com/m4ns0ur/iris/internal/agentdir"
 	"github.com/m4ns0ur/iris/internal/config"
 	"github.com/m4ns0ur/iris/internal/contextmgr"
 	"github.com/m4ns0ur/iris/internal/llm"
@@ -73,18 +73,21 @@ func setupEnvironment() (*environment, error) {
 
 	cfg := config.GetConfig()
 
-	home, err := os.UserHomeDir()
+	agentDir, err := agentdir.Dir()
 	if err != nil {
-		return nil, fmt.Errorf("determine home directory: %w", err)
+		return nil, fmt.Errorf("determine agent directory: %w", err)
 	}
 
 	sessionDir := cfg.Session.Dir
 	if sessionDir == "" {
-		sessionDir = filepath.Join(home, IrisHome, "sessions")
+		sessionDir, err = agentdir.Sessions()
+		if err != nil {
+			return nil, fmt.Errorf("determine session directory: %w", err)
+		}
 	}
 
 	resources, err := resource.Load(resource.Options{
-		GlobalDir: filepath.Join(home, IrisHome),
+		GlobalDir: agentDir,
 		Workdir:   workdir,
 	})
 	if err != nil {

@@ -143,4 +143,4 @@ Or with CLI flags:
   --model model-name
 ```
 
-`--workdir` sets the workspace used by tools, shell commands, and project resources. It does not change the process working directory, so `iris_debug.log` is still written where Iris was launched.
+`--workdir` sets the workspace used by tools, shell commands, and project resources. It does not change the process working directory or Iris's agent directory, so logs are still written under `~/.iris/logs/` (one file per session).

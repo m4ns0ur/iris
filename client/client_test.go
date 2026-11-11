@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/m4ns0ur/iris/agent"
 	internalagent "github.com/m4ns0ur/iris/internal/agent"
+	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/internal/policy"
 	"github.com/m4ns0ur/iris/provider"
 	"github.com/m4ns0ur/iris/session"
@@ -162,6 +164,37 @@ func newTestClient(t *testing.T) (*Client, *fakeAgent, *session.JSONLManager) {
 		t.Fatalf("New() error = %v", err)
 	}
 	return c, fake, manager
+}
+
+func TestClientRoutesLogsToActiveSession(t *testing.T) {
+	c, _, _ := newTestClient(t)
+	sessionID := c.SessionID()
+
+	logger.Logger.Info("session-log-marker")
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	logger.Logger.Info("process-log-marker")
+
+	dir := os.Getenv("IRIS_LOG_DIR")
+	sessionLog, err := os.ReadFile(filepath.Join(dir, sessionID+".log"))
+	if err != nil {
+		t.Fatalf("read session log: %v", err)
+	}
+	if !strings.Contains(string(sessionLog), "session-log-marker") {
+		t.Fatalf("session log does not contain its marker: %s", sessionLog)
+	}
+	if strings.Contains(string(sessionLog), "process-log-marker") {
+		t.Fatalf("session log contains records written after Close: %s", sessionLog)
+	}
+
+	processLog, err := os.ReadFile(filepath.Join(dir, "iris.log"))
+	if err != nil {
+		t.Fatalf("read process log: %v", err)
+	}
+	if !strings.Contains(string(processLog), "process-log-marker") {
+		t.Fatalf("process log does not contain its marker: %s", processLog)
+	}
 }
 
 func TestClientRunPersistsSessionAndReturnsResult(t *testing.T) {

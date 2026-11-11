@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/m4ns0ur/iris/agent"
+	"github.com/m4ns0ur/iris/internal/agentdir"
 	"github.com/m4ns0ur/iris/internal/config"
 	"github.com/m4ns0ur/iris/internal/contextmgr"
 	"github.com/m4ns0ur/iris/internal/llm"
@@ -17,8 +18,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
-
-const IrisHome = ".iris"
 
 var (
 	Logger  = logger.Logger
@@ -49,13 +48,12 @@ func init() {
 }
 
 func initConfig() {
-	home, err := os.UserHomeDir()
+	configDir, err := agentdir.Dir()
 	if err != nil {
-		Logger.Error("cannot determine the home dir:", "error", err)
+		Logger.Error("cannot determine the agent dir:", "error", err)
 		Exit()
 	}
 
-	configDir := filepath.Join(home, IrisHome)
 	viper.AddConfigPath(configDir)
 	viper.SetConfigName("settings")
 	viper.SetConfigType("toml")

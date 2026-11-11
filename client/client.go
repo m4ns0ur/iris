@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/m4ns0ur/iris/agent"
+	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/internal/persist"
 	"github.com/m4ns0ur/iris/provider"
 	"github.com/m4ns0ur/iris/session"
@@ -113,6 +114,7 @@ func New(options Options) (*Client, error) {
 			}
 			c.session = options.InitialSession
 			c.persisted = len(c.agent.History())
+			logger.SetSession(c.session.ID)
 		}
 		return c, nil
 	}
@@ -176,6 +178,7 @@ func (c *Client) attachSessionLocked(next *session.Session) error {
 	if previousLease != nil {
 		_ = previousLease.Release()
 	}
+	logger.SetSession(next.ID)
 	return nil
 }
 
@@ -654,6 +657,9 @@ func (c *Client) Close() error {
 	c.recorder = nil
 	c.lease = nil
 	c.recording = false
+	if c.session != nil {
+		logger.ClearSession(c.session.ID)
+	}
 	return err
 }
 

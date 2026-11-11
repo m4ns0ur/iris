@@ -100,4 +100,6 @@ Iris also warns about `danger-full-access`, `security.shell.mode = 'allow'`, and
 
 ## Logging and sensitive data
 
-Iris writes `iris_debug.log` in the process working directory (not `--workdir`), in append mode with `0600` permissions. The log is JSON lines. `--debug` enables debug-level logging; otherwise only info and above are written. Debug logs include LLM payload previews and tool output, so treat the file as sensitive and avoid sharing it.
+Iris writes logs under `~/.iris/logs/`, outside the workspace. While a session is active, records go to that session's own append-only log, `~/.iris/logs/<session-id>.log`; switching, resuming, or forking a session switches the log file so each session's diagnostics stay together. Records written outside a session, such as startup, configuration, and shutdown messages, go to `~/.iris/logs/iris.log`. The directory is created with `0700` permissions and files with `0600`. Log files are JSON lines. Set `IRIS_LOG_DIR` to use a different directory.
+
+`--debug` enables debug-level logging; otherwise only info and above are written. Debug logs include LLM payload previews and tool output, so treat the files as sensitive and avoid sharing them. Workspace `iris_debug.log` files written by older versions are no longer used or created.

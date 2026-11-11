@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/m4ns0ur/iris/agent"
+	"github.com/m4ns0ur/iris/internal/logger"
 	"github.com/m4ns0ur/iris/provider"
 	"github.com/m4ns0ur/iris/resource"
 	"github.com/m4ns0ur/iris/session"
@@ -98,6 +100,35 @@ func userMessage(text string) provider.Message {
 	return provider.Message{
 		Role:    "user",
 		Content: []provider.Content{{Type: "text", Text: text}},
+	}
+}
+
+func TestModelRoutesLogsToActiveSession(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	sessionID := m.currentSession.ID
+
+	logger.Logger.Info("session-log-marker")
+	m.releaseSession()
+	logger.Logger.Info("process-log-marker")
+
+	dir := os.Getenv("IRIS_LOG_DIR")
+	sessionLog, err := os.ReadFile(filepath.Join(dir, sessionID+".log"))
+	if err != nil {
+		t.Fatalf("read session log: %v", err)
+	}
+	if !strings.Contains(string(sessionLog), "session-log-marker") {
+		t.Fatalf("session log does not contain its marker: %s", sessionLog)
+	}
+	if strings.Contains(string(sessionLog), "process-log-marker") {
+		t.Fatalf("session log contains records written after release: %s", sessionLog)
+	}
+
+	processLog, err := os.ReadFile(filepath.Join(dir, "iris.log"))
+	if err != nil {
+		t.Fatalf("read process log: %v", err)
+	}
+	if !strings.Contains(string(processLog), "process-log-marker") {
+		t.Fatalf("process log does not contain its marker: %s", processLog)
 	}
 }
 
