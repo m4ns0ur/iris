@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/m4ns0ur/iris/internal/agentdir"
 )
 
 type access int
@@ -43,11 +45,16 @@ func (p *Policy) resolve(path string, kind access) (string, error) {
 	mode, root, readRoots, writeRoots := p.rootsSnapshot()
 
 	if kind == accessWrite && mode == ModeReadOnly {
+		settings := "settings.toml"
+		if dir, err := agentdir.Dir(); err == nil {
+			settings = filepath.Join(dir, "settings.toml")
+		}
 		return "", fmt.Errorf(
-			"%w: cannot modify %q; set security.mode = %q in ~/.iris/settings.toml to enable writes",
+			"%w: cannot modify %q; set security.mode = %q in %s to enable writes",
 			ErrReadOnlyMode,
 			path,
 			ModeWorkspaceWrite,
+			settings,
 		)
 	}
 

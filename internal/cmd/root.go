@@ -23,6 +23,7 @@ var (
 	Logger  = logger.Logger
 	debug   bool
 	workdir string
+	homeDir string
 	baseURL string
 	model   string
 )
@@ -39,6 +40,7 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "Enable debug logging")
+	rootCmd.PersistentFlags().StringVar(&homeDir, "home", "", "Set the Iris home directory (Defaults to ~/.iris)")
 	rootCmd.PersistentFlags().StringVarP(&workdir, "workdir", "w", "", "Set the working directory for the agent (Defaults to current directory)")
 	rootCmd.PersistentFlags().StringVarP(&baseURL, "base-url", "b", "", "Set the LLM API URL (Defaults to http://127.0.0.1:8080/v1)")
 	rootCmd.PersistentFlags().StringVarP(&model, "model", "m", "", "Set the LLM model name (e.g. unsloth/Qwen3.5-9B-GGUF:UD-Q5_K_XL)")
@@ -48,6 +50,13 @@ func init() {
 }
 
 func initConfig() {
+	if homeDir != "" {
+		if err := agentdir.SetHome(homeDir); err != nil {
+			Logger.Error("invalid home directory:", "error", err)
+			Exit()
+		}
+	}
+
 	configDir, err := agentdir.Dir()
 	if err != nil {
 		Logger.Error("cannot determine the agent dir:", "error", err)

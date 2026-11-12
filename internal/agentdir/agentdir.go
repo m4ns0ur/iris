@@ -1,24 +1,75 @@
 // Package agentdir resolves Iris's per-user directory. Iris keeps all of its
 // agent-owned files (configuration, resources, sessions, logs) under a single
-// directory in the user's home so that workspaces stay free of runtime state.
+// directory so that workspaces stay free of runtime state.
 package agentdir
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 )
 
-// Name is the per-user agent directory created inside the user's home.
+// Name is the default agent directory created inside the user's home.
 const Name = ".iris"
+
+// HomeEnv overrides the agent directory. It is resolved before the home
+// directory fallback.
+const HomeEnv = "IRIS_HOME"
 
 const (
 	logsDir     = "logs"
 	sessionsDir = "sessions"
 )
 
-// Dir returns the agent directory, usually ~/.iris.
+var (
+	overrideMu sync.RWMutex
+	override   string
+)
+
+// SetHome overrides the agent directory for this process. An empty dir clears
+// the override. Relative paths are resolved against the current directory.
+func SetHome(dir string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		setOverride("")
+		return nil
+	}
+
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve home directory %q: %w", dir, err)
+	}
+	setOverride(absolute)
+	return nil
+}
+
+func setOverride(dir string) {
+	overrideMu.Lock()
+	override = dir
+	overrideMu.Unlock()
+}
+
+func currentOverride() string {
+	overrideMu.RLock()
+	defer overrideMu.RUnlock()
+	return override
+}
+
+// Dir returns the agent directory. The precedence is the process override set
+// with SetHome, then IRIS_HOME, then ~/.iris.
 func Dir() (string, error) {
+	if dir := currentOverride(); dir != "" {
+		return dir, nil
+	}
+	if dir := strings.TrimSpace(os.Getenv(HomeEnv)); dir != "" {
+		absolute, err := filepath.Abs(dir)
+		if err != nil {
+			return "", fmt.Errorf("resolve %s: %w", HomeEnv, err)
+		}
+		return absolute, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("determine home directory: %w", err)

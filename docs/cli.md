@@ -24,13 +24,14 @@ Flags:
   -b, --base-url string   Set the LLM API URL (Defaults to http://127.0.0.1:8080/v1)
   -d, --debug             Enable debug logging
   -h, --help              help for iris
+      --home string       Set the Iris home directory (Defaults to ~/.iris)
   -m, --model string      Set the LLM model name (e.g. unsloth/Qwen3.5-9B-GGUF:UD-Q5_K_XL)
   -w, --workdir string    Set the working directory for the agent (Defaults to current directory)
 
 Use "iris [command] --help" for more information about a command.
 ```
 
-The flags are persistent and accepted by every subcommand. `--model` overrides `default_model`, and `--base-url` overrides `base_url`. `--debug` enables debug-level logging; each session writes its own log under `~/.iris/logs/`.
+The flags are persistent and accepted by every subcommand. `--model` overrides `default_model`, and `--base-url` overrides `base_url`. `--home` sets the Iris home directory and takes precedence over `IRIS_HOME`; both default to `~/.iris`. `--debug` enables debug-level logging; each session writes its own log under `$IRIS_HOME/logs/`.
 
 The headless modes share the same agent, tools, security policy, resources, context manager, and durable sessions as the TUI. Each active session holds an exclusive writer lease while the process uses it.
 

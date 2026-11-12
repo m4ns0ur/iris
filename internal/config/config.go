@@ -109,7 +109,8 @@ type ContextSettings struct {
 
 // SessionSettings controls persistent session storage.
 type SessionSettings struct {
-	// Dir is the session store directory. Empty uses ~/.iris/sessions.
+	// Dir is the session store directory. Empty uses $IRIS_HOME/sessions,
+	// which defaults to ~/.iris/sessions.
 	Dir string `mapstructure:"dir"`
 }
 

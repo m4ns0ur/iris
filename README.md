@@ -27,8 +27,10 @@ make build
 ./bin/iris
 ```
 
-On first run Iris creates `~/.iris/settings.toml`. Add a `default_model` and a
-matching `[[models]]` entry, then start the TUI:
+On first run Iris creates `$IRIS_HOME/settings.toml`, which defaults to
+`~/.iris/settings.toml`. Set `IRIS_HOME` or pass `--home` to keep Iris files
+elsewhere. Add a `default_model` and a matching `[[models]]` entry, then start
+the TUI:
 
 ```toml
 base_url = 'http://127.0.0.1:8080/v1'

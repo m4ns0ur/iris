@@ -5,13 +5,26 @@
 ---
 
 
-Configuration is TOML, loaded from `~/.iris/settings.toml`. Iris creates the file with defaults on first run. Missing files, directories, and resources are not errors.
+Configuration is TOML, loaded from `$IRIS_HOME/settings.toml`, which defaults to `~/.iris/settings.toml`. Iris creates the file with defaults on first run. Missing files, directories, and resources are not errors.
+
+## Home directory
+
+Iris keeps agent-owned files under `~/.iris` by default. Move the whole directory with `--home` or `IRIS_HOME`:
+
+```bash
+iris --home /path/to/iris-home ...
+IRIS_HOME=/path/to/iris-home iris ...
+```
+
+`--home` takes precedence over `IRIS_HOME`, and both take precedence over `~/.iris`. Relative paths are resolved against the current directory. The home directory contains `settings.toml`, the global `SYSTEM.md`, global skills and prompts, the default session store, and logs. More specific overrides still apply: `session.dir` (or `IRIS_SESSION_DIR`) for sessions and `IRIS_LOG_DIR` for logs.
+
+Iris does not implement the XDG Base Directory specification. To use an XDG-style location, point `IRIS_HOME` at it, for example `IRIS_HOME="$XDG_CONFIG_HOME/iris"`.
 
 Precedence (highest first):
 
 1. CLI flags (`--base-url`, `--model`)
 2. `IRIS_*` environment variables
-3. `~/.iris/settings.toml`
+3. `$IRIS_HOME/settings.toml` (`~/.iris/settings.toml` by default)
 4. Built-in defaults
 
 ## Top-level
@@ -88,13 +101,16 @@ These limits are the common tool-output policy and apply to every tool result, n
 | `context.compact_at` | `0.85` | Fraction of the prompt budget that triggers compaction. |
 | `context.keep_recent_tokens` | `16384` | Recent conversation kept verbatim during compaction. |
 | `context.summary_max_tokens` | `2048` | Output budget for compaction summaries. |
-| `session.dir` | `""` | Session store directory. Empty uses `~/.iris/sessions`. |
+| `session.dir` | `""` | Session store directory. Empty uses `$IRIS_HOME/sessions`, which defaults to `~/.iris/sessions`. |
 
 ## Environment variables
 
 Every known configuration key can be overridden with an `IRIS_`-prefixed environment variable; dots become underscores and keys are upper-cased. For example:
 
 ```bash
+IRIS_HOME=/path/to/iris-home
+IRIS_LOG_DIR=/path/to/logs
+IRIS_SESSION_DIR=/path/to/sessions
 IRIS_BASE_URL=http://127.0.0.1:11434/v1
 IRIS_DEFAULT_MODEL='unsloth/Qwen3.5-9B-GGUF:Q5_K_M'
 IRIS_SECURITY_MODE=read-only
@@ -104,4 +120,4 @@ IRIS_AGENT_MAX_TURNS=50
 IRIS_CONTEXT_RESERVE_TOKENS=4096
 ```
 
-Viper resolves environment variables for keys that are known through the config file or built-in defaults. The `[[models]]` list is not set through environment variables.
+`IRIS_HOME` and `IRIS_LOG_DIR` are process-level path overrides rather than configuration keys. Viper resolves environment variables for keys that are known through the config file or built-in defaults. The `[[models]]` list is not set through environment variables.

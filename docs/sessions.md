@@ -5,7 +5,7 @@
 ---
 
 
-Sessions are persisted as one append-only JSONL journal per conversation under `~/.iris/sessions` by default. Override the location with:
+Sessions are persisted as one append-only JSONL journal per conversation under `$IRIS_HOME/sessions` (`~/.iris/sessions` by default). Override the location with:
 
 ```toml
 [session]
@@ -14,7 +14,7 @@ dir = '/path/to/sessions'
 
 The session directory is created with `0700` permissions, session files with `0600`, and per-session lock files with `0600`. A session header and full rewrites are written atomically via a temp file, file sync, rename, and directory sync. Individual entries are appended and fsynced.
 
-Logs follow the same per-session split. While a session is active, its debug records are appended to `~/.iris/logs/<session-id>.log`; resuming or forking a session opens its own log file. Records written outside a session go to `~/.iris/logs/iris.log`. The log location is independent of `session.dir`.
+Logs follow the same per-session split. While a session is active, its debug records are appended to `$IRIS_HOME/logs/<session-id>.log`; resuming or forking a session opens its own log file. Records written outside a session go to `$IRIS_HOME/logs/iris.log`. The log location follows the Iris home directory and is independent of `session.dir`.
 
 ## Durability and crash recovery
 

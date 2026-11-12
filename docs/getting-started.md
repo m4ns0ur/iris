@@ -38,7 +38,7 @@ Any OpenAI-compatible endpoint works; set `base_url` accordingly (Ollama, for ex
 
 ### 3. Configure Iris
 
-On first run Iris creates `~/.iris/settings.toml` containing the defaults, but no models. Add at least a `default_model` and a matching `[[models]]` entry:
+On first run Iris creates `$IRIS_HOME/settings.toml`, which defaults to `~/.iris/settings.toml`, containing the defaults but no models. To keep Iris files outside your home directory, set `IRIS_HOME` or pass `--home`. Add at least a `default_model` and a matching `[[models]]` entry:
 
 ```toml
 base_url = 'http://127.0.0.1:8080/v1'
@@ -103,7 +103,7 @@ temp_file_ttl_minutes = 1440
 # binary = '/bin/bash'
 
 [session]
-# Empty uses ~/.iris/sessions.
+# Empty uses $IRIS_HOME/sessions (~/.iris/sessions by default).
 dir = ''
 
 [context]
@@ -143,4 +143,4 @@ Or with CLI flags:
   --model model-name
 ```
 
-`--workdir` sets the workspace used by tools, shell commands, and project resources. It does not change the process working directory or Iris's agent directory, so logs are still written under `~/.iris/logs/` (one file per session).
+`--workdir` sets the workspace used by tools, shell commands, and project resources. It does not change the process working directory or Iris's agent directory, so logs are still written under `$IRIS_HOME/logs/` (`~/.iris/logs/` by default, one file per session).

@@ -7,8 +7,19 @@ import (
 	"testing"
 )
 
+// isolateHome clears process overrides so tests do not depend on order or on
+// the developer's environment.
+func isolateHome(t *testing.T) {
+	t.Helper()
+
+	_ = SetHome("")
+	t.Cleanup(func() { _ = SetHome("") })
+	t.Setenv(HomeEnv, "")
+}
+
 func setHome(t *testing.T, home string) {
 	t.Helper()
+	isolateHome(t)
 	if runtime.GOOS == "windows" {
 		t.Setenv("USERPROFILE", home)
 		return
@@ -26,6 +37,84 @@ func TestDir(t *testing.T) {
 	}
 	if want := filepath.Join(home, Name); dir != want {
 		t.Fatalf("Dir() = %q, want %q", dir, want)
+	}
+}
+
+func TestDirUsesHomeEnv(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "custom-home")
+	isolateHome(t)
+	t.Setenv(HomeEnv, custom)
+
+	dir, err := Dir()
+	if err != nil {
+		t.Fatalf("Dir() error = %v", err)
+	}
+	if dir != custom {
+		t.Fatalf("Dir() = %q, want %q", dir, custom)
+	}
+
+	logs, err := Logs()
+	if err != nil {
+		t.Fatalf("Logs() error = %v", err)
+	}
+	if want := filepath.Join(custom, "logs"); logs != want {
+		t.Fatalf("Logs() = %q, want %q", logs, want)
+	}
+
+	sessions, err := Sessions()
+	if err != nil {
+		t.Fatalf("Sessions() error = %v", err)
+	}
+	if want := filepath.Join(custom, "sessions"); sessions != want {
+		t.Fatalf("Sessions() = %q, want %q", sessions, want)
+	}
+}
+
+func TestSetHomeOverridesHomeEnv(t *testing.T) {
+	envDir := filepath.Join(t.TempDir(), "env-home")
+	flagDir := filepath.Join(t.TempDir(), "flag-home")
+
+	isolateHome(t)
+	t.Setenv(HomeEnv, envDir)
+	if err := SetHome(flagDir); err != nil {
+		t.Fatalf("SetHome() error = %v", err)
+	}
+
+	dir, err := Dir()
+	if err != nil {
+		t.Fatalf("Dir() error = %v", err)
+	}
+	if dir != flagDir {
+		t.Fatalf("Dir() with override = %q, want %q", dir, flagDir)
+	}
+
+	if err := SetHome(""); err != nil {
+		t.Fatalf("clear override error = %v", err)
+	}
+	dir, err = Dir()
+	if err != nil {
+		t.Fatalf("Dir() error = %v", err)
+	}
+	if dir != envDir {
+		t.Fatalf("Dir() after clearing override = %q, want %q", dir, envDir)
+	}
+}
+
+func TestSetHomeResolvesRelativePath(t *testing.T) {
+	isolateHome(t)
+	if err := SetHome(filepath.Join(".", "relative-home")); err != nil {
+		t.Fatalf("SetHome() error = %v", err)
+	}
+
+	dir, err := Dir()
+	if err != nil {
+		t.Fatalf("Dir() error = %v", err)
+	}
+	if !filepath.IsAbs(dir) {
+		t.Fatalf("Dir() = %q, want an absolute path", dir)
+	}
+	if filepath.Base(dir) != "relative-home" {
+		t.Fatalf("Dir() = %q, want it to end in relative-home", dir)
 	}
 }
 
