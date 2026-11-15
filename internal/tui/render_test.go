@@ -373,10 +373,11 @@ func TestSessionsAndStatusCommands(t *testing.T) {
 
 	m.contextWindow = 75_000
 	m.contextTokens = 18_400
+	m.contextTrigger = 56_700
 	m.policy = "workspace-write sandbox · shell approval"
 	updated, _ = m.handleCommand("/status")
 	m = updated.(*model)
-	for _, want := range []string{"Status:", "test-model", "/workspace", "workspace-write", "18.4k", "75k"} {
+	for _, want := range []string{"Status:", "test-model", "/workspace", "workspace-write", "18.4k", "75k", "56.7k prompt tokens"} {
 		if !containsNotice(m, want) {
 			t.Fatalf("/status missing %q: %+v", want, m.messages)
 		}

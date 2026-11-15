@@ -31,6 +31,7 @@ type environment struct {
 	agent           agent.Agent
 	sessionDefaults session.CreateOptions
 	contextWindow   int
+	contextTrigger  int
 }
 
 func (e *environment) Close() {
@@ -122,6 +123,15 @@ func setupEnvironment() (*environment, error) {
 	if contextWindow <= 0 {
 		contextWindow = contextmgr.DefaultWindow
 	}
+	// Derive the compaction trigger from the same normalized policy the agent
+	// uses, so /status reports the size that actually starts a pass.
+	contextStats := contextmgr.New(contextmgr.Config{
+		Window:           contextWindow,
+		ReserveTokens:    cfg.Context.ReserveTokens,
+		CompactAt:        cfg.Context.CompactAt,
+		KeepRecentTokens: cfg.Context.KeepRecentTokens,
+		SummaryMaxTokens: cfg.Context.SummaryMaxTokens,
+	}).Stats()
 
 	sessionDefaults := session.CreateOptions{
 		Model:         cfg.DefaultModel,
@@ -156,6 +166,7 @@ func setupEnvironment() (*environment, error) {
 		rt:              rt,
 		sessionDefaults: sessionDefaults,
 		contextWindow:   contextWindow,
+		contextTrigger:  contextStats.TriggerTokens,
 	}
 
 	for _, warning := range rt.Warnings() {
@@ -189,6 +200,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		SessionDefaults: env.sessionDefaults,
 		Resources:       env.resources,
 		ContextWindow:   env.contextWindow,
+		ContextTrigger:  env.contextTrigger,
 		Policy:          env.policySummary(),
 		SessionDir:      env.sessions.Dir(),
 	})

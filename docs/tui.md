@@ -33,7 +33,7 @@ The status footer shows the active model, workspace basename, context usage, and
 
 Color reinforces the distinction: reasoning and compaction are yellow, tooling is purple, canceling is red, and thinking/responding are orange. Context usage turns yellow near the compaction threshold and red near the limit. The footer never wraps or grows.
 
-The `ctx` figure is the current context size and window (`1.6k/65.5k`), not a session total. The `total` figure is the cumulative tokens consumed in the session. The execution summary after each run reports that run's usage; small runs show exact counts (for example `1,412 tok`) so two short replies do not look identical after rounding.
+The `ctx` figure is the current context size and window (`1.6k/65.5k`), not a session total: it is the provider-reported prompt size of the latest request plus that request's completion, so it grows with the conversation that is actually resent. The `total` figure is the cumulative tokens consumed in the session. Every request resends the whole prompt, so `total` normally runs several times larger than the window even while the live context stays well below it; compaction is driven by the context figure, never by the total. The execution summary after each run reports that run's usage; small runs show exact counts (for example `1,412 tok`) so two short replies do not look identical after rounding.
 
 The input grows upward, up to roughly one third of the terminal (hard limit: 14 lines). The transcript keeps at least five visible rows. When the input is capped, the rule shows `↑ N` indicating lines hidden above; the prompt scrolls internally with the cursor.
 
@@ -104,7 +104,7 @@ The full command is wrapped, keeping both ends when it is too long to display co
 | `/sessions` | List recent sessions with short ID, age, model, and a title derived from the first user message. |
 | `/fork [n]` | Fork from the nth user message (1-based); omit `n` for the latest user message. |
 | `/export` | Export the current session as Markdown under the session directory. |
-| `/status` | Show the full session ID, model, workspace, policy, context usage, session usage, last run, queue, and session directory. |
+| `/status` | Show the full session ID, model, workspace, policy, context usage, the compaction trigger, session usage, last run, queue, and session directory. |
 | `/clear-queue` | Discard queued steering/follow-up instructions and restore their text to the input. Available while streaming. |
 | `/skills` | List discovered skills with their trust level. |
 | `/skill <name>` | Insert a skill into the input box. Project skills are wrapped as untrusted content. |

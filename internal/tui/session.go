@@ -297,6 +297,12 @@ func (m *model) commandStatus() {
 	} else if m.contextTokens > 0 {
 		add("context", formatTokens(m.contextTokens))
 	}
+	if m.contextTrigger > 0 {
+		// Compaction compares the prompt against its own trigger, not against
+		// the window or the cumulative session total, so name the figure that
+		// actually causes a pass.
+		add("compacts at", formatTokens(m.contextTrigger)+" prompt tokens")
+	}
 
 	if m.currentSession != nil {
 		usage := m.currentSession.Usage

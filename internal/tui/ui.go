@@ -67,6 +67,10 @@ type Options struct {
 	// ContextWindow is the model context size used for the status meter.
 	// Zero falls back to the session's model metadata and then to unknown.
 	ContextWindow int
+	// ContextTrigger is the prompt size at which proactive compaction starts,
+	// reported by /status so a context meter that is not compacting explains
+	// itself. Zero hides the figure.
+	ContextTrigger int
 	// Policy is a short human-readable description of the active sandbox and
 	// shell policy, shown by /status and in the startup header.
 	Policy string
@@ -116,6 +120,7 @@ type model struct {
 	contextTokens        int
 	sessionTokens        int
 	contextWindow        int
+	contextTrigger       int
 	defaultContextWindow int
 	modelName            string
 	workspace            string
@@ -1784,6 +1789,7 @@ func initialModel(options Options) (model, error) {
 		follow:               true,
 		historyIndex:         -1,
 		contextWindow:        options.ContextWindow,
+		contextTrigger:       options.ContextTrigger,
 		defaultContextWindow: options.ContextWindow,
 		modelName:            modelName,
 		workspace:            workspace,

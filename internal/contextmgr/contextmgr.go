@@ -32,6 +32,20 @@ const (
 	DefaultSummaryMaxTokens = 2048
 
 	minTranscriptTokens = 512
+
+	// minCalibrationRatio and maxCalibrationRatio bound how far one reported
+	// provider sample may move the character-based estimate. The heuristic
+	// prices four characters per token, but real tokenizers charge two to three
+	// times that for JSON, numbers, and code, so the ceiling has to stay
+	// generous: a tight ceiling silently delays proactive compaction instead of
+	// correcting it.
+	minCalibrationRatio = 0.25
+	maxCalibrationRatio = 4.0
+
+	// calibrationSmoothing is the weight of a new sample in the running
+	// estimate ratio; the rest keeps the previous ratio so one odd response
+	// cannot swing the estimate.
+	calibrationSmoothing = 0.3
 )
 
 // ErrContextOverflow is returned when even the compacted prompt cannot fit in
@@ -122,6 +136,20 @@ type Manager struct {
 	lastRawEstimate int
 	lastEstimate    int
 
+	// measuredPrompt is the provider-reported prompt size for the view that the
+	// last ObserveUsage call described. measuredLen and measuredGen identify
+	// that view so the figure can serve as a floor for a later build that only
+	// appended to it.
+	measuredPrompt int
+	measuredLen    int
+	measuredGen    int
+
+	// viewGen increments whenever compaction or trimming rewrites the view
+	// prefix, which invalidates a measurement taken against the old prefix.
+	// lastViewLen is the length of the most recently built view.
+	viewGen     int
+	lastViewLen int
+
 	reportedPrompt     int
 	reportedCompletion int
 	summaryPrompt      int
@@ -156,6 +184,11 @@ func (m *Manager) Reset() {
 	m.summaryPrompt = 0
 	m.summaryCompletion = 0
 	m.lastCompaction = nil
+	m.measuredPrompt = 0
+	m.measuredLen = 0
+	m.measuredGen = 0
+	m.viewGen = 0
+	m.lastViewLen = 0
 }
 
 // Window returns the configured context window.
@@ -188,24 +221,65 @@ func (m *Manager) triggerTokens() int {
 }
 
 // ObserveUsage records reported provider usage and calibrates estimation.
+//
+// The reported prompt size is ground truth for the view that was just sent, so
+// it both calibrates the character heuristic and anchors the next measurement
+// when the view only grew.
 func (m *Manager) ObserveUsage(usage provider.Usage) {
 	if usage.PromptTokens > 0 {
 		m.reportedPrompt = usage.PromptTokens
 		if m.lastRawEstimate > 0 {
-			ratio := float64(usage.PromptTokens) / float64(m.lastRawEstimate)
-			if ratio < 0.5 {
-				ratio = 0.5
-			}
-			if ratio > 2.0 {
-				ratio = 2.0
-			}
-			m.estimateRatio = 0.7*m.estimateRatio + 0.3*ratio
+			ratio := clampCalibrationRatio(
+				float64(usage.PromptTokens) / float64(m.lastRawEstimate),
+			)
+			m.estimateRatio = (1-calibrationSmoothing)*m.estimateRatio +
+				calibrationSmoothing*ratio
 		}
+		m.measuredPrompt = usage.PromptTokens
+		m.measuredLen = m.lastViewLen
+		m.measuredGen = m.viewGen
 	}
 	m.reportedCompletion = usage.CompletionTokens
 	if m.lastRawEstimate > 0 {
 		m.lastEstimate = m.calibrate(m.lastRawEstimate)
 	}
+}
+
+func clampCalibrationRatio(ratio float64) float64 {
+	if ratio < minCalibrationRatio {
+		return minCalibrationRatio
+	}
+	if ratio > maxCalibrationRatio {
+		return maxCalibrationRatio
+	}
+	return ratio
+}
+
+// applyMeasuredFloor anchors an estimate to the provider's own prompt count.
+// The heuristic can price structured prompts well below reality, and calibration
+// only converges over several requests. When the current view still begins with
+// the view the provider measured, that measurement plus the estimate of
+// anything appended since is a hard lower bound, so compaction triggers on the
+// provider's number rather than on a lagging estimate.
+func (m *Manager) applyMeasuredFloor(view []provider.Message, estimate int) int {
+	if m.measuredPrompt <= 0 || m.measuredGen != m.viewGen {
+		return estimate
+	}
+	if m.measuredLen <= 0 || m.measuredLen > len(view) {
+		return estimate
+	}
+	floor := m.measuredPrompt + m.calibrate(m.estimateRaw(view[m.measuredLen:], nil))
+	if floor > estimate {
+		return floor
+	}
+	return estimate
+}
+
+// invalidateView marks the current view prefix as rewritten, so a measurement
+// taken against the previous prefix no longer anchors the estimate.
+func (m *Manager) invalidateView() {
+	m.viewGen++
+	m.lastViewLen = 0
 }
 
 // Build returns the messages to send for this request, compacting older
@@ -248,16 +322,22 @@ func (m *Manager) build(
 	}
 
 	systemCount := leadingSystemMessages(history)
+	prefixReset := false
 	if m.compactedThrough < systemCount || m.compactedThrough > len(history) {
 		m.summary = ""
 		m.compactedThrough = systemCount
 		m.lastCompaction = nil
+		prefixReset = true
 	}
 	if m.summary != "" &&
 		(m.compactedThrough >= len(history) || history[m.compactedThrough].Role != "user") {
 		m.summary = ""
 		m.compactedThrough = systemCount
 		m.lastCompaction = nil
+		prefixReset = true
+	}
+	if prefixReset {
+		m.invalidateView()
 	}
 	if m.compactedThrough < systemCount {
 		m.compactedThrough = systemCount
@@ -270,7 +350,7 @@ func (m *Manager) build(
 
 	view := m.view(history, systemCount, tailStart)
 	rawBefore := m.estimateRaw(view, tools)
-	before := m.calibrate(rawBefore)
+	before := m.applyMeasuredFloor(view, m.calibrate(rawBefore))
 	m.lastEstimate = before
 
 	budget := m.cfg.Window - m.cfg.ReserveTokens
@@ -361,9 +441,10 @@ func (m *Manager) build(
 	}
 
 	rawAfter := m.estimateRaw(view, tools)
-	after := m.calibrate(rawAfter)
+	after := m.applyMeasuredFloor(view, m.calibrate(rawAfter))
 	m.lastRawEstimate = rawAfter
 	m.lastEstimate = after
+	m.lastViewLen = len(view)
 
 	if after > budget {
 		return view, compaction, fmt.Errorf(
@@ -446,6 +527,7 @@ func (m *Manager) compact(
 	m.compactedThrough = to
 	m.summaryPrompt += result.Usage.PromptTokens
 	m.summaryCompletion += result.Usage.CompletionTokens
+	m.invalidateView()
 
 	return &Compaction{
 		SummarizedMessages:      to - from,
@@ -541,6 +623,9 @@ func (m *Manager) trimToolResults(
 		view[largest].Content = truncateText(text, keep) +
 			"\n[...tool result truncated by context manager...]"
 		trimmed++
+	}
+	if trimmed > 0 {
+		m.invalidateView()
 	}
 	return view, trimmed
 }

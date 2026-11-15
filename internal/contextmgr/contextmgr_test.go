@@ -388,3 +388,150 @@ func TestConfigNormalizesTinyWindow(t *testing.T) {
 		t.Fatalf("prompt budget = %d", stats.PromptBudget)
 	}
 }
+
+// A tokenizer that prices structured prompts well above four characters per
+// token must be able to calibrate past twice the heuristic; clamping at 2.0
+// silently delayed compaction in practice.
+func TestCalibrationRatioTracksExpensiveTokenizer(t *testing.T) {
+	manager := New(Config{
+		Window:           8192,
+		ReserveTokens:    1024,
+		CompactAt:        0.85,
+		KeepRecentTokens: 1024,
+		SummaryMaxTokens: 256,
+	})
+	history := []provider.Message{
+		textMessage("system", "system"),
+		userTextMessage(`{"path":"main.go","lines":[1,2,3,4,5],"note":"structured"}`),
+	}
+
+	for i := 0; i < 8; i++ {
+		if _, _, err := manager.Build(context.Background(), history, nil, nil); err != nil {
+			t.Fatalf("Build() error = %v", err)
+		}
+		raw := manager.lastRawEstimate
+		manager.ObserveUsage(provider.Usage{
+			PromptTokens: int(float64(raw) * 2.4),
+			TotalTokens:  int(float64(raw) * 2.4),
+		})
+	}
+
+	if manager.estimateRatio <= 2.0 {
+		t.Fatalf("estimate ratio = %.2f, want > 2.0 for a 2.4x tokenizer", manager.estimateRatio)
+	}
+	if manager.estimateRatio > maxCalibrationRatio {
+		t.Fatalf("estimate ratio = %.2f, want <= %.2f", manager.estimateRatio, maxCalibrationRatio)
+	}
+}
+
+// The provider's own prompt count is a lower bound for an unchanged view, so a
+// lagging heuristic cannot keep compaction from firing.
+func TestReportedPromptBoundsEstimateForUnchangedView(t *testing.T) {
+	manager := New(Config{
+		Window:           8192,
+		ReserveTokens:    1024,
+		CompactAt:        0.85,
+		KeepRecentTokens: 1024,
+		SummaryMaxTokens: 256,
+	})
+	history := []provider.Message{
+		textMessage("system", "system"),
+		userTextMessage("hello"),
+		textMessage("assistant", "hi"),
+	}
+
+	if _, _, err := manager.Build(context.Background(), history, nil, nil); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	measured := 4000
+	manager.ObserveUsage(provider.Usage{PromptTokens: measured, TotalTokens: measured})
+
+	if _, _, err := manager.Build(context.Background(), history, nil, nil); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if got := manager.Stats().EstimatedPromptTokens; got < measured {
+		t.Fatalf("estimated prompt = %d, want >= reported prompt %d", got, measured)
+	}
+}
+
+// Compaction must trigger on the provider's measurement even when the character
+// heuristic prices the same view far below the trigger.
+func TestCompactionTriggersOnReportedPrompt(t *testing.T) {
+	manager := New(Config{
+		Window:           4096,
+		ReserveTokens:    512,
+		CompactAt:        0.85,
+		KeepRecentTokens: 900,
+		SummaryMaxTokens: 128,
+	})
+	observer := &recordingObserver{}
+	manager.SetObserver(observer)
+	history := longHistory(12)
+
+	if _, _, err := manager.Build(context.Background(), history, nil, nil); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	stats := manager.Stats()
+	if stats.EstimatedPromptTokens >= stats.TriggerTokens {
+		t.Fatalf("heuristic estimate = %d, want below trigger %d", stats.EstimatedPromptTokens, stats.TriggerTokens)
+	}
+	manager.ObserveUsage(provider.Usage{PromptTokens: stats.TriggerTokens + 100})
+
+	view, compaction, err := manager.Build(
+		context.Background(),
+		history,
+		nil,
+		func(context.Context, string, int) (SummarizeResult, error) {
+			return SummarizeResult{Summary: "compacted"}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if compaction == nil {
+		t.Fatal("compaction = nil, want a pass driven by the reported prompt")
+	}
+	if observer.starts != 1 || observer.finishes != 1 {
+		t.Fatalf("observer = %d starts, %d finishes; want 1 each", observer.starts, observer.finishes)
+	}
+	if len(view) >= len(history) {
+		t.Fatalf("view length = %d, original = %d", len(view), len(history))
+	}
+}
+
+// Rewriting the view invalidates the measurement taken against the old prefix,
+// so the flushed figure cannot keep the estimate inflated after compaction.
+func TestReportedPromptFloorDroppedAfterRewrite(t *testing.T) {
+	manager := New(Config{
+		Window:           4096,
+		ReserveTokens:    512,
+		CompactAt:        0.85,
+		KeepRecentTokens: 900,
+		SummaryMaxTokens: 128,
+	})
+	history := longHistory(12)
+
+	if _, _, err := manager.Build(context.Background(), history, nil, nil); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	manager.ObserveUsage(provider.Usage{PromptTokens: manager.Stats().TriggerTokens + 100})
+
+	view, compaction, err := manager.Build(
+		context.Background(),
+		history,
+		nil,
+		func(context.Context, string, int) (SummarizeResult, error) {
+			return SummarizeResult{Summary: "compacted"}, nil
+		},
+	)
+	if err != nil || compaction == nil {
+		t.Fatalf("Build() = %v, %+v", err, compaction)
+	}
+	stats := manager.Stats()
+	if stats.EstimatedPromptTokens >= stats.TriggerTokens {
+		t.Fatalf("estimate after compaction = %d, want below trigger %d", stats.EstimatedPromptTokens, stats.TriggerTokens)
+	}
+	if len(view) == 0 {
+		t.Fatal("empty view")
+	}
+}

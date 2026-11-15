@@ -18,7 +18,8 @@ The effective context window is selected in this order:
 Before each call, the context manager:
 
 - estimates prompt tokens from message text, tool calls, and tool schemas;
-- calibrates the estimate with the provider's reported prompt-token usage (the correction factor is clamped and smoothed);
+- calibrates the estimate with the provider's reported prompt-token usage (the correction factor is smoothed, and bounded to `0.25`–`4.0` so a tokenizer that charges two to three times the four-characters-per-token heuristic — JSON, numbers, and code do — is still corrected);
+- anchors the estimate to the reported prompt as a lower bound while the prompt view still begins with the view the provider measured, so compaction cannot lag behind a converged estimate;
 - triggers compaction when the calibrated prompt exceeds `compact_at` of the prompt budget;
 - preserves leading system messages, including any project instructions;
 - keeps a recent conversation tail (`keep_recent_tokens`) verbatim;
