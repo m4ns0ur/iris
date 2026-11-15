@@ -40,7 +40,7 @@ Crash recovery is performed by `Acquire` under the exclusive writer lease:
 - Its content is a structured tool error with `code: "tool_execution_interrupted"`, `interrupted: true`, `executed: true`, and `retryable: false`. Iris cannot know whether the tool ran, so the model is told to verify side effects before retrying.
 - Damage in the *middle* of a journal is an error rather than a silent truncation.
 
-Only complete model responses are committed. A failed, disconnected, or retried request contributes no assistant entry, so an interrupted response cannot be mistaken for completed work in a resumed session. The TUI shows a notice for each recovered interrupted tool call.
+Only complete model responses are committed. A failed, disconnected, or retried request contributes no assistant entry, so an interrupted response cannot be mistaken for completed work in a resumed session. The TUI shows interrupted tool calls in its tool ledger.
 
 ## Transcript versus model context
 

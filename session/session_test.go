@@ -23,6 +23,53 @@ func newTestManager(t *testing.T) *JSONLManager {
 	return manager
 }
 
+func TestSummaryTitleFromFirstUserMessage(t *testing.T) {
+	manager := newTestManager(t)
+
+	created, err := manager.Create(CreateOptions{Model: "m"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	created.AddUser("  fix\n the   approval\t timeout ")
+	created.AddUser("second message")
+	if err := manager.Save(created); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	summaries, err := manager.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries = %d, want 1", len(summaries))
+	}
+	if summaries[0].Title != "fix the approval timeout" {
+		t.Fatalf("title = %q", summaries[0].Title)
+	}
+
+	long, err := manager.Create(CreateOptions{Model: "m"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	long.AddUser(strings.Repeat("x", 120))
+	if err := manager.Save(long); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	summaries, err = manager.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	for _, summary := range summaries {
+		if summary.ID == long.ID {
+			runes := []rune(summary.Title)
+			if len(runes) > 80 || !strings.HasSuffix(summary.Title, "…") {
+				t.Fatalf("long title = %q, want <= 80 runes ending in ellipsis", summary.Title)
+			}
+		}
+	}
+}
+
 func TestJSONLSessionRoundTrip(t *testing.T) {
 	manager := newTestManager(t)
 

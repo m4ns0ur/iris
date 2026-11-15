@@ -770,6 +770,19 @@ func (m *JSONLManager) ExportMarkdown(session *Session) (string, error) {
 	return path, nil
 }
 
+func sessionTitle(content string) string {
+	text := strings.Join(strings.Fields(content), " ")
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	const maxTitleRunes = 80
+	if len(runes) > maxTitleRunes {
+		return string(runes[:maxTitleRunes-1]) + "…"
+	}
+	return text
+}
+
 func (m *JSONLManager) readSummary(path string) (Summary, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -829,6 +842,9 @@ func (m *JSONLManager) readSummary(path string) (Summary, error) {
 			}
 			summary.EntryCount++
 			entriesAfterCheckpoint = true
+			if summary.Title == "" && rec.Entry.Kind == EntryUser {
+				summary.Title = sessionTitle(rec.Entry.Content)
+			}
 			if rec.Entry.CreatedAt.After(maxEntryTime) {
 				maxEntryTime = rec.Entry.CreatedAt
 			}

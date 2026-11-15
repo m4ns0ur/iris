@@ -125,7 +125,9 @@ This distinction matters to every interface: a request can complete while the ex
 ## Execution Summaries
 
 
-Every settled run produces a structured summary collected from runtime observations, never from a model-generated recap. The TUI shows it as the final notice, print mode writes it to stderr, and JSONL/RPC results include it.
+Every settled run produces a structured summary collected from runtime observations, never from a model-generated recap. Print mode writes the full rendering to stderr, JSONL/RPC results include the structured fields, and the TUI renders a compact one-line footer with the same counters. In the TUI, `Ctrl+E` expands the changed-file list and `/status` shows the full counters.
+
+The full print-mode rendering is:
 
 ```text
 Task completed

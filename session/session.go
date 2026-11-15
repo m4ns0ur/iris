@@ -127,6 +127,9 @@ type Summary struct {
 	Workspace       string    `json:"workspace,omitempty"`
 	ParentSessionID string    `json:"parent_session_id,omitempty"`
 	EntryCount      int       `json:"entry_count"`
+	// Title is derived from the first user message when the summary is read.
+	// It is not persisted separately.
+	Title string `json:"title,omitempty"`
 }
 
 // Manager is the persistent session abstraction.

@@ -352,8 +352,8 @@ func TestContextCompactionNotice(t *testing.T) {
 	if !m.compacting {
 		t.Fatal("compaction status was not set")
 	}
-	if !strings.Contains(m.spinnerBar(), "Compacting context") {
-		t.Fatalf("spinner bar = %q, want compaction status", m.spinnerBar())
+	if got := m.currentPhase(); got != phaseCompacting {
+		t.Fatalf("phase = %v, want compacting", got)
 	}
 
 	updated, _ = m.Update(agentEventMsg{event: agent.ContextCompactionFinished{
@@ -555,6 +555,9 @@ func TestRenderSkillSanitizesControlCharacters(t *testing.T) {
 
 func TestAgentFinishedShowsRunSummary(t *testing.T) {
 	m, _, _ := newSessionModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(*model)
+
 	summary := &agent.RunSummary{
 		StartedAt:      time.Now().Add(-48 * time.Second),
 		FinishedAt:     time.Now(),
@@ -568,21 +571,39 @@ func TestAgentFinishedShowsRunSummary(t *testing.T) {
 			{Status: "A", Path: "internal/session/recovery_test.go"},
 		},
 	}
-	updated, _ := m.Update(agentEventMsg{event: agent.AgentFinished{At: time.Now(), Summary: summary}})
+	updated, _ = m.Update(agentEventMsg{event: agent.AgentFinished{At: time.Now(), Summary: summary}})
 	m = updated.(*model)
 
-	for _, want := range []string{
-		"Task completed",
-		"Files changed:",
-		"M internal/agent/runner.go",
-		"A internal/session/recovery_test.go",
-		"Tool executions: 8",
-		"LLM requests: 5",
-		"Tokens consumed: 12,450",
-		"Duration: 48s",
-	} {
-		if !containsNotice(m, want) {
-			t.Fatalf("summary notice missing %q: %+v", want, m.messages)
+	if m.lastSummary != summary {
+		t.Fatal("last summary was not stored")
+	}
+
+	var summaryMessage *message
+	for index := range m.messages {
+		if m.messages[index].role == "summary" {
+			summaryMessage = &m.messages[index]
+			break
+		}
+	}
+	if summaryMessage == nil {
+		t.Fatalf("summary message missing: %+v", m.messages)
+	}
+
+	rendered := m.renderMessage(*summaryMessage)
+	for _, want := range []string{"done", "8 tools", "5 req", "12.4k tok", "48s", "2 files changed"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("compact summary missing %q:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "Tool executions:") || strings.Contains(rendered, "Task completed") {
+		t.Fatalf("summary is not compact:\n%s", rendered)
+	}
+
+	m.showToolOutput = true
+	verbose := m.renderMessage(*summaryMessage)
+	for _, want := range []string{"M internal/agent/runner.go", "A internal/session/recovery_test.go"} {
+		if !strings.Contains(verbose, want) {
+			t.Fatalf("verbose summary missing %q:\n%s", want, verbose)
 		}
 	}
 }

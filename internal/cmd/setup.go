@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -29,6 +30,7 @@ type environment struct {
 	rt              runtime.Runtime
 	agent           agent.Agent
 	sessionDefaults session.CreateOptions
+	contextWindow   int
 }
 
 func (e *environment) Close() {
@@ -153,6 +155,7 @@ func setupEnvironment() (*environment, error) {
 		sessions:        sessions,
 		rt:              rt,
 		sessionDefaults: sessionDefaults,
+		contextWindow:   contextWindow,
 	}
 
 	for _, warning := range rt.Warnings() {
@@ -185,5 +188,23 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		Sessions:        env.sessions,
 		SessionDefaults: env.sessionDefaults,
 		Resources:       env.resources,
+		ContextWindow:   env.contextWindow,
+		Policy:          env.policySummary(),
+		SessionDir:      env.sessions.Dir(),
 	})
+}
+
+func (e *environment) policySummary() string {
+	if e == nil {
+		return ""
+	}
+	mode := strings.TrimSpace(e.cfg.Security.Mode)
+	if mode == "" {
+		mode = "workspace-write"
+	}
+	shell := strings.TrimSpace(e.cfg.Security.Shell.Mode)
+	if shell == "" {
+		shell = "approval"
+	}
+	return mode + " sandbox · shell " + shell
 }

@@ -36,8 +36,8 @@ func TestStreamingEnterQueuesSteeringInstruction(t *testing.T) {
 	if !containsNotice(m, "Steering queued") {
 		t.Fatalf("steering notice missing: %+v", m.messages)
 	}
-	if !strings.Contains(m.spinnerBar(), "steering: 1") {
-		t.Fatalf("spinner bar = %q, want pending steering", m.spinnerBar())
+	if !strings.Contains(m.pendingSummary(), "1 queued") {
+		t.Fatalf("pending summary = %q, want queued instruction", m.pendingSummary())
 	}
 }
 
@@ -103,9 +103,8 @@ func TestQueueEventsUpdatePendingStateAndTranscript(t *testing.T) {
 	if len(m.pendingSteering) != 1 || len(m.pendingFollowUps) != 1 {
 		t.Fatalf("pending state = %+v / %+v", m.pendingSteering, m.pendingFollowUps)
 	}
-	bar := m.spinnerBar()
-	if !strings.Contains(bar, "steering: 1") || !strings.Contains(bar, "follow-up: 1") {
-		t.Fatalf("spinner bar = %q, want queue counts", bar)
+	if !strings.Contains(m.pendingSummary(), "2 queued") {
+		t.Fatalf("pending summary = %q, want queue count", m.pendingSummary())
 	}
 
 	updated, _ = m.Update(agentEventMsg{event: agent.InstructionDelivered{
@@ -118,7 +117,7 @@ func TestQueueEventsUpdatePendingStateAndTranscript(t *testing.T) {
 	if last.role != "user" || last.tag != "steer" || last.content != "change direction" {
 		t.Fatalf("delivered message = %+v", last)
 	}
-	if rendered := m.renderMessage(last); !strings.Contains(rendered, "You (steer)>") {
+	if rendered := m.renderMessage(last); !strings.Contains(rendered, "you (steer) ›") {
 		t.Fatalf("rendered message = %q", rendered)
 	}
 
@@ -200,8 +199,11 @@ func TestTurnRetriedClearsPartialOutput(t *testing.T) {
 	m.state = StateStreaming
 	m.fullResponse.WriteString("partial answer")
 	m.fullReason.WriteString("partial reasoning")
-	m.toolName = "write"
-	m.toolArgs.WriteString(`{"path":"a"}`)
+	m.trackToolStarted(agent.ToolStarted{
+		ToolCallID: "call-1",
+		ToolName:   "write",
+		Args:       map[string]any{"path": "a"},
+	})
 
 	updated, _ := m.Update(agentEventMsg{event: agent.TurnRetried{
 		Turn:        0,
@@ -210,9 +212,9 @@ func TestTurnRetriedClearsPartialOutput(t *testing.T) {
 	}})
 	m = updated.(*model)
 
-	if m.fullResponse.Len() != 0 || m.fullReason.Len() != 0 || m.toolName != "" || m.toolArgs.Len() != 0 {
-		t.Fatalf("partial output was not cleared: response=%q reasoning=%q tool=%q args=%q",
-			m.fullResponse.String(), m.fullReason.String(), m.toolName, m.toolArgs.String())
+	if m.fullResponse.Len() != 0 || m.fullReason.Len() != 0 || len(m.activeTools) != 0 || len(m.toolOrder) != 0 {
+		t.Fatalf("partial output was not cleared: response=%q reasoning=%q tools=%+v",
+			m.fullResponse.String(), m.fullReason.String(), m.activeTools)
 	}
 	if !containsNotice(m, "compacted the conversation and retrying") {
 		t.Fatalf("retry notice missing: %+v", m.messages)
@@ -255,5 +257,94 @@ func TestTruncatedTurnNotice(t *testing.T) {
 
 	if !containsNotice(m, "output token limit") {
 		t.Fatalf("truncation notice missing: %+v", m.messages)
+	}
+}
+
+func TestShiftEnterInsertsNewlineInsteadOfSending(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*model)
+	m.inputText.SetValue("hello")
+
+	// Some terminals attach a Text value to modified Enter; the code must
+	// match on Code/Mod, not just the string form.
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift, Text: "\r"})
+	m = updated.(*model)
+
+	if got := m.inputText.Value(); got != "hello\n" {
+		t.Fatalf("input after shift+enter = %q, want a newline", got)
+	}
+	if m.state != StateInput {
+		t.Fatalf("state after shift+enter = %v, want input", m.state)
+	}
+	if len(m.messages) == 0 || m.messages[len(m.messages)-1].role == "user" {
+		t.Fatalf("shift+enter submitted a prompt: %+v", m.messages)
+	}
+}
+
+func TestAltEnterInsertsNewlineWhenIdle(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*model)
+	m.inputText.SetValue("hello")
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
+	m = updated.(*model)
+
+	if got := m.inputText.Value(); got != "hello\n" {
+		t.Fatalf("input after alt+enter = %q, want a newline", got)
+	}
+	if m.state != StateInput {
+		t.Fatalf("state after alt+enter = %v, want input", m.state)
+	}
+}
+
+func TestShiftEnterWhileStreamingDoesNotQueue(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*model)
+	m.state = StateStreaming
+	m.inputText.SetValue("hello")
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	m = updated.(*model)
+
+	if got := m.inputText.Value(); got != "hello\n" {
+		t.Fatalf("input after streaming shift+enter = %q, want a newline", got)
+	}
+	if len(m.pendingSteering) != 0 || len(m.pendingFollowUps) != 0 {
+		t.Fatalf("shift+enter queued an instruction: %+v / %+v", m.pendingSteering, m.pendingFollowUps)
+	}
+}
+
+func TestCtrlJInsertsNewline(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*model)
+	m.inputText.SetValue("hello")
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
+	m = updated.(*model)
+
+	if got := m.inputText.Value(); got != "hello\n" {
+		t.Fatalf("input after ctrl+j = %q, want a newline", got)
+	}
+	if m.state != StateInput {
+		t.Fatalf("state after ctrl+j = %v, want input", m.state)
+	}
+}
+
+func TestShiftEnterInsertsAtCursor(t *testing.T) {
+	m, _, _ := newSessionModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*model)
+	m.inputText.SetValue("hello world")
+	m.inputText.SetCursorColumn(5)
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	m = updated.(*model)
+
+	if got := m.inputText.Value(); got != "hello\n world" {
+		t.Fatalf("input after mid-text shift+enter = %q", got)
 	}
 }

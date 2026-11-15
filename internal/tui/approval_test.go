@@ -62,20 +62,36 @@ func TestTUIApproverRespectsCancellation(t *testing.T) {
 	}
 }
 
-func TestSummarizeCommandCollapsesWhitespace(t *testing.T) {
-	got := summarizeCommand("echo   hi\nls", 100)
-	if got != "echo hi ls" {
-		t.Fatalf("summarizeCommand() = %q, want %q", got, "echo hi ls")
+func TestWrapApprovalCommandKeepsBothEnds(t *testing.T) {
+	command := "echo ok; " + strings.Repeat("x", 100) + "; rm -rf /"
+	lines := wrapApprovalCommand(command, 40, 3)
+	joined := strings.Join(lines, " ")
+	if !strings.Contains(joined, "echo ok;") || !strings.Contains(joined, "rm -rf /") {
+		t.Fatalf("wrapApprovalCommand() = %q, want both ends preserved", lines)
+	}
+	if len(lines) > 3 {
+		t.Fatalf("wrapApprovalCommand() returned %d lines, want <= 3", len(lines))
+	}
+}
+
+func TestApprovalKeyIsExactAndSessionScoped(t *testing.T) {
+	approver := newTUIApprover()
+	request := agent.ApprovalRequest{Kind: "shell", Command: "echo hi", Workdir: "/tmp"}
+
+	approver.AllowSession(request)
+	if !approver.isAllowed(request) {
+		t.Fatal("exact request was not allowed")
+	}
+	if approver.isAllowed(agent.ApprovalRequest{Kind: "shell", Command: "echo hi; rm -rf /", Workdir: "/tmp"}) {
+		t.Fatal("a different command inherited the session approval")
+	}
+	if approver.isAllowed(agent.ApprovalRequest{Kind: "shell", Command: "echo hi", Workdir: "/other"}) {
+		t.Fatal("a different workdir inherited the session approval")
 	}
 
-	got = summarizeCommand("abcdefgh", 5)
-	if got != "abcd…" {
-		t.Fatalf("summarizeCommand() = %q, want %q", got, "abcd…")
-	}
-
-	got = summarizeCommand("echo ok; "+strings.Repeat("x", 100)+"; rm -rf /", 40)
-	if !strings.HasPrefix(got, "echo ok;") || !strings.HasSuffix(got, "rm -rf /") {
-		t.Fatalf("summarizeCommand() = %q, want both ends preserved", got)
+	approver.ClearAllowed()
+	if approver.isAllowed(request) {
+		t.Fatal("ClearAllowed did not forget the approval")
 	}
 }
 
@@ -126,6 +142,67 @@ func TestModelApprovalAllow(t *testing.T) {
 	}
 }
 
+func TestModelApprovalAllowSession(t *testing.T) {
+	m := newApprovalModel(t)
+	m.approver = newTUIApprover()
+	reply := make(chan agent.ApprovalDecision, 1)
+	request := agent.ApprovalRequest{Kind: "shell", Command: "echo hi", Workdir: "/work"}
+
+	updated, _ := m.Update(approvalRequestMsg{request: request, reply: reply})
+	m = updated.(*model)
+
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "a", Code: 'a'})
+	m = updated.(*model)
+
+	if m.pendingApproval != nil {
+		t.Fatal("pendingApproval was not cleared after allow-session")
+	}
+	select {
+	case decision := <-reply:
+		if !decision.Allow {
+			t.Fatalf("decision = %+v, want allow", decision)
+		}
+	default:
+		t.Fatal("no decision was sent to the approver")
+	}
+	if !m.approver.isAllowed(request) {
+		t.Fatal("allow-session did not record the exact request")
+	}
+}
+
+func TestApprovalPanelShowsFullContext(t *testing.T) {
+	m := newApprovalModel(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(*model)
+
+	reply := make(chan agent.ApprovalDecision, 1)
+	command := "rm -rf ./build && go test ./..."
+	updated, _ = m.Update(approvalRequestMsg{
+		request: agent.ApprovalRequest{
+			Kind:     "shell",
+			Command:  command,
+			Workdir:  "/Users/mansour/workspace/iris",
+			Reason:   "command is not allowlisted",
+			Programs: []string{"rm", "go"},
+		},
+		reply: reply,
+	})
+	m = updated.(*model)
+
+	panel := m.approvalPanel()
+	for _, want := range []string{"approval", command, "~/workspace/iris", "command is not allowlisted", "always this session", "4:"} {
+		if !strings.Contains(panel, want) {
+			t.Fatalf("approval panel missing %q:\n%s", want, panel)
+		}
+	}
+	if m.approvalHeight() != len(m.approvalPanelLines()) {
+		t.Fatalf("approvalHeight = %d, lines = %d", m.approvalHeight(), len(m.approvalPanelLines()))
+	}
+	if !strings.Contains(m.statusLeft(), "approval pending") {
+		t.Fatalf("status left = %q, want approval pending", m.statusLeft())
+	}
+}
+
 func TestModelApprovalDeny(t *testing.T) {
 	m := newApprovalModel(t)
 	reply := make(chan agent.ApprovalDecision, 1)
@@ -168,6 +245,9 @@ func TestModelApprovalTimeoutClearsPrompt(t *testing.T) {
 
 	if m.pendingApproval != nil {
 		t.Fatal("pendingApproval was not cleared after timeout")
+	}
+	if m.inputText.Placeholder == "Approval pending…" {
+		t.Fatal("approval placeholder survived the timeout")
 	}
 	if cmd == nil {
 		t.Fatal("expected a command that re-arms the approval listener")
@@ -358,7 +438,7 @@ func TestModelConsumesTypedAgentEvents(t *testing.T) {
 			hasReasoning = true
 		case message.role == "assistant" && message.content == "hello ":
 			hasAssistant = true
-		case message.role == "tool" && message.toolName == "shell" && message.previewCommand == "ls":
+		case message.role == "tool" && message.toolName == "shell" && message.toolTarget == "ls":
 			hasTool = true
 		}
 	}
