@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1069,6 +1070,29 @@ func TestStatusLineFitsWithTheCompactingSpinner(t *testing.T) {
 	}
 	if !shown {
 		t.Fatalf("status line = %q, want a compacting frame", line)
+	}
+}
+
+// displayPath must shorten only paths under the home directory this machine
+// reports, so tests and CI never depend on the developer's home.
+func TestDisplayPathShortensOnlyUnderHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	if got, want := displayPath(home), "~"; got != want {
+		t.Fatalf("displayPath(home) = %q, want %q", got, want)
+	}
+	inside := filepath.Join(home, "workspace", "iris")
+	if got, want := displayPath(inside), filepath.Join("~", "workspace", "iris"); got != want {
+		t.Fatalf("displayPath(inside) = %q, want %q", got, want)
+	}
+	outside := filepath.Join(filepath.Dir(home), "elsewhere")
+	if got := displayPath(outside); got != outside {
+		t.Fatalf("displayPath(outside) = %q, want %q", got, outside)
+	}
+	if got := displayPath(""); got != "" {
+		t.Fatalf("displayPath(empty) = %q, want empty", got)
 	}
 }
 

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -175,13 +176,20 @@ func TestApprovalPanelShowsFullContext(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = updated.(*model)
 
+	// The panel shortens a path only when it is under the home directory, so
+	// the fixture has to live under whatever home this machine reports.
+	workdir := t.TempDir()
+	t.Setenv("HOME", workdir)
+	t.Setenv("USERPROFILE", workdir)
+	workspace := filepath.Join(workdir, "workspace", "iris")
+
 	reply := make(chan agent.ApprovalDecision, 1)
 	command := "rm -rf ./build && go test ./..."
 	updated, _ = m.Update(approvalRequestMsg{
 		request: agent.ApprovalRequest{
 			Kind:     "shell",
 			Command:  command,
-			Workdir:  "/Users/mansour/workspace/iris",
+			Workdir:  workspace,
 			Reason:   "command is not allowlisted",
 			Programs: []string{"rm", "go"},
 		},
@@ -190,7 +198,8 @@ func TestApprovalPanelShowsFullContext(t *testing.T) {
 	m = updated.(*model)
 
 	panel := m.approvalPanel()
-	for _, want := range []string{"approval", command, "~/workspace/iris", "command is not allowlisted", "always this session", "4:"} {
+	wantWorkdir := filepath.Join("~", "workspace", "iris")
+	for _, want := range []string{"approval", command, wantWorkdir, "command is not allowlisted", "always this session", "4:"} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("approval panel missing %q:\n%s", want, panel)
 		}
