@@ -858,15 +858,23 @@ func TestRespondingPhase(t *testing.T) {
 	}
 }
 
-func TestPhaseSpinnersAreSingleCell(t *testing.T) {
-	for p := phaseThinking; p <= phaseCanceling; p++ {
+// Every frame of one phase must share a cell width, because the status line
+// sizes the gap from the current frame: mixed widths would shift the footer on
+// every tick. Model-work families are one cell; compaction's trigrams are two
+// cells wide and widen the line for the whole phase instead of jittering.
+func TestPhaseSpinnersHaveStableFrameWidth(t *testing.T) {
+	for p := phaseThinking; p <= phaseWaitingSlow; p++ {
 		sp := phaseSpinner(p)
 		if len(sp.Frames) == 0 || sp.FPS <= 0 {
 			t.Fatalf("phase %v has an empty spinner", p)
 		}
+		width := lipgloss.Width(sp.Frames[0])
+		if width < 1 {
+			t.Fatalf("phase %v frame %q has no width", p, sp.Frames[0])
+		}
 		for _, frame := range sp.Frames {
-			if width := lipgloss.Width(frame); width != 1 {
-				t.Fatalf("phase %v frame %q width = %d, want 1", p, frame, width)
+			if got := lipgloss.Width(frame); got != width {
+				t.Fatalf("phase %v frames differ in width: %q is %d, want %d", p, frame, got, width)
 			}
 		}
 	}
@@ -1040,6 +1048,30 @@ func TestRunSummaryUsesExactSmallTokens(t *testing.T) {
 	}
 }
 
+// The compacting trigrams are two cells wide, one more than every other
+// family; the footer must still fit the terminal exactly.
+func TestStatusLineFitsWithTheCompactingSpinner(t *testing.T) {
+	m, _, _ := sizedSessionModel(t, 40, 30)
+	m.state = StateStreaming
+	m.compacting = true
+	m.runStartedAt = time.Now()
+
+	line := m.statusLine()
+	if width := lipgloss.Width(line); width > 40 {
+		t.Fatalf("status line width = %d, want <= 40: %q", width, line)
+	}
+	shown := false
+	for _, frame := range compactingSpinner.Frames {
+		if strings.Contains(line, frame) {
+			shown = true
+			break
+		}
+	}
+	if !shown {
+		t.Fatalf("status line = %q, want a compacting frame", line)
+	}
+}
+
 func TestStatusHintAdvertisesShiftEnter(t *testing.T) {
 	m := sizedApprovalModel(t, 100, 30)
 	if got := m.statusLeft(); !strings.Contains(got, "shift+enter newline") {
@@ -1049,5 +1081,113 @@ func TestStatusHintAdvertisesShiftEnter(t *testing.T) {
 	m.inputText.SetValue("first line\nsecond line")
 	if got := m.statusLeft(); !strings.Contains(got, "shift+enter newline") {
 		t.Fatalf("multiline status hint = %q, want shift+enter newline", got)
+	}
+}
+
+// firstStatusPart returns the first " · "-separated segment of a status hint.
+func firstStatusPart(left string) string {
+	if index := strings.Index(left, " · "); index >= 0 {
+		return left[:index]
+	}
+	return left
+}
+
+func TestStatusNamesAWaitForTheServer(t *testing.T) {
+	m, _, _ := sizedSessionModel(t, 120, 30)
+	m.state = StateStreaming
+	m.runStartedAt = time.Now()
+
+	updated, _ := m.Update(agentEventMsg{event: agent.RequestStarted{
+		At:      time.Now(),
+		Turn:    1,
+		Attempt: 1,
+	}})
+	m = updated.(*model)
+	if !m.awaitingResponse {
+		t.Fatal("awaitingResponse = false after request.started")
+	}
+	if phase := m.currentPhase(); phase != phaseWaiting {
+		t.Fatalf("phase = %d after request.started, want phaseWaiting", phase)
+	}
+
+	// A wait of a few seconds names itself in the rendered status line, and the
+	// wait timer replaces the run timer instead of repeating the same seconds.
+	m.runStartedAt = time.Now().Add(-3 * time.Second)
+	m.responseWaitSince = time.Now().Add(-3 * time.Second)
+	left := m.statusLeft()
+	if !strings.HasPrefix(left, "waiting for server") {
+		t.Fatalf("status left = %q, want the wait timer first", left)
+	}
+	if strings.Count(left, "waiting for server") != 1 {
+		t.Fatalf("status left = %q, want one wait label", left)
+	}
+	if line := m.statusLine(); !strings.Contains(line, "waiting for server") {
+		t.Fatalf("status line = %q, want a waiting hint", line)
+	}
+	frame := m.spinnerFrame(m.currentPhase())
+	known := false
+	for _, candidate := range waitingSpinner.Frames {
+		if frame == candidate {
+			known = true
+			break
+		}
+	}
+	if !known {
+		t.Fatalf("spinner frame = %q, want one of the MiniDot frames %v", frame, waitingSpinner.Frames)
+	}
+
+	// Below the hint threshold the run timer is all there is.
+	m.awaitingResponse = false
+	m.runStartedAt = time.Now().Add(-3 * time.Second)
+	if left := m.statusLeft(); strings.Contains(left, "waiting for server") || !strings.HasSuffix(firstStatusPart(left), "s") {
+		t.Fatalf("status left = %q, want the run timer while not waiting", left)
+	}
+	m.awaitingResponse = true
+
+	// A long wait suggests on-demand model loading.
+	m.responseWaitSince = time.Now().Add(-30 * time.Second)
+	if phase := m.currentPhase(); phase != phaseWaitingSlow {
+		t.Fatalf("phase = %d after a long wait, want phaseWaitingSlow", phase)
+	}
+	if left := m.statusLeft(); !strings.HasPrefix(left, "waiting for server 30s · model may be loading") {
+		t.Fatalf("status left = %q, want a single model-loading hint", left)
+	}
+
+	updated, _ = m.Update(agentEventMsg{event: agent.ResponseStarted{
+		At:      time.Now(),
+		Turn:    1,
+		Attempt: 1,
+		Waited:  30 * time.Second,
+	}})
+	m = updated.(*model)
+	if m.awaitingResponse {
+		t.Fatal("awaitingResponse = true after response.started")
+	}
+	if phase := m.currentPhase(); phase != phaseThinking {
+		t.Fatalf("phase = %d after response.started, want phaseThinking", phase)
+	}
+	if left := m.statusLeft(); strings.Contains(left, "waiting for server") {
+		t.Fatalf("status left = %q, still waiting after the server answered", left)
+	}
+}
+
+func TestSettledRunClearsAWaitForTheServer(t *testing.T) {
+	m, _, _ := sizedSessionModel(t, 120, 30)
+	m.state = StateStreaming
+	m.runStartedAt = time.Now()
+
+	updated, _ := m.Update(agentEventMsg{event: agent.RequestStarted{At: time.Now(), Turn: 0, Attempt: 1}})
+	m = updated.(*model)
+	if !m.awaitingResponse {
+		t.Fatal("awaitingResponse = false after request.started")
+	}
+
+	updated, _ = m.Update(agentEventMsg{event: agent.AgentFinished{At: time.Now(), Err: "boom"}})
+	m = updated.(*model)
+	if m.awaitingResponse || !m.responseWaitSince.IsZero() {
+		t.Fatalf("wait survived the settled run: awaiting=%t since=%v", m.awaitingResponse, m.responseWaitSince)
+	}
+	if wait := m.serverWaitLabel(); wait != "" {
+		t.Fatalf("server wait label = %q after the run settled", wait)
 	}
 }

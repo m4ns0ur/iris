@@ -370,6 +370,8 @@ func TestAgentEmitsTypedEvents(t *testing.T) {
 	for _, eventType := range []publicagent.EventType{
 		publicagent.EventAgentStarted,
 		publicagent.EventTurnStarted,
+		publicagent.EventRequestStarted,
+		publicagent.EventResponseStarted,
 		publicagent.EventTurnFinished,
 		publicagent.EventReasoningDelta,
 		publicagent.EventAssistantDelta,
@@ -2067,5 +2069,70 @@ func TestAgentRunSummaryIncludesGitChanges(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("new.txt missing from git changes: %+v", finished.Summary.FilesChanged)
+	}
+}
+
+func TestAgentReportsDispatchBeforeTheServerAnswers(t *testing.T) {
+	pol, err := policy.New(t.TempDir(), policy.Options{Mode: policy.ModeWorkspaceWrite})
+	if err != nil {
+		t.Fatalf("policy.New() error = %v", err)
+	}
+
+	fake := provider.ProviderFunc(func(context.Context, provider.Request) (<-chan provider.StreamEvent, error) {
+		events := make(chan provider.StreamEvent, 3)
+		events <- provider.StartedEvent{At: time.Now()}
+		events <- provider.DeltaEvent{Delta: provider.Delta{Content: "hi"}}
+		events <- provider.DoneEvent{Response: provider.Response{Content: "hi", FinishReason: "stop"}}
+		close(events)
+		return events, nil
+	})
+
+	instance, err := NewAgent(fake, pol)
+	if err != nil {
+		t.Fatalf("NewAgent() error = %v", err)
+	}
+	defer instance.Close()
+
+	var order []publicagent.EventType
+	var turn int
+	var requested publicagent.RequestStarted
+	var responded publicagent.ResponseStarted
+	instance.Subscribe(func(event publicagent.Event) {
+		switch value := event.(type) {
+		case publicagent.TurnStarted:
+			turn = value.Turn
+		case publicagent.RequestStarted:
+			requested = value
+			order = append(order, event.Type())
+		case publicagent.ResponseStarted:
+			responded = value
+			order = append(order, event.Type())
+		case publicagent.AssistantDelta:
+			order = append(order, event.Type())
+		}
+	})
+
+	if err := instance.Run(context.Background(), "hi"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	want := []publicagent.EventType{
+		publicagent.EventRequestStarted,
+		publicagent.EventResponseStarted,
+		publicagent.EventAssistantDelta,
+	}
+	if len(order) < len(want) {
+		t.Fatalf("events = %v, want at least %v", order, want)
+	}
+	for i, eventType := range want {
+		if order[i] != eventType {
+			t.Fatalf("event %d = %q, want %q (order %v)", i, order[i], eventType, order)
+		}
+	}
+	if requested.Attempt != 1 || requested.Turn != turn {
+		t.Fatalf("request.started = %+v, turn = %d", requested, turn)
+	}
+	if responded.Attempt != 1 || responded.Turn != turn || responded.Waited < 0 {
+		t.Fatalf("response.started = %+v, turn = %d", responded, turn)
 	}
 }

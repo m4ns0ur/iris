@@ -14,14 +14,15 @@ type Provider interface {
 
 type StreamEvent interface { streamEvent() }
 
+type StartedEvent struct { At time.Time }
 type DeltaEvent struct { Delta Delta }
 type DoneEvent struct { Response Response }
 type ErrorEvent struct { Err error }
 ```
 
-A stream contains zero or more `DeltaEvent`s followed by exactly one `DoneEvent` or `ErrorEvent`. Setup failures are returned directly from `Stream`; failures after the stream starts arrive as `ErrorEvent`. The channel must be closed after the terminal event, and context cancellation must stop the request. The `StreamEvent` interface has an unexported method, so external packages use the exported event types rather than defining new ones.
+A stream contains an optional `StartedEvent`, then zero or more `DeltaEvent`s, then exactly one `DoneEvent` or `ErrorEvent`. Send `StartedEvent` as soon as the server has accepted the request and the response body is open, before reading content: a server that is still loading a model or pre-filling a prompt sends nothing for a long time, and consumers use this boundary to tell that silence apart from generation. `provider.Collect` ignores it, and providers that never send one still work; the runtime then attributes the whole request to waiting. Setup failures are returned directly from `Stream`; failures after the stream starts arrive as `ErrorEvent`. The channel must be closed after the terminal event, and context cancellation must stop the request. The `StreamEvent` interface has an unexported method, so external packages use the exported event types rather than defining new ones.
 
-OpenAI-compatible Chat Completions is the first implementation, available through [`provider/openai`](../provider/openai). `provider.Collect` consumes a stream and returns the final response; it reports an error if the channel closes without a terminal event. `provider.ProviderFunc` adapts a stream function; `provider.ResponseFunc` adapts a non-streaming function and emits a single `DoneEvent`.
+OpenAI-compatible Chat Completions is the first implementation, available through [`provider/openai`](../provider/openai). `provider.Collect` consumes a stream and returns the final response; it reports an error if the channel closes without a terminal event. `provider.ProviderFunc` adapts a stream function; `provider.ResponseFunc` adapts a non-streaming function and emits a `StartedEvent` followed by a single `DoneEvent`.
 
 `openai.New(openai.Options{...})` accepts:
 

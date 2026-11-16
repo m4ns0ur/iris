@@ -303,6 +303,11 @@ func (m *model) commandStatus() {
 		// actually causes a pass.
 		add("compacts at", formatTokens(m.contextTrigger)+" prompt tokens")
 	}
+	if wait := m.serverWaitLabel(); wait != "" {
+		// The row label already says "server", so keep only the duration and
+		// the hint from the footer phrasing.
+		add("server", strings.TrimPrefix(wait, "waiting for "))
+	}
 
 	if m.currentSession != nil {
 		usage := m.currentSession.Usage

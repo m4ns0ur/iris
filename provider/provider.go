@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ErrContextWindow marks provider errors caused by exceeding the model's
@@ -175,11 +176,27 @@ type Response struct {
 	Usage            Usage      `json:"usage"`
 }
 
-// StreamEvent is one item in a provider stream. Implementations send zero or
-// more DeltaEvents followed by exactly one DoneEvent or ErrorEvent.
+// StreamEvent is one item in a provider stream. Implementations send an
+// optional StartedEvent, then zero or more DeltaEvents, then exactly one
+// DoneEvent or ErrorEvent.
 type StreamEvent interface {
 	streamEvent()
 }
+
+// StartedEvent reports that the server accepted the request and opened the
+// response body, before any content arrives.
+//
+// It exists because the gap between dispatching a request and receiving the
+// first byte is not generation time: a server that is still loading a model,
+// queueing the request, or prefilling a long prompt sends nothing at all. A
+// consumer that receives a StartedEvent knows the server is now answering and
+// that a long silence after it means generation or prefill is in progress.
+type StartedEvent struct {
+	// At is when the response was accepted.
+	At time.Time
+}
+
+func (StartedEvent) streamEvent() {}
 
 // DeltaEvent carries one incremental assistant, reasoning, or tool-call update.
 type DeltaEvent struct {
@@ -231,7 +248,8 @@ func (f ResponseFunc) Stream(ctx context.Context, request Request) (<-chan Strea
 	if err != nil {
 		return nil, err
 	}
-	events := make(chan StreamEvent, 1)
+	events := make(chan StreamEvent, 2)
+	events <- StartedEvent{At: time.Now()}
 	events <- DoneEvent{Response: response}
 	close(events)
 	return events, nil
@@ -266,6 +284,8 @@ func Collect(ctx context.Context, p Provider, request Request) (Response, error)
 				return Response{}, fmt.Errorf("%w: stream closed without a terminal event", ErrStreamInterrupted)
 			}
 			switch value := event.(type) {
+			case StartedEvent:
+				continue
 			case DeltaEvent:
 				continue
 			case DoneEvent:

@@ -357,6 +357,14 @@ func (c *LLMClient) Stream(
 		if cancel != nil {
 			defer cancel()
 		}
+		// The response was accepted, so the server is answering even when it
+		// sends no content for a long time: a loaded-on-demand model, a queued
+		// request, or a long prompt prefill all look silent from here.
+		select {
+		case events <- provider.StartedEvent{At: time.Now()}:
+		case <-callCtx.Done():
+			return
+		}
 		c.readStream(callCtx, ctx, res.Body, events)
 	}()
 

@@ -994,6 +994,10 @@ func (a *Agent) recordSkippedTools(calls []PendingToolCall, code, reason string)
 	return errors.Join(errs...)
 }
 
+// slowServerResponse is how long a request may wait for the server to answer
+// before the runtime warns that the server is probably loading a model.
+const slowServerResponse = 10 * time.Second
+
 const contextSummaryPrompt = `You compact conversation history for a coding agent.
 Preserve, in concise form:
 - user goals, constraints, and preferences
@@ -1018,7 +1022,7 @@ func (a *Agent) summarize(
 		},
 		MaxTokens:   maxTokens,
 		Temperature: 0.2,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		return contextmgr.SummarizeResult{}, err
 	}
@@ -1028,10 +1032,31 @@ func (a *Agent) summarize(
 	}, nil
 }
 
+// responseStarted reports that the server accepted a dispatched request and
+// logs a wait long enough to suggest an on-demand model load.
+func (a *Agent) responseStarted(attempt int, requestAt time.Time) func(provider.StartedEvent) {
+	return func(event provider.StartedEvent) {
+		waited := event.At.Sub(requestAt)
+		a.emit(publicagent.ResponseStarted{
+			At:      event.At,
+			Turn:    a.step,
+			Attempt: attempt,
+			Waited:  waited,
+		})
+		if waited >= slowServerResponse {
+			Logger.Warn(
+				"LLM server took a long time to start responding; it may be loading the model",
+				"waited", waited.Round(time.Millisecond),
+			)
+		}
+	}
+}
+
 func (a *Agent) streamResponse(
 	ctx context.Context,
 	request provider.Request,
 	onDelta func(provider.Delta),
+	onStart func(provider.StartedEvent),
 ) (provider.Response, error) {
 	a.llmRequests++
 	events, err := a.provider.Stream(ctx, request)
@@ -1054,6 +1079,10 @@ func (a *Agent) streamResponse(
 				return provider.Response{}, fmt.Errorf("%w: stream closed without a terminal event", provider.ErrStreamInterrupted)
 			}
 			switch value := event.(type) {
+			case provider.StartedEvent:
+				if onStart != nil {
+					onStart(value)
+				}
 			case provider.DeltaEvent:
 				if onDelta != nil {
 					onDelta(value.Delta)
@@ -1203,7 +1232,9 @@ func (a *Agent) next(ctx context.Context) (turnResult, error) {
 	}
 
 	result.Attempts = 1
-	response, err := a.streamResponse(ctx, request, onDelta)
+	attemptStarted := time.Now()
+	a.emit(publicagent.RequestStarted{At: attemptStarted, Turn: a.step, Attempt: 1})
+	response, err := a.streamResponse(ctx, request, onDelta, a.responseStarted(1, attemptStarted))
 	if err != nil && provider.IsContextWindowError(err) {
 		Logger.Warn("LLM rejected the prompt for exceeding its context window; forcing compaction")
 
@@ -1234,7 +1265,9 @@ func (a *Agent) next(ctx context.Context) (turnResult, error) {
 		})
 		streamedContent.Reset()
 		streamedReasoning.Reset()
-		response, err = a.streamResponse(ctx, request, onDelta)
+		attemptStarted = time.Now()
+		a.emit(publicagent.RequestStarted{At: attemptStarted, Turn: a.step, Attempt: 2})
+		response, err = a.streamResponse(ctx, request, onDelta, a.responseStarted(2, attemptStarted))
 	}
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

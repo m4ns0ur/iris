@@ -20,7 +20,7 @@ The frame is a transcript viewport, a single rule, the prompt, and a one-line st
   enter send · /help                    Qwen3.5-9B · repo · ctx 18.4k/75k · total 7,312
 ```
 
-The status footer shows the active model, workspace basename, context usage, and the cumulative token total for the session. The left side is state-aware: it shows an animated phase indicator and elapsed time, the queued instruction count, a scroll hint, or the relevant key hint. The phase word is omitted; the spinner family identifies the phase:
+The status footer shows the active model, workspace basename, context usage, and the cumulative token total for the session. The left side is state-aware: it shows an animated phase indicator and elapsed time, the queued instruction count, a scroll hint, or the relevant key hint. The phase word is omitted; the spinner family identifies the phase, except while the server has not answered at all:
 
 | Indicator | Phase |
 | --- | --- |
@@ -28,10 +28,13 @@ The status footer shows the active model, workspace basename, context usage, and
 | `◴ ◷ ◶ ◵` quarter-circle rotation | reasoning |
 | `◉ ◎ ◍ ◌ ○` ring pulse | responding |
 | `◜ ◝ ◞ ◟` arc rotation | tooling |
-| braille dots | compacting context |
+| `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏` braille dots | waiting for the server |
+| `☱ ☲ ☴` trigram rotation | compacting context |
 | fading blocks | canceling |
 
 Color reinforces the distinction: reasoning and compaction are yellow, tooling is purple, canceling is red, and thinking/responding are orange. Context usage turns yellow near the compaction threshold and red near the limit. The footer never wraps or grows.
+
+The waiting phase exists because a dispatched request can produce no bytes for a long time: the server may be connecting, queueing the job, loading a model on demand, or pre-filling a long prompt. The runtime emits a request event when the request is sent and a response event when the server accepts it, so the footer only shows the waiting dots in the first, genuinely silent case. After a second of silence the left side names the wait (`waiting for server 4s`) in place of the run timer, so the same seconds are never printed twice; after ten seconds the hint adds the likely cause (`· model may be loading`) and the spinner turns yellow. A long silence after the server answered is ordinary thinking or prefill and keeps the thinking indicators. `/status` reports the current wait as well.
 
 The `ctx` figure is the current context size and window (`1.6k/65.5k`), not a session total: it is the provider-reported prompt size of the latest request plus that request's completion, so it grows with the conversation that is actually resent. The `total` figure is the cumulative tokens consumed in the session. Every request resends the whole prompt, so `total` normally runs several times larger than the window even while the live context stays well below it; compaction is driven by the context figure, never by the total. The execution summary after each run reports that run's usage; small runs show exact counts (for example `1,412 tok`) so two short replies do not look identical after rounding.
 
@@ -104,7 +107,7 @@ The full command is wrapped, keeping both ends when it is too long to display co
 | `/sessions` | List recent sessions with short ID, age, model, and a title derived from the first user message. |
 | `/fork [n]` | Fork from the nth user message (1-based); omit `n` for the latest user message. |
 | `/export` | Export the current session as Markdown under the session directory. |
-| `/status` | Show the full session ID, model, workspace, policy, context usage, the compaction trigger, session usage, last run, queue, and session directory. |
+| `/status` | Show the full session ID, model, workspace, policy, context usage, the compaction trigger, any wait for the server, session usage, last run, queue, and session directory. |
 | `/clear-queue` | Discard queued steering/follow-up instructions and restore their text to the input. Available while streaming. |
 | `/skills` | List discovered skills with their trust level. |
 | `/skill <name>` | Insert a skill into the input box. Project skills are wrapped as untrusted content. |

@@ -68,6 +68,8 @@ While a run is active, `Steer` and `FollowUp` queue instructions for the next tu
 | `agent.turn.started` | A new model request began; flush buffered deltas from the previous turn. |
 | `agent.turn.finished` | One model request completed. The run may still execute tools, retry, compact, or deliver queued work. |
 | `agent.turn.retried` | A recoverable request failure; discard partial output for this turn before the retry's deltas. |
+| `llm.request.started` | A model request was dispatched and nothing has come back yet: the server is connecting, queueing, loading a model, or prefilling. Carries the turn and attempt. |
+| `llm.response.started` | The server accepted the request and opened the response, before any content. Carries the turn, attempt, and how long the request waited. A silence after this event is generation, not a missing server. |
 | `assistant.delta` | Assistant text increment. |
 | `reasoning.delta` | Reasoning text increment. |
 | `tool.started` | A tool is about to execute. |

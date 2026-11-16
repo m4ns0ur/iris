@@ -217,6 +217,9 @@ const (
 	EventAssistantDelta EventType = "assistant.delta"
 	EventReasoningDelta EventType = "reasoning.delta"
 
+	EventRequestStarted  EventType = "llm.request.started"
+	EventResponseStarted EventType = "llm.response.started"
+
 	EventToolStarted   EventType = "tool.started"
 	EventToolProgress  EventType = "tool.progress"
 	EventToolCompleted EventType = "tool.completed"
@@ -256,6 +259,8 @@ var (
 	_ Event = TurnRetried{}
 	_ Event = AssistantDelta{}
 	_ Event = ReasoningDelta{}
+	_ Event = RequestStarted{}
+	_ Event = ResponseStarted{}
 	_ Event = ToolStarted{}
 	_ Event = ToolProgress{}
 	_ Event = ToolCompleted{}
@@ -517,6 +522,37 @@ type TurnRetried struct {
 }
 
 func (TurnRetried) Type() EventType { return EventTurnRetried }
+
+// RequestStarted reports that a model request was dispatched to the provider
+// and no part of the response has arrived yet. The gap before ResponseStarted
+// is connection, queueing, model loading, or prompt prefill on the server; it
+// is not generation time, and a local server can spend minutes there while
+// loading a model.
+type RequestStarted struct {
+	At time.Time `json:"at"`
+	// Turn is the agent turn this request belongs to.
+	Turn int `json:"turn"`
+	// Attempt is 1 for the first request of the turn and 2 for the retry
+	// after a context-overflow recovery.
+	Attempt int `json:"attempt"`
+}
+
+func (RequestStarted) Type() EventType { return EventRequestStarted }
+
+// ResponseStarted reports that the provider accepted the request and opened the
+// response, before any content arrives. A long silence after this event is
+// prefill or generation inside the server, not a missing server.
+type ResponseStarted struct {
+	At time.Time `json:"at"`
+	// Turn is the agent turn this response belongs to.
+	Turn int `json:"turn"`
+	// Attempt is the request attempt that produced the response.
+	Attempt int `json:"attempt"`
+	// Waited is how long the request waited for the server to answer.
+	Waited time.Duration `json:"waited"`
+}
+
+func (ResponseStarted) Type() EventType { return EventResponseStarted }
 
 // AssistantDelta carries an assistant text increment.
 type AssistantDelta struct {

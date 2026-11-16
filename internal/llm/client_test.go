@@ -504,3 +504,85 @@ func TestStreamWrapsContextWindowServerErrorWithoutRetry(t *testing.T) {
 		t.Fatalf("attempts = %d, want 1 (context errors must not be retried)", attempts.Load())
 	}
 }
+
+func TestStreamReportsServerAcceptanceBeforeContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	client := newTestClient(server)
+	events, err := client.Stream(context.Background(), provider.Request{})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	var first provider.StreamEvent
+	sawDelta, sawDone := false, false
+	for event := range events {
+		if first == nil {
+			first = event
+		}
+		switch value := event.(type) {
+		case provider.StartedEvent:
+			if value.At.IsZero() {
+				t.Fatal("started.at is zero")
+			}
+		case provider.DeltaEvent:
+			sawDelta = true
+		case provider.DoneEvent:
+			sawDone = true
+		}
+	}
+	if _, ok := first.(provider.StartedEvent); !ok {
+		t.Fatalf("first event = %T, want provider.StartedEvent", first)
+	}
+	if !sawDelta || !sawDone {
+		t.Fatalf("stream = delta %t, done %t; want both", sawDelta, sawDone)
+	}
+}
+
+// A server that has not accepted the request yet produces no stream at all:
+// Stream blocks on the HTTP exchange. That is the silence the runtime reports
+// as llm.request.started, and it is why the started event must come from the
+// dispatcher rather than from the stream.
+func TestStreamBlocksUntilTheServerAnswers(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	client := newTestClient(server)
+	type result struct {
+		events <-chan provider.StreamEvent
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		events, err := client.Stream(context.Background(), provider.Request{})
+		done <- result{events: events, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		t.Fatalf("Stream() returned before the server answered (err = %v)", got.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("Stream() error = %v", got.err)
+	}
+	first := <-got.events
+	if _, ok := first.(provider.StartedEvent); !ok {
+		t.Fatalf("first event = %T, want provider.StartedEvent", first)
+	}
+	for range got.events {
+	}
+}

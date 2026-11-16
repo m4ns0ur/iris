@@ -119,6 +119,8 @@ A failed or rejected tool call is appended to conversation history as a JSON `to
 
 `agent.turn.started` and `agent.turn.finished` describe one model request. `agent.turn.retried` reports a recoverable failed attempt (currently a context overflow) and tells consumers to discard partial output before the retry's deltas. `agent.finished` is the **settled** terminal event: it is emitted only after tool execution, retries, compaction, steering, and follow-ups are exhausted. In Go, `agent.AgentSettled` is an alias for `agent.AgentFinished` that names this semantic.
 
+`llm.request.started` and `llm.response.started` split the request into the two silences a consumer can observe. The first fires when the request is dispatched and nothing has come back; the server may be connecting, queueing the job, loading a model on demand, or prefilling a long prompt. The second fires when the server accepts the request and opens the response, so silence after it is generation inside the server. A request that waits longer than ten seconds for the server to answer is logged with a warning that the server may be loading a model. Both events are descriptive only; they never change retry or cancellation behavior, and `[llm].request_timeout_seconds` still bounds the whole request.
+
 This distinction matters to every interface: a request can complete while the execution still has more work. The TUI, JSONL, and RPC consumers receive the same `agent.turn.finished` and `agent.turn.retried` events.
 
 

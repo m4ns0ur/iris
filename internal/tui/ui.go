@@ -117,6 +117,8 @@ type model struct {
 	agentErrored         bool
 	lastTurnEmpty        bool
 	compacting           bool
+	awaitingResponse     bool
+	responseWaitSince    time.Time
 	contextTokens        int
 	sessionTokens        int
 	contextWindow        int
@@ -768,7 +770,12 @@ func (m *model) statusLeft() string {
 
 	if m.state == StateStreaming {
 		parts := make([]string, 0, 4)
-		if !m.runStartedAt.IsZero() {
+		// One time figure, not two: while the server has not answered, the
+		// silence is the interesting duration, so the wait replaces the run
+		// timer instead of repeating the same seconds beside it.
+		if wait := m.serverWaitLabel(); wait != "" {
+			parts = append(parts, wait)
+		} else if !m.runStartedAt.IsZero() {
 			parts = append(parts, elapsedLabel(time.Since(m.runStartedAt)))
 		}
 		if summary := m.pendingSummary(); summary != "" {
@@ -948,6 +955,17 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 	case agent.TurnStarted:
 		m.flushPartialStream()
 
+	case agent.RequestStarted:
+		// The request is dispatched but the server has not answered. Nothing
+		// is generating, so the status line names the wait instead of showing
+		// the ordinary thinking indicator.
+		m.awaitingResponse = true
+		m.responseWaitSince = e.At
+
+	case agent.ResponseStarted:
+		m.awaitingResponse = false
+		m.responseWaitSince = time.Time{}
+
 	case agent.TurnRetried:
 		m.fullReason.Reset()
 		m.fullResponse.Reset()
@@ -962,12 +980,15 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 		}
 
 	case agent.AssistantDelta:
+		m.awaitingResponse = false
 		m.fullResponse.WriteString(e.Text)
 
 	case agent.ReasoningDelta:
+		m.awaitingResponse = false
 		m.fullReason.WriteString(e.Text)
 
 	case agent.ToolProgress:
+		m.awaitingResponse = false
 		m.trackToolProgress(e)
 
 	case agent.ToolStarted:
@@ -1091,6 +1112,8 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 
 		m.canceling = false
 		m.compacting = false
+		m.awaitingResponse = false
+		m.responseWaitSince = time.Time{}
 		m.pendingSteering = nil
 		m.pendingFollowUps = nil
 		m.approvalWaitStart = time.Time{}
@@ -1645,6 +1668,8 @@ func (m *model) resetStreamingUI() {
 	m.agentErrored = false
 	m.lastTurnEmpty = false
 	m.compacting = false
+	m.awaitingResponse = false
+	m.responseWaitSince = time.Time{}
 	m.pendingSteering = nil
 	m.pendingFollowUps = nil
 }
