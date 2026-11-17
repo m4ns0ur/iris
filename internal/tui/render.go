@@ -33,6 +33,12 @@ func (m *model) currentRenderKey() renderKey {
 // The transcript can grow large; re-rendering every message on every streamed
 // token is by far the most expensive thing the old TUI did.
 func (m *model) renderCached(msg *message) string {
+	// The header carries the animated mark, so it is rendered freshly each
+	// frame; it is three short rows, while invalidating the cache for one blink
+	// frame would re-render the whole transcript.
+	if msg.role == "header" {
+		return m.renderHeader(*msg)
+	}
 	key := m.currentRenderKey()
 	if msg.rendered != "" && msg.renderKey == key {
 		return msg.rendered
@@ -65,12 +71,50 @@ func (m *model) renderMessage(msg message) string {
 	}
 }
 
+// renderHeader draws the session mark beside the two header lines. The mark is
+// three rows tall, so the text keeps its left column across every blink frame;
+// on a narrow terminal the one-cell symbol replaces it and the header stays two
+// lines.
 func (m *model) renderHeader(msg message) string {
 	lines := strings.Split(strings.TrimSpace(msg.content), "\n")
+	for index, line := range lines {
+		lines[index] = sanitizeLine(line)
+	}
+
+	width := m.contentWidth()
+	mark := m.currentMark()
+	markWidth := lipgloss.Width(mark[0])
+
+	if width-markWidth-2 < markMinTextWidth {
+		return renderHeaderSymbol(lines, width)
+	}
+
+	rows := make([]string, 0, len(mark))
+	for index, art := range mark {
+		art += strings.Repeat(" ", max(markWidth-lipgloss.Width(art), 0))
+		text := ""
+		if index < len(lines) {
+			text = "  " + truncateMiddleDisplay(lines[index], max(width-markWidth-2, 10))
+		}
+		rows = append(rows, styleOrange.Render(art)+styleDim.Render(text))
+	}
+	return strings.Join(rows, "\n") + "\n"
+}
+
+// renderHeaderSymbol is the narrow-terminal header: the one-cell mark on the
+// first line and the remaining lines aligned under its text.
+func renderHeaderSymbol(lines []string, width int) string {
+	indent := strings.Repeat(" ", lipgloss.Width(IrisSymbol)+1)
+	bodyWidth := max(width-lipgloss.Width(indent), 10)
+
 	var b strings.Builder
-	for _, line := range lines {
-		line = truncateMiddleDisplay(sanitizeLine(line), max(m.contentWidth()-2, 10))
-		b.WriteString(styleDim.Render("  " + line))
+	for index, line := range lines {
+		line = truncateMiddleDisplay(line, bodyWidth)
+		if index == 0 {
+			b.WriteString(styleOrange.Render(IrisSymbol) + styleDim.Render(" "+line))
+		} else {
+			b.WriteString(styleDim.Render(indent + line))
+		}
 		b.WriteByte('\n')
 	}
 	return b.String()

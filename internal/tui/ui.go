@@ -151,6 +151,8 @@ type model struct {
 	historyIndex    int
 	historyDraft    string
 	completionIndex int
+	markFrame       int
+	markStep        int
 	lastSummary     *agent.RunSummary
 }
 
@@ -277,6 +279,8 @@ func (m *model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.inputText.Focus(),
 		waitForStream(m.stream),
+		// The session mark blinks once on launch, then stops.
+		markBlinkTick(markBlinkDelay),
 	}
 	if m.approvals != nil {
 		cmds = append(cmds, waitForApproval(m.approvals))
@@ -288,6 +292,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case markBlinkMsg:
+		blinking := m.blinkHeaderMark()
+		// The transcript lives in the viewport, and its content is rebuilt by
+		// the layout pass; without this the mark changes in the model but never
+		// reaches the screen.
+		m.resizeLayout(false)
+		if blinking {
+			return m, markBlinkTick(markBlinkInterval)
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -1874,7 +1889,7 @@ func (m *model) appendSessionHeader() {
 	m.messages = append(m.messages, message{
 		role: "header",
 		content: fmt.Sprintf(
-			IrisSymbol+" iris · %s · %s\n%s · %s",
+			"iris · %s · %s\n%s · %s",
 			modelName,
 			sessionID,
 			workspace,

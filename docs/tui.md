@@ -20,6 +20,16 @@ The frame is a transcript viewport, a single rule, the prompt, and a one-line st
   enter send · /help                    Qwen3.5-9B · repo · ctx 18.4k/75k · total 7,312
 ```
 
+The transcript opens with the session header, Iris's mark beside the model, session, workspace, and policy lines:
+
+```
+ ▄▀▀▀▄   iris · qwen3.6-35B-Q1 · session s-6c6dd1
+▐░▓█▓░▌  /tmp/foo · workspace-write sandbox · shell approval
+ ▀▄▄▄▀
+```
+
+The mark is three rows of block art in the brand color, sized so every blink frame has the same shape and the header text never moves. It blinks once on launch: a short pause so the open mark is visible, then open, half, shut, half, open at about 80 ms per frame, and then it stays open. The sequence is one shot, so no timer keeps running while the TUI is idle. On terminals narrower than about 33 columns the header falls back to the single-cell `◉` and two lines.
+
 The status footer shows the active model, workspace basename, context usage, and the cumulative token total for the session. The left side is state-aware: it shows an animated phase indicator and elapsed time, the queued instruction count, a scroll hint, or the relevant key hint. The phase word is omitted; the spinner family identifies the phase, except while the server has not answered at all:
 
 | Indicator | Phase |
