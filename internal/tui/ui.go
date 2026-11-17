@@ -145,14 +145,13 @@ type model struct {
 	pendingFollowUps     []string
 
 	// Rendering and interaction state.
-	showToolOutput      bool
-	showReasoning       bool
-	inputHistory        []string
-	historyIndex        int
-	historyDraft        string
-	completionIndex     int
-	completionDismissed string
-	lastSummary         *agent.RunSummary
+	showToolOutput  bool
+	showReasoning   bool
+	inputHistory    []string
+	historyIndex    int
+	historyDraft    string
+	completionIndex int
+	lastSummary     *agent.RunSummary
 }
 
 type message struct {
@@ -481,7 +480,6 @@ func isShiftEnter(key tea.KeyPressMsg) bool {
 // insertInputNewline inserts a newline without submitting the prompt.
 func (m *model) insertInputNewline() {
 	m.inputText.InsertString("\n")
-	m.completionDismissed = ""
 	m.resizeLayout(false)
 }
 
@@ -500,9 +498,10 @@ func (m *model) handleIdleKey(key tea.KeyPressMsg) (bool, tea.Cmd) {
 		case "tab":
 			m.acceptCompletion()
 			return true, nil
+		case "enter":
+			return true, m.runCompletion()
 		case "esc":
-			m.completionDismissed = m.inputText.Value()
-			m.resizeLayout(false)
+			m.dismissCompletion()
 			return true, nil
 		}
 	}
@@ -558,8 +557,16 @@ func (m *model) updateInput(msg tea.Msg) tea.Cmd {
 	oldHeight := m.inputText.Height()
 	oldCompletion := m.completionHeight()
 
+	oldValue := m.inputText.Value()
 	var cmd tea.Cmd
 	m.inputText, cmd = m.inputText.Update(msg)
+
+	// A changed query invalidates the highlighted row and any Escape dismissal:
+	// the same index would point at a different command, and returning to a
+	// previously dismissed query must open the menu again.
+	if m.inputText.Value() != oldValue {
+		m.completionIndex = 0
+	}
 
 	if m.inputText.Height() != oldHeight || m.completionHeight() != oldCompletion {
 		m.resizeLayout(false)
@@ -575,7 +582,6 @@ func (m *model) submitInput() tea.Cmd {
 
 	m.inputText.Reset()
 	m.recordHistory(input)
-	m.completionDismissed = ""
 	m.completionIndex = 0
 
 	if strings.HasPrefix(input, "/") {
@@ -797,7 +803,12 @@ func (m *model) statusLeft() string {
 	}
 
 	value := m.inputText.Value()
-	if len(m.completionItems()) > 0 {
+	if selected, total := m.completionPosition(); total > 0 {
+		if total > m.completionLimit() {
+			// The menu shows a window, so name the position to make the rest
+			// of the list discoverable.
+			return fmt.Sprintf("↑↓ %d/%d · tab complete · /help", selected, total)
+		}
 		return "tab complete · enter run · /help"
 	}
 	if strings.Contains(value, "\n") {
@@ -1163,7 +1174,6 @@ func (m *model) submitStreamingInstruction(kind instructionKind) (tea.Model, tea
 
 	m.inputText.Reset()
 	m.recordHistory(input)
-	m.completionDismissed = ""
 	m.completionIndex = 0
 
 	if kind == instructionFollowUp {

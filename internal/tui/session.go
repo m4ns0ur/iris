@@ -77,7 +77,6 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.notice("Unknown command " + command + ". Try /help.")
 	}
 
-	m.completionDismissed = ""
 	m.completionIndex = 0
 	m.follow = true
 	m.resizeLayout(true)

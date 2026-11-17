@@ -59,6 +59,6 @@ func (m *model) historyNext() bool {
 func (m *model) setHistoryValue(value string) {
 	m.inputText.SetValue(value)
 	m.inputText.CursorEnd()
-	m.completionDismissed = ""
+	m.completionIndex = 0
 	m.resizeLayout(false)
 }

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1213,5 +1214,207 @@ func TestSettledRunClearsAWaitForTheServer(t *testing.T) {
 	}
 	if wait := m.serverWaitLabel(); wait != "" {
 		t.Fatalf("server wait label = %q after the run settled", wait)
+	}
+}
+
+// Every command must be reachable from the menu: the list scrolls with the
+// selection instead of stopping at the rows that fit.
+func TestCompletionMenuReachesEveryCommand(t *testing.T) {
+	m := sizedApprovalModel(t, 80, 24)
+	m.inputText.SetValue("/")
+	m.resizeLayout(true)
+
+	all := m.completionItems()
+	if len(all) != len(commandSpecs) {
+		t.Fatalf("matches = %d, want all %d commands", len(all), len(commandSpecs))
+	}
+	if visible := m.visibleCompletionItems(); len(visible) != m.completionLimit() {
+		t.Fatalf("visible rows = %d, want the window limit %d", len(visible), m.completionLimit())
+	}
+
+	for index := 1; index < len(all); index++ {
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		m = updated.(*model)
+		if m.completionIndex != index {
+			t.Fatalf("selection = %d after %d downs, want %d", m.completionIndex, index, index)
+		}
+		visible := m.visibleCompletionItems()
+		shown := false
+		for _, item := range visible {
+			if item.name == all[index].name {
+				shown = true
+			}
+		}
+		if !shown {
+			t.Fatalf("selected %q is outside the window %+v", all[index].name, visible)
+		}
+		if index >= m.completionLimit()-1 && visible[len(visible)-1].name != all[index].name {
+			t.Fatalf("window tail = %q, want the selected %q", visible[len(visible)-1].name, all[index].name)
+		}
+	}
+
+	if got := ansi.Strip(m.View().Content); !strings.Contains(got, "› /quit") {
+		t.Fatalf("view does not highlight the last command:\n%s", got)
+	}
+	if got := viewLineCount(m.View().Content); got != 24 {
+		t.Fatalf("view lines with a scrolled menu = %d, want 24", got)
+	}
+	if selected, total := m.completionPosition(); selected != len(all) || total != len(all) {
+		t.Fatalf("position = %d/%d, want %d/%d", selected, total, len(all), len(all))
+	}
+	if hint := m.statusLeft(); !strings.Contains(hint, fmt.Sprintf("%d/%d", len(all), len(all))) {
+		t.Fatalf("status hint = %q, want the menu position", hint)
+	}
+
+	// Wrapping past the end returns to the first command.
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = updated.(*model)
+	if m.completionIndex != 0 || m.visibleCompletionItems()[0].name != all[0].name {
+		t.Fatalf("selection = %d after wrapping, want 0", m.completionIndex)
+	}
+}
+
+func TestCompletionAcceptUsesTheScrolledRow(t *testing.T) {
+	m := sizedApprovalModel(t, 80, 24)
+	m.inputText.SetValue("/")
+	m.resizeLayout(true)
+
+	want := commandSpecs[7].name
+	for index := 0; index < 7; index++ {
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		m = updated.(*model)
+	}
+	if selected := m.visibleCompletionItems(); selected[len(selected)-1].name != want {
+		t.Fatalf("window = %+v, want %q selected", selected, want)
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(*model)
+	if got := strings.TrimSpace(m.inputText.Value()); got != want {
+		t.Fatalf("accepted %q, want %q", got, want)
+	}
+}
+
+func TestCompletionSelectionResetsWhenTheQueryChanges(t *testing.T) {
+	m := sizedApprovalModel(t, 80, 24)
+	m.inputText.SetValue("/")
+	m.inputText.CursorEnd()
+	m.resizeLayout(true)
+
+	for index := 0; index < 5; index++ {
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		m = updated.(*model)
+	}
+	if m.completionIndex != 5 {
+		t.Fatalf("selection = %d, want 5", m.completionIndex)
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Text: "n", Code: 'n'})
+	m = updated.(*model)
+	if got := m.inputText.Value(); got != "/n" {
+		t.Fatalf("input = %q, want /n", got)
+	}
+	if m.completionIndex != 0 {
+		t.Fatalf("selection = %d after the query changed, want 0", m.completionIndex)
+	}
+	items := m.completionItems()
+	if len(items) != 1 || items[0].name != "/new" {
+		t.Fatalf("matches = %+v, want only /new", items)
+	}
+}
+
+// Escape leaves command entry: it withdraws the slash that opened the menu so
+// the prompt is ready for a normal message, and typing "/" again reopens it.
+func TestEscapeWithdrawsTheCommandSlash(t *testing.T) {
+	m := sizedApprovalModel(t, 80, 24)
+	m.inputText.SetValue("/")
+	m.inputText.CursorEnd()
+	m.resizeLayout(true)
+	if len(m.completionItems()) == 0 {
+		t.Fatal("menu did not open for /")
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(*model)
+	if got := m.inputText.Value(); got != "" {
+		t.Fatalf("input after escape = %q, want empty", got)
+	}
+	if len(m.completionItems()) != 0 {
+		t.Fatal("menu stayed open after escape")
+	}
+
+	updated, _ = m.Update(tea.KeyPressMsg{Text: "/", Code: '/'})
+	m = updated.(*model)
+	if got := m.inputText.Value(); got != "/" {
+		t.Fatalf("input after retyping = %q, want /", got)
+	}
+	if len(m.completionItems()) == 0 {
+		t.Fatal("menu did not reopen after the slash was typed again")
+	}
+}
+
+// A query typed after the slash survives the withdrawal as plain text.
+func TestEscapeKeepsTheQueryTextWithoutTheSlash(t *testing.T) {
+	m := sizedApprovalModel(t, 80, 24)
+	m.inputText.SetValue("/sta")
+	m.inputText.CursorEnd()
+	m.resizeLayout(true)
+	if len(m.completionItems()) == 0 {
+		t.Fatal("menu did not open for /sta")
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(*model)
+	if got := m.inputText.Value(); got != "sta" {
+		t.Fatalf("input after escape = %q, want sta", got)
+	}
+	if len(m.completionItems()) != 0 {
+		t.Fatal("menu stayed open after escape")
+	}
+}
+
+// Enter on a highlighted row selects that row instead of submitting the bare
+// text that opened the menu.
+func TestEnterRunsTheHighlightedCommand(t *testing.T) {
+	m := sizedApprovalModel(t, 80, 24)
+	m.inputText.SetValue("/")
+	m.inputText.CursorEnd()
+	m.resizeLayout(true)
+
+	// Scroll to /status, which takes no argument and reports itself.
+	for m.completionItems()[m.completionIndex].name != "/status" {
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		m = updated.(*model)
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(*model)
+	if got := m.inputText.Value(); got != "" {
+		t.Fatalf("input after enter = %q, want empty", got)
+	}
+	if !containsNotice(m, "Status:") {
+		t.Fatalf("enter did not run the highlighted /status: %+v", m.messages)
+	}
+}
+
+func TestEnterInsertsACommandThatNeedsArguments(t *testing.T) {
+	m := sizedApprovalModel(t, 80, 24)
+	m.inputText.SetValue("/sk")
+	m.inputText.CursorEnd()
+	m.resizeLayout(true)
+
+	// Matches are /skills then /skill; select the one that takes a name.
+	for m.completionItems()[m.completionIndex].name != "/skill" {
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		m = updated.(*model)
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(*model)
+	if got := m.inputText.Value(); got != "/skill " {
+		t.Fatalf("input = %q, want /skill plus a space", got)
+	}
+	if len(m.completionItems()) != 0 {
+		t.Fatal("menu stayed open after inserting a command with an argument")
 	}
 }

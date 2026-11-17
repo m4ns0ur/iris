@@ -44,15 +44,15 @@ The input grows upward, up to roughly one third of the terminal (hard limit: 14 
 
 | Binding | Action |
 | --- | --- |
-| `Enter` | Send the prompt or run a `/command` |
+| `Enter` | Send the prompt, or run the highlighted slash command (inserted instead when it needs an argument) |
 | `Enter` (streaming) | Queue a steering instruction for the next turn |
 | `Shift+Enter` | Insert a newline when the terminal reports it distinctly |
 | `Ctrl+J` | Insert a newline (works even when the terminal collapses Shift+Enter into Enter) |
 | `Alt+Enter` (idle) | Insert a newline |
 | `Alt+Enter` (streaming) | Queue a follow-up for when the run finishes |
-| `Up` / `Down` | Recall prompt history from the first line; `Down` moves forward through it and restores the draft |
-| `Tab` | Complete a slash command |
-| `Esc` | Jump to the tail when scrolled up |
+| `Up` / `Down` | Recall prompt history from the first line, or move through the slash-command menu while it is open; `Down` moves forward and restores the draft |
+| `Tab` | Insert the highlighted slash command without running it |
+| `Esc` | Jump to the tail when scrolled up, or leave slash-command entry by removing the leading `/` |
 | `PgUp` / `PgDn`, `Ctrl+U` / `Ctrl+D` | Scroll history |
 | Mouse wheel | Scroll history |
 | `Ctrl+E` | Toggle tool output and detailed run summaries |
@@ -116,7 +116,9 @@ The full command is wrapped, keeping both ends when it is too long to display co
 | `/help`, `/?` | List commands and keys. Available while streaming. |
 | `/quit`, `/exit` | Quit Iris. |
 
-Typing `/` opens a completion menu above the input. `Tab` accepts the highlighted command; `Esc` dismisses the menu. `Up`/`Down` navigate the menu.
+Typing `/` opens a completion menu above the input. `Up`/`Down` move through every match, not only the rows that fit: the menu shows as many rows as the terminal allows and scrolls with the selection, and the status hint reports the position (`↑↓ 7/13`) so the rest of the list stays discoverable. Editing the query moves the highlight back to the first match, and it also undoes an `Esc` dismissal, so the menu returns when the prompt changes.
+
+`Enter` acts on the highlighted command rather than on the bare text that opened the menu: a command that needs no argument runs at once, and one that needs an argument (its usage is written `<name>`) is inserted with a trailing space so the argument can be typed. `Tab` inserts the highlighted command without running it. `Esc` leaves command entry instead of only closing the popup: it removes the leading `/`, so a prompt that was just `/` becomes empty and ready for a normal message, while anything typed after the slash stays as plain text.
 
 Unknown commands produce a notice. Session-mutating commands persist the current session first and are unavailable while a run is active; `/clear-queue`, `/help`, `/status`, and `/quit` remain available. The TUI uses the same durable recorder as the headless modes: user messages, assistant tool calls, and tool results are on disk while the run is still in progress. Recovered sessions show interrupted tool calls in the transcript. Tool history is rebuilt on resume from the recorded results, so a resumed session shows the same tool names, targets, status, and result summaries; per-call durations are not persisted. After each settled run the TUI appends the compact execution summary described in [Execution Summaries](execution.md#execution-summaries); the detailed counters are available through `/status` or `Ctrl+E`.
 

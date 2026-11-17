@@ -31,7 +31,10 @@ go.work.sum
 # .idea/
 # .vscode/
 
+# Go build cache
+.gocache/
+
 # Project-specific ignores
-workspace/
 iris_*.log
 iris
+

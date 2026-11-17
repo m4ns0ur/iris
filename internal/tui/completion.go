@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
@@ -42,18 +43,11 @@ func (m *model) completionItems() []commandSpec {
 	if strings.ContainsAny(raw, " \t\n") {
 		return nil
 	}
-	if m.completionDismissed == raw {
-		return nil
-	}
-
 	matches := make([]commandSpec, 0, len(commandSpecs))
 	for _, spec := range commandSpecs {
 		if strings.HasPrefix(spec.name, value) {
 			matches = append(matches, spec)
 		}
-	}
-	if len(matches) > 6 {
-		matches = matches[:6]
 	}
 	return matches
 }
@@ -65,12 +59,54 @@ func (m *model) completionLimit() int {
 	return max(min(m.height/3, 6), 2)
 }
 
-func (m *model) visibleCompletionItems() []commandSpec {
+// completionWindow returns the visible slice of matches and its offset in the
+// full list. The window follows the selection, so every match is reachable even
+// when the menu can only show a few rows.
+func (m *model) completionWindow() (int, []commandSpec) {
 	items := m.completionItems()
-	if limit := m.completionLimit(); len(items) > limit {
-		items = items[:limit]
+	if len(items) == 0 {
+		return 0, nil
 	}
+	limit := m.completionLimit()
+	if len(items) <= limit {
+		return 0, items
+	}
+
+	selected := m.completionIndex
+	if selected < 0 {
+		selected = 0
+	}
+	if selected >= len(items) {
+		selected = len(items) - 1
+	}
+
+	start := selected - limit + 1
+	if start < 0 {
+		start = 0
+	}
+	if start > len(items)-limit {
+		start = len(items) - limit
+	}
+	return start, items[start : start+limit]
+}
+
+func (m *model) visibleCompletionItems() []commandSpec {
+	_, items := m.completionWindow()
 	return items
+}
+
+// completionPosition reports the 1-based selection and the match count, for the
+// status hint that tells the reader the menu continues past the visible rows.
+func (m *model) completionPosition() (int, int) {
+	items := m.completionItems()
+	if len(items) == 0 {
+		return 0, 0
+	}
+	selected := m.completionIndex
+	if selected < 0 || selected >= len(items) {
+		selected = 0
+	}
+	return selected + 1, len(items)
 }
 
 func (m *model) completionHeight() int {
@@ -89,7 +125,7 @@ func (m *model) completionRule() string {
 }
 
 func (m *model) moveCompletion(delta int) {
-	items := m.visibleCompletionItems()
+	items := m.completionItems()
 	if len(items) == 0 {
 		return
 	}
@@ -99,8 +135,54 @@ func (m *model) moveCompletion(delta int) {
 	}
 }
 
+// dismissCompletion leaves command entry: it removes the leading slash that
+// opened the menu, so Escape returns the prompt to ordinary text instead of
+// leaving a command prefix behind. Text typed after the slash is the command
+// query and stays as plain text, editable like anything else.
+func (m *model) dismissCompletion() {
+	value := m.inputText.Value()
+	if trimmed := strings.TrimPrefix(value, "/"); trimmed != value {
+		m.inputText.SetValue(trimmed)
+		m.inputText.CursorEnd()
+	}
+	m.completionIndex = 0
+	m.resizeLayout(false)
+}
+
+// completionNeedsInput reports whether a command expects an argument before it
+// can run. Required arguments are written as "<name>" in the usage string;
+// optional ones use brackets.
+func completionNeedsInput(spec commandSpec) bool {
+	return strings.HasPrefix(strings.TrimSpace(spec.usage), "<")
+}
+
+// runCompletion applies the highlighted command to the prompt. Commands that
+// take no required argument run immediately, the way Enter behaves everywhere
+// else; a command that needs an argument is inserted so the argument can be
+// typed without running it half-finished.
+func (m *model) runCompletion() tea.Cmd {
+	items := m.completionItems()
+	if len(items) == 0 {
+		return nil
+	}
+	index := m.completionIndex
+	if index < 0 || index >= len(items) {
+		index = 0
+	}
+	spec := items[index]
+	if completionNeedsInput(spec) {
+		m.acceptCompletion()
+		return nil
+	}
+
+	m.inputText.SetValue(spec.name)
+	m.inputText.CursorEnd()
+	m.completionIndex = 0
+	return m.submitInput()
+}
+
 func (m *model) acceptCompletion() {
-	items := m.visibleCompletionItems()
+	items := m.completionItems()
 	if len(items) == 0 {
 		return
 	}
@@ -110,16 +192,17 @@ func (m *model) acceptCompletion() {
 	m.inputText.SetValue(items[m.completionIndex].name + " ")
 	m.inputText.CursorEnd()
 	m.completionIndex = 0
-	m.completionDismissed = ""
 	m.resizeLayout(false)
 }
 
 func (m *model) completionView() string {
-	items := m.visibleCompletionItems()
+	start, items := m.completionWindow()
 	if len(items) == 0 {
 		return ""
 	}
-	selected := m.completionIndex
+	// The selection is an index into the full match list, so map it into the
+	// visible window before highlighting a row.
+	selected := m.completionIndex - start
 	if selected < 0 || selected >= len(items) {
 		selected = 0
 	}
