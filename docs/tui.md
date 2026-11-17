@@ -65,7 +65,8 @@ The input grows upward, up to roughly one third of the terminal (hard limit: 14 
 | `Esc` | Jump to the tail when scrolled up, or leave slash-command entry by removing the leading `/` |
 | `PgUp` / `PgDn`, `Ctrl+U` / `Ctrl+D` | Scroll history |
 | Mouse wheel | Scroll history |
-| `Ctrl+E` | Toggle tool output and detailed run summaries |
+| `Ctrl+O` | Expand or collapse the newest tool result (the key hint appears on that ledger line) |
+| `Ctrl+E` | Toggle every tool output and detailed run summaries |
 | `Ctrl+R` | Toggle reasoning text |
 | `Ctrl+C` (idle) | Quit |
 | `Ctrl+C` (streaming) | Abort the current run and restore queued instructions to the input; press again to quit |
@@ -89,7 +90,7 @@ The input box stays editable while Iris is streaming. `Enter` queues a steering 
 - Reasoning is collapsed to one `⋯ reasoning · ~N tok` line by default. `Ctrl+R` expands it.
 - Tool calls are one line: status, tool, target, duration, and a short result (line count, edit delta, exit code). The duration excludes time spent waiting for approval.
   - Failures always show a detail line. A shell command that exits non-zero is treated as a failure even though execution completed.
-  - Successful tool output is hidden by default. `Ctrl+E` shows a bounded head/tail and the full-output path when one exists.
+  - Successful tool output is hidden by default, and a line with output says so: `✓ shell  go test ./... · 214 lines · 1.2s · ctrl+o`. `Ctrl+O` expands or collapses just the newest result; `Ctrl+E` expands every result at once. Both show a bounded head/tail and the full-output path when one exists. The first run that hides output ends with a one-line hint naming both keys.
 - Run outcomes are one line (`✓ done · 2 tools · 3 req · 5.1k tok · 8s`). When files changed, a second line reports the count and points to `/status`. `Ctrl+E` lists the changed files.
 - Notices are one-line `·` entries; errors are `✗` entries. Only the text that needs attention is multi-line.
 

@@ -14,11 +14,19 @@ import (
 )
 
 // renderKey identifies the inputs that change how a stored message is drawn.
-// Width changes on resize, and the two detail toggles are global.
+// Width changes on resize, the two detail toggles are global, and a tool result
+// can expand on its own, so the flag is part of the key and only that message
+// re-renders when it flips.
 type renderKey struct {
 	width     int
 	verbose   bool
 	reasoning bool
+	// expanded is the message's own result expansion. expandable is whether
+	// this entry currently carries the Ctrl+O hint: it moves to the newest
+	// result, so a cached line would otherwise keep advertising the key after
+	// the next tool call arrived.
+	expanded   bool
+	expandable bool
 }
 
 func (m *model) currentRenderKey() renderKey {
@@ -40,6 +48,8 @@ func (m *model) renderCached(msg *message) string {
 		return m.renderHeader(*msg)
 	}
 	key := m.currentRenderKey()
+	key.expanded = msg.expanded
+	key.expandable = msg.role == "tool" && msg.toolCallID != "" && msg.toolCallID == m.expandableTool
 	if msg.rendered != "" && msg.renderKey == key {
 		return msg.rendered
 	}
@@ -272,7 +282,9 @@ func (m *model) renderTool(msg message) string {
 		name = "tool"
 	}
 
-	meta := make([]string, 0, 4)
+	visible := m.toolOutputVisible(msg, status)
+
+	meta := make([]string, 0, 6)
 	if msg.toolMeta != "" {
 		meta = append(meta, sanitizeLine(msg.toolMeta))
 	}
@@ -285,6 +297,7 @@ func (m *model) renderTool(msg message) string {
 	if status == "interrupted" {
 		meta = append(meta, "interrupted")
 	}
+	meta = append(meta, m.toolOutputHint(msg, visible)...)
 
 	line := "  " + glyphStyle.Render(glyph) + " " + stylePurple.Render(name)
 	target := sanitizeLine(msg.toolTarget)
@@ -302,18 +315,48 @@ func (m *model) renderTool(msg message) string {
 		line += "    " + styleRed.Render(detail) + "\n"
 	}
 
-	if msg.toolOutput != "" && (m.showToolOutput || status == "error") {
+	if visible {
 		line += m.renderToolOutput(msg)
 	}
 
 	return line
 }
 
-func (m *model) renderToolOutput(msg message) string {
-	limit := 8
-	if m.showToolOutput {
-		limit = 16
+// toolOutputLimit is how many output lines a ledger entry shows.
+func (m *model) toolOutputLimit(msg message) int {
+	if m.showToolOutput || msg.expanded {
+		return 16
 	}
+	return 8
+}
+
+// toolOutputVisible reports whether the result body is rendered for this entry.
+// Failures always show their output so the cause is visible without a toggle.
+func (m *model) toolOutputVisible(msg message, status string) bool {
+	if msg.toolOutput == "" {
+		return false
+	}
+	return m.showToolOutput || msg.expanded || status == "error"
+}
+
+// toolOutputHint names the per-result toggle on the ledger line whose output is
+// hidden. The line count itself is already part of the tool metadata, so the
+// hint adds only the key that opens this entry.
+func (m *model) toolOutputHint(msg message, visible bool) []string {
+	if msg.toolOutput == "" {
+		return nil
+	}
+	if visible && countLines(msg.toolOutput) <= m.toolOutputLimit(msg) {
+		return nil
+	}
+	if msg.toolCallID == "" || msg.toolCallID != m.expandableTool {
+		return nil
+	}
+	return []string{"ctrl+o"}
+}
+
+func (m *model) renderToolOutput(msg message) string {
+	limit := m.toolOutputLimit(msg)
 	output := strings.TrimRight(msg.toolOutput, "\n")
 	if output == "" {
 		return ""

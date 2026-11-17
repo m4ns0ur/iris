@@ -153,6 +153,8 @@ type model struct {
 	completionIndex int
 	markFrame       int
 	markStep        int
+	expandableTool  string
+	toolHintShown   bool
 	lastSummary     *agent.RunSummary
 }
 
@@ -172,6 +174,7 @@ type message struct {
 	toolOutputPath string
 	toolDuration   time.Duration
 	toolExit       int
+	expanded       bool
 
 	// Summary fields.
 	runSummary *agent.RunSummary
@@ -218,6 +221,8 @@ func (m *model) contentWidth() int {
 }
 
 func (m *model) buildContent() string {
+	m.syncExpandableTool()
+
 	var sb strings.Builder
 	previous := ""
 	for index := range m.messages {
@@ -402,6 +407,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showReasoning = !m.showReasoning
 			m.resizeLayout(false)
 			return m, nil
+		case "ctrl+o":
+			if m.toggleNewestToolOutput() {
+				return m, nil
+			}
 		}
 	}
 
@@ -1136,6 +1145,7 @@ func (m *model) handleAgentEvent(event agent.Event) (tea.Model, tea.Cmd) {
 			})
 		}
 
+		m.hintHiddenToolOutput()
 		m.canceling = false
 		m.compacting = false
 		m.awaitingResponse = false
@@ -1517,6 +1527,56 @@ func (m *model) finishToolFailed(e agent.ToolFailed) {
 		toolDuration: duration,
 		toolDetail:   detail,
 	})
+}
+
+// syncExpandableTool remembers which result Ctrl+O acts on: the newest tool
+// entry that has output to show.
+func (m *model) syncExpandableTool() {
+	m.expandableTool = ""
+	for index := len(m.messages) - 1; index >= 0; index-- {
+		msg := &m.messages[index]
+		if msg.role == "tool" && msg.toolOutput != "" {
+			m.expandableTool = msg.toolCallID
+			return
+		}
+	}
+}
+
+// toggleNewestToolOutput flips the newest tool result that has output and
+// reports whether one was found.
+func (m *model) toggleNewestToolOutput() bool {
+	for index := len(m.messages) - 1; index >= 0; index-- {
+		msg := &m.messages[index]
+		if msg.role != "tool" || msg.toolOutput == "" {
+			continue
+		}
+		msg.expanded = !msg.expanded
+		m.resizeLayout(false)
+		return true
+	}
+	return false
+}
+
+// hintHiddenToolOutput explains the detail keys once, at the end of the first
+// run that hid tool output. It stays out of the tool ledger itself, where a
+// notice would split the tight run of tool lines.
+func (m *model) hintHiddenToolOutput() {
+	if m.toolHintShown || m.showToolOutput {
+		return
+	}
+	hidden := false
+	for index := range m.messages {
+		msg := &m.messages[index]
+		if msg.role == "tool" && msg.toolOutput != "" && !msg.expanded {
+			hidden = true
+			break
+		}
+	}
+	if !hidden {
+		return
+	}
+	m.toolHintShown = true
+	m.notice("Tool output is hidden. Ctrl+O expands the newest result; Ctrl+E expands every result.")
 }
 
 // takeActiveTool removes and returns the active call matching an id, falling
